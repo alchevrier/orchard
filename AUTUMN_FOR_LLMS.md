@@ -74,9 +74,10 @@ dependencies {
 }
 ```
 
-## 7. User Interfaces (WasmJS / Compose)
-UI rendering in Autumn is highly deterministic, moving away from reactive states towards FSM (Finite State Machine) Circuit Binders.
+## 7. User Interfaces & Configuration (WasmJS / Compose)
+UI rendering in Autumn is highly deterministic, moving away from reactive states towards FSM (Finite State Machine) Circuit Binders and ADR-0002 Config Pools.
 - **Rule:** Do not manage local states or callbacks directly in the view. Wrap the view inside an `AutumnCircuitBinder`.
+- **Rule:** Do not hardcode strings on the hotpath. The `AutumnMotherboard` maps JSON configs mechanically into `ByteArrayBucketPool` records containing integer offsets into a `StringRegistry`.
 - **Pattern:** The Binder hooks into the `AutumnMotherboard` and acts as a one-way renderer when the FSM pulses.
 ```kotlin
 class DemoCircuitBinder(val motherboard: AutumnMotherboard) : AutumnCircuitBinder(
@@ -85,7 +86,18 @@ class DemoCircuitBinder(val motherboard: AutumnMotherboard) : AutumnCircuitBinde
 ) {
     fun renderTo(element: Any) {
         val config = motherboard.configManager
+        val registry = motherboard.stringRegistry
+        
         // Iterate over Config Buckets and render elements iteratively (without allocations)
+        val count = config.resources.size
+        for (i in 0 until count) {
+            val res = config.resources[i]
+            // Decode the pointer from the BucketPool into an actual String reference
+            val type = registry.getString(res.typeId) 
+            val path = registry.getString(res.pathRefId)
+            
+            // Build the Native UI tree / Compose Node mechanically...
+        }
     }
 }
 ```
