@@ -1,4 +1,4 @@
-# ADR 021: Read-Only Repository Binding
+# ADR 023: Read-Only Repository Binding
 
 ## Status
 Accepted
