@@ -8,6 +8,8 @@ import com.orchard.backend.vector.OllamaGenerateRequest
 import com.orchard.backend.vector.OllamaOptions
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceRepository
+import com.orchard.backend.workspace.RepositoryBindingStore
+import com.orchard.backend.workspace.RepositoryView
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
 import com.orchard.backend.workspace.ENTITY_EPIC
@@ -17,7 +19,11 @@ import com.orchard.backend.workspace.ENTITY_TASK
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.WorkspaceStore
 import io.ktor.client.request.get
+import io.ktor.client.request.put
+import io.ktor.client.request.setBody
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -271,5 +277,58 @@ class WorkspaceApiTest {
 
         assertEquals(HttpStatusCode.OK, response.status)
         assertTrue(response.headers["Content-Type"].orEmpty().startsWith("application/json"))
+    }
+
+    @Test
+    fun repositoryBindingRouteDistinguishesProjectAndRepositoryFailures() = testApplication {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) {
+                require(requestedPath == "/valid/repository")
+            }
+
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_PROJECT, DEFAULT_DELIVERY_WORKFLOW_ID, title = "API")))
+        workspace.commitBatch()
+        application { workspaceApi(workspace) }
+
+        val bound = client.put("/api/projects/1/repository") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"path":"/valid/repository"}""")
+        }
+        val missing = client.put("/api/projects/99/repository") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"path":"/valid/repository"}""")
+        }
+        val invalid = client.put("/api/projects/1/repository") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"path":"/invalid"}""")
+        }
+
+        assertEquals(HttpStatusCode.OK, bound.status)
+        assertEquals(HttpStatusCode.NotFound, missing.status)
+        assertEquals(HttpStatusCode.UnprocessableEntity, invalid.status)
+    }
+
+    @Test
+    fun repositoryBindingRouteReportsStorageFailure() = testApplication {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = error("disk full")
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_PROJECT, DEFAULT_DELIVERY_WORKFLOW_ID, title = "API")))
+        workspace.commitBatch()
+        application { workspaceApi(workspace) }
+
+        val response = client.put("/api/projects/1/repository") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"path":"/valid/repository"}""")
+        }
+
+        assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
     }
 }

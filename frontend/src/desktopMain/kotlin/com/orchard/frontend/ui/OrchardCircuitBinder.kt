@@ -35,8 +35,9 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -51,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -60,7 +62,10 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.DesktopNetworkClient
+import com.orchard.frontend.network.RepositoryResponse
 import com.orchard.frontend.network.WorkspaceSnapshotResponse
+import java.io.File
+import javax.swing.JFileChooser
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -93,6 +98,7 @@ private data class WorkspaceSnapshot(
     val entities: List<WorkspaceEntity>,
     val focusId: Int,
     val message: String,
+    val repositories: Map<Int, RepositoryResponse>,
 )
 
 class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
@@ -103,6 +109,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
     fun render() {
         var prompt by remember { mutableStateOf("") }
         var isSubmitting by remember { mutableStateOf(false) }
+        var isBindingRepository by remember { mutableStateOf(false) }
         var requestError by remember { mutableStateOf<String?>(null) }
         var selectedProjectId by remember { mutableStateOf(0) }
         var selectedEpicId by remember { mutableStateOf(0) }
@@ -123,6 +130,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             ?: epicForFocus(snapshot)
             ?: epics.firstOrNull()?.id
             ?: 0
+        val activeRepository = snapshot.repositories[activeProjectId]
 
         fun submitPrompt() {
             val message = prompt.trim()
@@ -154,7 +162,21 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                     projectId = activeProjectId,
                     epics = epics,
                     epicId = activeEpicId,
+                    repository = activeRepository,
+                    isBindingRepository = isBindingRepository,
                     onSelectEpic = { selectedEpicId = it },
+                    onBindRepository = {
+                        val selectedPath = chooseRepositoryDirectory(activeRepository?.path)
+                        if (activeProjectId != 0 && selectedPath != null) {
+                            isBindingRepository = true
+                            requestError = null
+                            scope.launch {
+                                bindRepository(activeProjectId, selectedPath)
+                                    .onFailure { requestError = it.message ?: "Unable to bind the repository." }
+                                isBindingRepository = false
+                            }
+                        }
+                    },
                     onRefresh = {
                         scope.launch {
                             requestError = null
@@ -182,6 +204,10 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
     private suspend fun sendArchitectPrompt(prompt: String): Result<Unit> = executeRequest {
         networkClient.submitArchitectPrompt(prompt)
+    }
+
+    private suspend fun bindRepository(projectId: Int, path: String): Result<Unit> = executeRequest {
+        networkClient.bindRepository(projectId, path)
     }
 
     private suspend fun executeRequest(request: suspend () -> WorkspaceSnapshotResponse): Result<Unit> {
@@ -212,7 +238,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 }
             }
         }
-        return WorkspaceSnapshot(entities, focusId, message)
+        return WorkspaceSnapshot(entities, focusId, message, response.repositories)
     }
 
     private fun actionValue(action: String, key: String): Int {
@@ -311,7 +337,10 @@ private fun WorkspaceBoard(
     projectId: Int,
     epics: List<WorkspaceEntity>,
     epicId: Int,
+    repository: RepositoryResponse?,
+    isBindingRepository: Boolean,
     onSelectEpic: (Int) -> Unit,
+    onBindRepository: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val project = snapshot.entities.firstOrNull { it.id == projectId }
@@ -330,6 +359,13 @@ private fun WorkspaceBoard(
                 Icon(Icons.Default.Refresh, contentDescription = "Refresh workspace", tint = OrchardColors.muted)
             }
         }
+        Divider(color = OrchardColors.divider)
+        RepositoryBar(
+            repository = repository,
+            hasProject = project != null,
+            isBinding = isBindingRepository,
+            onBind = onBindRepository,
+        )
         Divider(color = OrchardColors.divider)
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 32.dp),
@@ -360,6 +396,72 @@ private fun WorkspaceBoard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RepositoryBar(
+    repository: RepositoryResponse?,
+    hasProject: Boolean,
+    isBinding: Boolean,
+    onBind: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(OrchardColors.canvas).padding(horizontal = 32.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 20.dp)) {
+            Text("REPOSITORY", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.muted)
+            if (repository == null) {
+                Text("No local repository bound", color = OrchardColors.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+            } else {
+                Text(
+                    repository.path,
+                    color = OrchardColors.ink,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                val details = if (repository.available) {
+                    listOf(
+                        repository.branch,
+                        repository.buildSystem,
+                        if (repository.dirty) "Uncommitted changes" else "Clean",
+                        repository.remote.takeIf { it.isNotBlank() },
+                    ).filterNotNull().joinToString("  |  ")
+                } else {
+                    "Repository unavailable"
+                }
+                Text(details, color = if (repository.available) OrchardColors.muted else OrchardColors.clay, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        TextButton(onClick = onBind, enabled = hasProject && !isBinding) {
+            if (isBinding) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = OrchardColors.moss)
+                Spacer(Modifier.width(7.dp))
+                Text("Binding", color = OrchardColors.moss)
+            } else {
+                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(7.dp))
+                Text(if (repository == null) "Bind repository" else "Change repository", color = OrchardColors.moss)
+            }
+        }
+    }
+}
+
+private fun chooseRepositoryDirectory(currentPath: String?): String? {
+    val chooser = JFileChooser().apply {
+        dialogTitle = "Bind local Git repository"
+        fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+        isAcceptAllFileFilterUsed = false
+        currentPath?.let { currentDirectory = File(it) }
+    }
+    return if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
+        chooser.selectedFile.absolutePath
+    } else {
+        null
     }
 }
 
@@ -477,7 +579,7 @@ private fun ArchitectPanel(
                 if (isSubmitting) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = OrchardColors.moss)
                 } else {
-                    Icon(Icons.Default.Send, contentDescription = "Send to Architect", tint = OrchardColors.moss)
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send to Architect", tint = OrchardColors.moss)
                 }
             }
         }

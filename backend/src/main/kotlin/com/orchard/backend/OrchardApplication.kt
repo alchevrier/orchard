@@ -5,7 +5,9 @@ import com.orchard.backend.agent.ArchitectService
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.vector.OllamaClient
 import com.orchard.backend.workspace.MESSAGE_READY
+import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
+import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkspaceStore
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -18,12 +20,17 @@ import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 fun main() {
     OrchardPaths.initialize()
-    val workspace = WorkspaceStore(FileWorkspaceRepository(OrchardPaths.WORKSPACE_DIR))
+    val workspace = WorkspaceStore(
+        FileWorkspaceRepository(OrchardPaths.WORKSPACE_DIR),
+        FileRepositoryBindingStore(OrchardPaths.WORKSPACE_DIR),
+    )
     val modelProvider = OllamaClient()
     val architect = ArchitectService(workspace, modelProvider)
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
@@ -47,8 +54,27 @@ fun Application.workspaceApi(workspace: WorkspaceStore) {
         get("/api/workspace") {
             call.respond(workspace.snapshot(MESSAGE_READY))
         }
+        put("/api/projects/{projectId}/repository") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val request = runCatching { call.receive<BindRepositoryRequest>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || request == null || request.path.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@put
+            }
+            val result = workspace.bindRepository(projectId, request.path)
+            val status = when (result.status) {
+                RepositoryBindStatus.BOUND -> HttpStatusCode.OK
+                RepositoryBindStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+                RepositoryBindStatus.INVALID_REPOSITORY -> HttpStatusCode.UnprocessableEntity
+                RepositoryBindStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result.snapshot)
+        }
     }
 }
+
+@Serializable
+data class BindRepositoryRequest(val path: String)
 
 fun Application.architectApi(architect: ArchitectService) {
     configureJson()

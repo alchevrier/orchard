@@ -7,7 +7,9 @@ import com.orchard.backend.workspace.ENTITY_EPIC
 import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.ENTITY_STORY
 import com.orchard.backend.workspace.ENTITY_TASK
+import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
+import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceRepository
 import com.orchard.backend.workspace.WorkspaceStore
@@ -116,6 +118,47 @@ class WorkspaceRepositoryTest {
         assertEquals(0, store.entityCount)
     }
 
+    @Test
+    fun repositoryBindingRecoversCanonicalRootAndLiveMetadata() = withTempDirectory { directory ->
+        val workspaceDirectory = directory.resolve("workspace")
+        val repositoryDirectory = directory.resolve("bound-repository")
+        val nestedDirectory = repositoryDirectory.resolve("src/main")
+        Files.createDirectories(nestedDirectory)
+        Files.writeString(repositoryDirectory.resolve("settings.gradle.kts"), "rootProject.name = \"bound\"\n")
+        runCommand(repositoryDirectory, "git", "init", "--initial-branch=main")
+
+        val firstStore = WorkspaceStore(
+            FileWorkspaceRepository(workspaceDirectory),
+            FileRepositoryBindingStore(workspaceDirectory),
+        )
+        firstStore.beginBatch()
+        assertTrue(firstStore.applyIntent(intent(ENTITY_PROJECT, "Bound")))
+        firstStore.commitBatch()
+
+        val result = firstStore.bindRepository(1, nestedDirectory.toString())
+
+        assertEquals(RepositoryBindStatus.BOUND, result.status)
+        assertEquals(repositoryDirectory.toRealPath().toString(), result.snapshot.repositories.getValue(1).path)
+
+        val recoveredStore = WorkspaceStore(
+            FileWorkspaceRepository(workspaceDirectory),
+            FileRepositoryBindingStore(workspaceDirectory),
+        )
+        val repository = recoveredStore.snapshot(0).repositories.getValue(1)
+        assertEquals(repositoryDirectory.toRealPath().toString(), repository.path)
+        assertEquals("main", repository.branch)
+        assertEquals("Gradle", repository.buildSystem)
+        assertTrue(repository.available)
+        assertTrue(repository.dirty)
+
+        Files.walk(repositoryDirectory).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
+        val unavailable = recoveredStore.snapshot(0).repositories.getValue(1)
+        assertEquals(repository.path, unavailable.path)
+        assertTrue(!unavailable.available)
+    }
+
     private fun intent(
         type: Int,
         title: String,
@@ -141,5 +184,11 @@ class WorkspaceRepositoryTest {
                 paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
             }
         }
+    }
+
+    private fun runCommand(directory: Path, vararg command: String) {
+        val process = ProcessBuilder(command.toList()).directory(directory.toFile()).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        check(process.waitFor() == 0) { "Command ${command.joinToString(" ")} failed: $output" }
     }
 }

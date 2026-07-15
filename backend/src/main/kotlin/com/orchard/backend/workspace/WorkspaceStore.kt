@@ -22,6 +22,7 @@ const val MESSAGE_WORKFLOW_PARENT_REQUIRED = 7
 const val MESSAGE_WORKFLOW_HIERARCHY = 8
 const val MESSAGE_BATCH_CREATED = 9
 const val MESSAGE_STORAGE_UNAVAILABLE = 10
+const val MESSAGE_REPOSITORY_BINDING = 11
 
 @Serializable
 data class WorkspaceResource(
@@ -31,7 +32,14 @@ data class WorkspaceResource(
 )
 
 @Serializable
-data class WorkspaceSnapshot(val resources: Map<String, WorkspaceResource>)
+data class WorkspaceSnapshot(
+    val resources: Map<String, WorkspaceResource>,
+    val repositories: Map<Int, RepositoryView> = emptyMap(),
+)
+
+enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
+
+data class RepositoryBindResult(val status: RepositoryBindStatus, val snapshot: WorkspaceSnapshot)
 
 @Serializable
 data class WorkspaceEntity(
@@ -46,6 +54,7 @@ data class WorkspaceEntity(
 
 class WorkspaceStore(
     private val repository: WorkspaceRepository = TransientWorkspaceRepository,
+    private val repositoryBindings: RepositoryBindingStore = TransientRepositoryBindingStore,
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -75,6 +84,7 @@ class WorkspaceStore(
     private var committedEntityCount = 0
     private var committedLastCreatedId = 0
     private var committedLastCreatedType = 0
+    private var repositoryMessage = ""
 
     init {
         restore(repository.load())
@@ -166,6 +176,26 @@ class WorkspaceStore(
     fun entityAt(index: Int): WorkspaceEntity = entities[index]
 
     @Synchronized
+    fun bindRepository(projectId: Int, path: String): RepositoryBindResult {
+        if (entity(projectId, ENTITY_PROJECT) == null) {
+            repositoryMessage = "The selected project does not exist."
+            return RepositoryBindResult(RepositoryBindStatus.PROJECT_NOT_FOUND, snapshot(MESSAGE_REPOSITORY_BINDING))
+        }
+        val status = try {
+            repositoryBindings.bind(projectId, path)
+            repositoryMessage = "Repository bound to the selected project."
+            RepositoryBindStatus.BOUND
+        } catch (_: IllegalArgumentException) {
+            repositoryMessage = "Select an existing directory inside a Git repository."
+            RepositoryBindStatus.INVALID_REPOSITORY
+        } catch (_: Exception) {
+            repositoryMessage = "The repository binding could not be saved."
+            RepositoryBindStatus.STORAGE_UNAVAILABLE
+        }
+        return RepositoryBindResult(status, snapshot(MESSAGE_REPOSITORY_BINDING))
+    }
+
+    @Synchronized
     fun snapshot(messageCode: Int): WorkspaceSnapshot {
         val resources = linkedMapOf<String, WorkspaceResource>()
         resources["focus"] = WorkspaceResource(
@@ -181,7 +211,10 @@ class WorkspaceStore(
                 action = "id=${entity.id};parent=${entity.parentId};status=${entity.status}",
             )
         }
-        return WorkspaceSnapshot(resources)
+        val projectIds = entities.take(committedEntityCount)
+            .filter { it.type == ENTITY_PROJECT }
+            .mapTo(linkedSetOf()) { it.id }
+        return WorkspaceSnapshot(resources, repositoryBindings.views(projectIds))
     }
 
     private fun appendEntity(entityType: Int, parentId: Int, title: String, content: String, workflowId: Long): Boolean {
@@ -283,6 +316,7 @@ class WorkspaceStore(
         MESSAGE_WORKFLOW_HIERARCHY -> "The Default Delivery workflow rejected the parent reference because the complete Project, Epic, and Story hierarchy does not exist or does not match."
         MESSAGE_BATCH_CREATED -> "Created $lastBatchCreatedCount governed items from the Architect plan."
         MESSAGE_STORAGE_UNAVAILABLE -> "The workspace could not be saved. No changes were applied."
+        MESSAGE_REPOSITORY_BINDING -> repositoryMessage
         else -> "Describe a project, epic, story, task, or bug to the Architect."
     }
 

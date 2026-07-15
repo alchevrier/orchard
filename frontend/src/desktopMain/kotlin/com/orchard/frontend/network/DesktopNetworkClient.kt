@@ -7,6 +7,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -23,6 +24,12 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
         client.post("http://127.0.0.1:8086/api/architect/chat") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             setBody(ArchitectChatRequest(prompt))
+        }.body()
+
+    suspend fun bindRepository(projectId: Int, path: String): WorkspaceSnapshotResponse =
+        client.put("http://127.0.0.1:8085/api/projects/$projectId/repository") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(BindRepositoryRequest(path))
         }.body()
 
     override fun close() {
@@ -48,11 +55,28 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
 private data class ArchitectChatRequest(val prompt: String)
 
 @Serializable
-data class WorkspaceSnapshotResponse(val resources: Map<String, WorkspaceResourceResponse> = emptyMap())
+private data class BindRepositoryRequest(val path: String)
+
+@Serializable
+data class WorkspaceSnapshotResponse(
+    val resources: Map<String, WorkspaceResourceResponse> = emptyMap(),
+    val repositories: Map<Int, RepositoryResponse> = emptyMap(),
+)
 
 @Serializable
 data class WorkspaceResourceResponse(
     val type: String,
     val path: String,
     val action: String,
+)
+
+@Serializable
+data class RepositoryResponse(
+    val projectId: Int,
+    val path: String,
+    val available: Boolean,
+    val branch: String = "",
+    val remote: String = "",
+    val dirty: Boolean = false,
+    val buildSystem: String = "Unknown",
 )

@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 2 complete - Filesystem Authority. Architect batches survive backend restarts through a checksummed journal and atomic snapshots. Downstream agent execution remains future work.
+> **Project status:** Milestone 3 complete - Repository Binding. Orchard projects can bind to local Git repositories and recover their canonical path after restart. Repository access remains read-only; governed lifecycle transitions and evidence contracts are next.
 
 ## Milestone 1: Local Architect MVP
 
@@ -55,6 +55,30 @@ Milestone 2 boundaries:
 - Database, vector, and embedding state beneath `~/.orchard/db` remains derived and rebuildable.
 - Corrupt authoritative snapshots fail startup rather than silently discarding state.
 
+## Milestone 3: Repository Binding
+
+An Orchard Project can now bind to a real local Git repository. The binding is durable authority, while branch, remote, working-tree state, availability, and build-system metadata are refreshed from the repository when the workspace is read.
+
+Delivered and verified:
+
+- Directory selection from the active Project in Compose Desktop.
+- Backend validation of absolute, existing directories inside Git worktrees.
+- Canonical normalization to the Git top-level directory.
+- Checksummed, atomically replaced `repository-bindings.json` authority keyed by Project ID.
+- Live branch, origin remote, clean/dirty state, and build-system inspection.
+- Gradle, Maven, Meson, CMake, Cargo, and Node build-system detection.
+- Missing or moved repositories remain bound and report unavailable without losing project state.
+- Read-only Git commands with optional index locking disabled.
+- Structured `404`, `422`, and `503` repository-binding outcomes.
+- Restart recovery and desktop/backend contract tests.
+
+Milestone 3 boundaries:
+
+- Orchard never fetches, checks out, stages, commits, or writes configuration in a bound repository.
+- A Project has at most one active local repository binding.
+- Repository metadata is context, not accepted completion evidence.
+- Lifecycle transitions and evidence contracts begin in Milestone 4.
+
 ## Architecture
 
 ```mermaid
@@ -66,6 +90,8 @@ flowchart LR
     PL --> VA[Typed decoding and deterministic validation]
     VA --> WS[WorkspaceStore projection]
     WS --> FS[Checksummed journal and atomic snapshot]
+    WS --> RB[Repository binding authority]
+    RB -->|Read-only Git inspection| GR[Local Git repository]
     WS -->|Serialized resource snapshot| UI
 ```
 
@@ -91,6 +117,7 @@ The chat request is `{ "prompt": "..." }` with a 4092-byte UTF-8 limit. Both API
 | Multi-intent | Let the model propose at most eight operations; Kotlin assigns IDs and commits or rolls back the batch. |
 | Authority | Keep hierarchy and workflow policy outside the model. |
 | Storage | Make human-readable filesystem records authoritative; indexes and embeddings are derived. |
+| Repository | Bind canonical local Git roots by Project ID and inspect them without mutation. |
 | Prompts | Keep system prompts as versioned resources. |
 
 See [docs/adrs](docs/adrs) for the decision history and proposed filesystem intelligence, workflow, and model-routing architecture.
@@ -100,6 +127,7 @@ See [docs/adrs](docs/adrs) for the decision history and proposed filesystem inte
 - Linux, macOS, or Windows with a Compose Desktop-compatible environment.
 - JDK 23 recommended. Kotlin `2.1.21` falls back to JVM target 23 when run with JDK 26.
 - `curl` for the combined launcher readiness check.
+- Git available on the local `PATH` for repository binding and inspection.
 - Ollama on `127.0.0.1:11434` with `phi3:mini` installed.
 
 ## Run
@@ -159,11 +187,11 @@ Backend startup creates the directory structure:
 `-- rag-shared/
 ```
 
-These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Corrupt journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
+These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Project bindings are stored in `repository-bindings.json`. Corrupt journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
 
 ## Next Milestones
 
-- Add status transitions for tasks and bugs.
+- **Milestone 4 - Governed lifecycle:** deterministic status transitions backed by explicit evidence contracts.
 - Derive project observations, candidate practices, and executable workflows from evidence.
 - Add role-based agent runs and evidence-based model routing.
 - Implement concrete classifier, chunker, embedder, and vector-index adapters.
