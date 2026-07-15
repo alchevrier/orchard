@@ -32,6 +32,24 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
             setBody(BindRepositoryRequest(path))
         }.body()
 
+    suspend fun startWorkflow(workItemId: Int): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/work-items/$workItemId/runs").body()
+
+    suspend fun submitEvidence(runId: Long, evidence: EvidenceSubmissionRequest): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/workflow-runs/$runId/evidence") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(evidence)
+        }.body()
+
+    suspend fun recordAttempt(runId: Long, attempt: AttemptSubmissionRequest): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/workflow-runs/$runId/attempts") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(attempt)
+        }.body()
+
+    suspend fun cancelWorkflow(runId: Long): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/workflow-runs/$runId/cancel").body()
+
     override fun close() {
         client.close()
     }
@@ -61,6 +79,7 @@ private data class BindRepositoryRequest(val path: String)
 data class WorkspaceSnapshotResponse(
     val resources: Map<String, WorkspaceResourceResponse> = emptyMap(),
     val repositories: Map<Int, RepositoryResponse> = emptyMap(),
+    val workflowRuns: List<WorkflowRunResponse> = emptyList(),
 )
 
 @Serializable
@@ -79,4 +98,83 @@ data class RepositoryResponse(
     val remote: String = "",
     val dirty: Boolean = false,
     val buildSystem: String = "Unknown",
+)
+
+@Serializable
+data class WorkflowRunResponse(
+    val runId: Long,
+    val state: String,
+    val context: ContextManifestResponse,
+    val workflow: ResolvedWorkflowResponse,
+    val evidence: List<EvidenceRecordResponse> = emptyList(),
+)
+
+@Serializable
+data class EvidenceSubmissionRequest(
+    val kind: String,
+    val revision: String,
+    val command: String,
+    val exitCode: Int,
+    val outputHash: String,
+    val summary: String,
+    val producer: String,
+)
+
+@Serializable
+data class AttemptSubmissionRequest(
+    val description: String,
+    val outcome: String,
+    val diagnosticHash: String,
+    val successful: Boolean,
+)
+
+@Serializable
+data class EvidenceRecordResponse(
+    val evidenceId: Long,
+    val kind: String,
+    val revision: String,
+    val passed: Boolean,
+)
+
+@Serializable
+data class ContextManifestResponse(
+    val workItemId: Int,
+    val repository: RepositoryHeadResponse,
+    val recalledEpisodes: List<EpisodeRecallResponse> = emptyList(),
+)
+
+@Serializable
+data class RepositoryHeadResponse(
+    val commitHash: String,
+)
+
+@Serializable
+data class EpisodeRecallResponse(
+    val episodeId: Long,
+    val score: Int,
+    val problem: String,
+    val failedApproaches: List<String> = emptyList(),
+    val resolution: String,
+    val evidenceSummary: String,
+    val sourceRevision: String,
+)
+
+@Serializable
+data class ResolvedWorkflowResponse(
+    val id: String,
+    val version: Int,
+    val evidenceContract: EvidenceContractResponse,
+)
+
+@Serializable
+data class EvidenceContractResponse(
+    val id: String,
+    val version: Int,
+    val requirements: List<EvidenceRequirementResponse>,
+)
+
+@Serializable
+data class EvidenceRequirementResponse(
+    val kind: String,
+    val description: String,
 )

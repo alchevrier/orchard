@@ -7,7 +7,12 @@ import com.orchard.backend.vector.OllamaClient
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
+import com.orchard.backend.workspace.FileWorkflowMemoryStore
 import com.orchard.backend.workspace.RepositoryBindStatus
+import com.orchard.backend.workspace.WorkflowStartStatus
+import com.orchard.backend.workspace.WorkflowMutationStatus
+import com.orchard.backend.workspace.EvidenceSubmission
+import com.orchard.backend.workspace.AttemptSubmission
 import com.orchard.backend.workspace.WorkspaceStore
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -30,6 +35,7 @@ fun main() {
     val workspace = WorkspaceStore(
         FileWorkspaceRepository(OrchardPaths.WORKSPACE_DIR),
         FileRepositoryBindingStore(OrchardPaths.WORKSPACE_DIR),
+        FileWorkflowMemoryStore(OrchardPaths.WORKSPACE_DIR),
     )
     val modelProvider = OllamaClient()
     val architect = ArchitectService(workspace, modelProvider)
@@ -70,7 +76,63 @@ fun Application.workspaceApi(workspace: WorkspaceStore) {
             }
             call.respond(status, result.snapshot)
         }
+        post("/api/work-items/{workItemId}/runs") {
+            val workItemId = call.parameters["workItemId"]?.toIntOrNull()
+            if (workItemId == null || workItemId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.startWorkflow(workItemId)
+            val status = when (result.status) {
+                WorkflowStartStatus.CREATED -> HttpStatusCode.Created
+                WorkflowStartStatus.WORK_ITEM_NOT_FOUND -> HttpStatusCode.NotFound
+                WorkflowStartStatus.UNSUPPORTED_ENTITY,
+                WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
+                WorkflowStartStatus.REPOSITORY_DIRTY -> HttpStatusCode.UnprocessableEntity
+                WorkflowStartStatus.ALREADY_STARTED -> HttpStatusCode.Conflict
+                WorkflowStartStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result.snapshot)
+        }
+        post("/api/workflow-runs/{runId}/evidence") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            val request = runCatching { call.receive<EvidenceSubmission>() }.getOrNull()
+            if (runId == null || runId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.submitEvidence(runId, request)
+            call.respond(workflowMutationStatus(result.status, HttpStatusCode.Created), result.snapshot)
+        }
+        post("/api/workflow-runs/{runId}/attempts") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            val request = runCatching { call.receive<AttemptSubmission>() }.getOrNull()
+            if (runId == null || runId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.recordAttempt(runId, request)
+            call.respond(workflowMutationStatus(result.status, HttpStatusCode.Created), result.snapshot)
+        }
+        post("/api/workflow-runs/{runId}/cancel") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (runId == null || runId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.cancelWorkflow(runId)
+            call.respond(workflowMutationStatus(result.status, HttpStatusCode.OK), result.snapshot)
+        }
     }
+}
+
+private fun workflowMutationStatus(status: WorkflowMutationStatus, success: HttpStatusCode): HttpStatusCode = when (status) {
+    WorkflowMutationStatus.RECORDED -> success
+    WorkflowMutationStatus.RUN_NOT_FOUND -> HttpStatusCode.NotFound
+    WorkflowMutationStatus.RUN_CLOSED -> HttpStatusCode.Conflict
+    WorkflowMutationStatus.INVALID_RECORD,
+    WorkflowMutationStatus.REVISION_INVALID -> HttpStatusCode.UnprocessableEntity
+    WorkflowMutationStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
 }
 
 @Serializable

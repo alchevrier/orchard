@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 3 complete - Repository Binding. Orchard projects can bind to local Git repositories and recover their canonical path after restart. Repository access remains read-only; governed lifecycle transitions and evidence contracts are next.
+> **Project status:** Milestone 4 complete - Governed Workflow Memory. Tasks and bugs now move from immutable admission through typed evidence and deterministic gate decisions to durable completion episodes that future work can recall.
 
 ## Milestone 1: Local Architect MVP
 
@@ -79,6 +79,36 @@ Milestone 3 boundaries:
 - Repository metadata is context, not accepted completion evidence.
 - Lifecycle transitions and evidence contracts begin in Milestone 4.
 
+## Milestone 4: Governed Workflow Memory
+
+Starting a Task or Bug creates an immutable workflow admission record rather than directly changing a board status. Orchard pins the complete work-item hierarchy and clean repository revision, resolves the built-in task or bug workflow, recalls relevant past work episodes, and durably publishes the run before projecting the item as In Progress. Attempts, evidence, decisions, cancellation, and completion are append-only workflow events.
+
+Delivered and verified:
+
+- Workflow runs with monotonic IDs and checksummed JSONL persistence.
+- Immutable context manifests containing Project, Epic, Story, Task/Bug, workflow version, and exact Git revision.
+- Separate task and bug evidence contracts; bug work additionally requires regression-test evidence.
+- Deterministic Project/type/workflow-scoped recall of up to three similar work episodes.
+- Recalled problems, failed approaches, successful resolutions, evidence summaries, and source revisions embedded in the historical run.
+- Clean-worktree admission and rejection of missing bindings, unavailable repositories, unborn `HEAD`, duplicate starts, and unsupported entity types.
+- Persist-before-publish semantics: a failed append leaves the item in Todo with no visible run.
+- Typed attempt and evidence records attached to admitted runs.
+- Git validation that evidence targets a real descendant revision with source changes from the pinned context.
+- Deterministic gate decisions from evidence kind, command, exit code, producer, revision, and output hash.
+- Passing retries supersede earlier failed evidence for the same gate without erasing the failed attempt.
+- Event-derived `EVIDENCE_PENDING`, `EVIDENCE_BLOCKED`, `DONE`, and `CANCELLED` run states and board projections.
+- Atomic completion decisions and immutable work episodes containing failed approaches, the accepted resolution, evidence summaries, and source revision.
+- Compose controls showing run state, pinned revision, gate progress, recalled precedent, and explicit cancellation.
+- Restart recovery preserves the original context even when the repository advances to a later revision.
+- A real-Git regression completes one Task, restarts the store, and proves a similar Task recalls the generated episode.
+
+Milestone 4 boundaries:
+
+- Orchard records evidence supplied by agents, CI, or other trusted producers; it does not execute build or test commands from evidence payloads.
+- Retry appends new evidence to the same run. Cross-run supersession and review approval are not yet modeled.
+- Cancellation closes a run without manufacturing a completion episode.
+- Approved project practices and repository instructions are not yet resolved into context manifests.
+
 ## Architecture
 
 ```mermaid
@@ -92,6 +122,9 @@ flowchart LR
     WS --> FS[Checksummed journal and atomic snapshot]
     WS --> RB[Repository binding authority]
     RB -->|Read-only Git inspection| GR[Local Git repository]
+    WS --> WM[Workflow runs and work episodes]
+    WS --> WE[Attempts, evidence, and decisions]
+    WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI
 ```
 
@@ -104,6 +137,10 @@ The backend exposes:
 
 - `GET http://127.0.0.1:8085/api/workspace`
 - `POST http://127.0.0.1:8086/api/architect/chat`
+- `POST http://127.0.0.1:8085/api/work-items/{id}/runs`
+- `POST http://127.0.0.1:8085/api/workflow-runs/{id}/attempts`
+- `POST http://127.0.0.1:8085/api/workflow-runs/{id}/evidence`
+- `POST http://127.0.0.1:8085/api/workflow-runs/{id}/cancel`
 
 The chat request is `{ "prompt": "..." }` with a 4092-byte UTF-8 limit. Both APIs return the same resource envelope, including non-success chat responses such as `409`, `422`, and `503`.
 
@@ -118,6 +155,7 @@ The chat request is `{ "prompt": "..." }` with a 4092-byte UTF-8 limit. Both API
 | Authority | Keep hierarchy and workflow policy outside the model. |
 | Storage | Make human-readable filesystem records authoritative; indexes and embeddings are derived. |
 | Repository | Bind canonical local Git roots by Project ID and inspect them without mutation. |
+| Workflow memory | Pin immutable context, derive lifecycle state from events, and recall scoped completed work. |
 | Prompts | Keep system prompts as versioned resources. |
 
 See [docs/adrs](docs/adrs) for the decision history and proposed filesystem intelligence, workflow, and model-routing architecture.
@@ -187,11 +225,11 @@ Backend startup creates the directory structure:
 `-- rag-shared/
 ```
 
-These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Project bindings are stored in `repository-bindings.json`. Corrupt journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
+These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Project bindings are stored in `repository-bindings.json`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt workspace journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
 
 ## Next Milestones
 
-- **Milestone 4 - Governed lifecycle:** deterministic status transitions backed by explicit evidence contracts.
 - Derive project observations, candidate practices, and executable workflows from evidence.
+- Add review approval, cross-run supersession, and repository instruction resolution.
 - Add role-based agent runs and evidence-based model routing.
 - Implement concrete classifier, chunker, embedder, and vector-index adapters.

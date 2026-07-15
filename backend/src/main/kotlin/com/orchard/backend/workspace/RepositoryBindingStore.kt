@@ -24,14 +24,22 @@ data class RepositoryView(
     val buildSystem: String = "Unknown",
 )
 
+data class RevisionValidation(
+    val commitHash: String,
+    val changedFromBase: Boolean,
+)
+
 interface RepositoryBindingStore {
     fun bind(projectId: Int, requestedPath: String)
     fun views(projectIds: Set<Int>): Map<Int, RepositoryView>
+    fun resolveHead(projectId: Int): RepositoryHead?
+    fun validateRevision(projectId: Int, baseRevision: String, targetRevision: String): RevisionValidation? = null
 }
 
 object TransientRepositoryBindingStore : RepositoryBindingStore {
     override fun bind(projectId: Int, requestedPath: String) = Unit
     override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+    override fun resolveHead(projectId: Int): RepositoryHead? = null
 }
 
 class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindingStore {
@@ -51,6 +59,45 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
     override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = bindings
         .filterKeys { it in projectIds }
         .mapValues { (_, binding) -> inspectExisting(binding) }
+
+    @Synchronized
+    override fun resolveHead(projectId: Int): RepositoryHead? {
+        val binding = bindings[projectId] ?: return null
+        val root = Path.of(binding.path)
+        if (!Files.isDirectory(root)) return null
+        val revision = runGit(root, "rev-parse", "--verify", "HEAD")
+        if (revision.exitCode != 0 || revision.output.isBlank()) return null
+        val status = runGit(root, "status", "--porcelain")
+        if (status.exitCode != 0) return null
+        val branch = runGit(root, "branch", "--show-current")
+        val remote = runGit(root, "config", "--get", "remote.origin.url")
+        return RepositoryHead(
+            projectId = projectId,
+            path = root.toRealPath().toString(),
+            commitHash = revision.output,
+            branch = branch.output.ifBlank { "detached" },
+            remote = remote.output.takeIf { remote.exitCode == 0 }.orEmpty(),
+            clean = status.output.isBlank(),
+        )
+    }
+
+    @Synchronized
+    override fun validateRevision(
+        projectId: Int,
+        baseRevision: String,
+        targetRevision: String,
+    ): RevisionValidation? {
+        if (!baseRevision.matches(GIT_HASH) || !targetRevision.matches(GIT_HASH)) return null
+        val binding = bindings[projectId] ?: return null
+        val root = Path.of(binding.path)
+        if (!Files.isDirectory(root)) return null
+        val canonicalTarget = runGit(root, "rev-parse", "--verify", "$targetRevision^{commit}")
+        if (canonicalTarget.exitCode != 0 || !canonicalTarget.output.matches(GIT_HASH)) return null
+        if (runGit(root, "merge-base", "--is-ancestor", baseRevision, canonicalTarget.output).exitCode != 0) return null
+        val diff = runGit(root, "diff", "--quiet", baseRevision, canonicalTarget.output)
+        if (diff.exitCode !in 0..1) return null
+        return RevisionValidation(canonicalTarget.output, changedFromBase = diff.exitCode == 1)
+    }
 
     private fun load(): Map<Int, RepositoryBinding> {
         Files.createDirectories(directory)
@@ -165,6 +212,7 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
         const val FORMAT_VERSION = 1
         const val COMMAND_TIMEOUT_SECONDS = 5L
         val compactJson = Json { encodeDefaults = true }
+        val GIT_HASH = Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
     }
 }
 

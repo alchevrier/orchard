@@ -38,6 +38,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -64,6 +66,7 @@ import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.DesktopNetworkClient
 import com.orchard.frontend.network.RepositoryResponse
 import com.orchard.frontend.network.WorkspaceSnapshotResponse
+import com.orchard.frontend.network.WorkflowRunResponse
 import java.io.File
 import javax.swing.JFileChooser
 import kotlinx.coroutines.launch
@@ -99,6 +102,7 @@ private data class WorkspaceSnapshot(
     val focusId: Int,
     val message: String,
     val repositories: Map<Int, RepositoryResponse>,
+    val workflowRuns: List<WorkflowRunResponse>,
 )
 
 class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
@@ -110,6 +114,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var prompt by remember { mutableStateOf("") }
         var isSubmitting by remember { mutableStateOf(false) }
         var isBindingRepository by remember { mutableStateOf(false) }
+        var startingWorkItemId by remember { mutableStateOf(0) }
+        var cancellingRunId by remember { mutableStateOf(0L) }
         var requestError by remember { mutableStateOf<String?>(null) }
         var selectedProjectId by remember { mutableStateOf(0) }
         var selectedEpicId by remember { mutableStateOf(0) }
@@ -164,6 +170,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                     epicId = activeEpicId,
                     repository = activeRepository,
                     isBindingRepository = isBindingRepository,
+                    startingWorkItemId = startingWorkItemId,
+                    cancellingRunId = cancellingRunId,
                     onSelectEpic = { selectedEpicId = it },
                     onBindRepository = {
                         val selectedPath = chooseRepositoryDirectory(activeRepository?.path)
@@ -174,6 +182,28 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                                 bindRepository(activeProjectId, selectedPath)
                                     .onFailure { requestError = it.message ?: "Unable to bind the repository." }
                                 isBindingRepository = false
+                            }
+                        }
+                    },
+                    onStartWorkflow = { workItemId ->
+                        if (startingWorkItemId == 0) {
+                            startingWorkItemId = workItemId
+                            requestError = null
+                            scope.launch {
+                                startWorkflow(workItemId)
+                                    .onFailure { requestError = it.message ?: "Unable to start the workflow." }
+                                startingWorkItemId = 0
+                            }
+                        }
+                    },
+                    onCancelWorkflow = { runId ->
+                        if (cancellingRunId == 0L) {
+                            cancellingRunId = runId
+                            requestError = null
+                            scope.launch {
+                                cancelWorkflow(runId)
+                                    .onFailure { requestError = it.message ?: "Unable to cancel the workflow." }
+                                cancellingRunId = 0L
                             }
                         }
                     },
@@ -210,6 +240,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         networkClient.bindRepository(projectId, path)
     }
 
+    private suspend fun startWorkflow(workItemId: Int): Result<Unit> = executeRequest {
+        networkClient.startWorkflow(workItemId)
+    }
+
+    private suspend fun cancelWorkflow(runId: Long): Result<Unit> = executeRequest {
+        networkClient.cancelWorkflow(runId)
+    }
+
     private suspend fun executeRequest(request: suspend () -> WorkspaceSnapshotResponse): Result<Unit> {
         return requestMutex.withLock {
             runCatching {
@@ -238,7 +276,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 }
             }
         }
-        return WorkspaceSnapshot(entities, focusId, message, response.repositories)
+        return WorkspaceSnapshot(entities, focusId, message, response.repositories, response.workflowRuns)
     }
 
     private fun actionValue(action: String, key: String): Int {
@@ -339,8 +377,12 @@ private fun WorkspaceBoard(
     epicId: Int,
     repository: RepositoryResponse?,
     isBindingRepository: Boolean,
+    startingWorkItemId: Int,
+    cancellingRunId: Long,
     onSelectEpic: (Int) -> Unit,
     onBindRepository: () -> Unit,
+    onStartWorkflow: (Int) -> Unit,
+    onCancelWorkflow: (Long) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val project = snapshot.entities.firstOrNull { it.id == projectId }
@@ -392,7 +434,15 @@ private fun WorkspaceBoard(
                 epics.isEmpty() -> EmptyWorkspace("Create an epic inside ${project.title}.")
                 stories.isEmpty() -> EmptyWorkspace("Create a story inside the selected epic.")
                 else -> stories.forEach { story ->
-                    StoryBoard(story, snapshot.entities.filter { it.parentId == story.id && (it.type == TASK || it.type == BUG) })
+                    StoryBoard(
+                        story = story,
+                        tickets = snapshot.entities.filter { it.parentId == story.id && (it.type == TASK || it.type == BUG) },
+                        workflowRuns = snapshot.workflowRuns,
+                        startingWorkItemId = startingWorkItemId,
+                        onStartWorkflow = onStartWorkflow,
+                        cancellingRunId = cancellingRunId,
+                        onCancelWorkflow = onCancelWorkflow,
+                    )
                 }
             }
         }
@@ -473,7 +523,15 @@ private fun EmptyWorkspace(message: String) {
 }
 
 @Composable
-private fun StoryBoard(story: WorkspaceEntity, tickets: List<WorkspaceEntity>) {
+private fun StoryBoard(
+    story: WorkspaceEntity,
+    tickets: List<WorkspaceEntity>,
+    workflowRuns: List<WorkflowRunResponse>,
+    startingWorkItemId: Int,
+    onStartWorkflow: (Int) -> Unit,
+    cancellingRunId: Long,
+    onCancelWorkflow: (Long) -> Unit,
+) {
     Column(
         modifier = Modifier.fillMaxWidth().background(OrchardColors.storyBand, RoundedCornerShape(8.dp)).padding(18.dp),
     ) {
@@ -485,7 +543,16 @@ private fun StoryBoard(story: WorkspaceEntity, tickets: List<WorkspaceEntity>) {
                     val statusTickets = tickets.filter { it.status == status }
                     Text(label.uppercase(), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.muted)
                     Spacer(Modifier.height(9.dp))
-                    statusTickets.forEach { TicketCard(it) }
+                    statusTickets.forEach { ticket ->
+                        TicketCard(
+                            ticket = ticket,
+                            workflowRun = workflowRuns.firstOrNull { it.context.workItemId == ticket.id },
+                            isStarting = startingWorkItemId == ticket.id,
+                            onStartWorkflow = { onStartWorkflow(ticket.id) },
+                            isCancelling = workflowRuns.firstOrNull { it.context.workItemId == ticket.id }?.runId == cancellingRunId,
+                            onCancelWorkflow = { runId -> onCancelWorkflow(runId) },
+                        )
+                    }
                     if (statusTickets.isEmpty()) {
                         Box(Modifier.fillMaxWidth().height(54.dp))
                     }
@@ -496,7 +563,14 @@ private fun StoryBoard(story: WorkspaceEntity, tickets: List<WorkspaceEntity>) {
 }
 
 @Composable
-private fun TicketCard(ticket: WorkspaceEntity) {
+private fun TicketCard(
+    ticket: WorkspaceEntity,
+    workflowRun: WorkflowRunResponse?,
+    isStarting: Boolean,
+    onStartWorkflow: () -> Unit,
+    isCancelling: Boolean,
+    onCancelWorkflow: (Long) -> Unit,
+) {
     Surface(
         color = OrchardColors.white,
         shape = RoundedCornerShape(6.dp),
@@ -514,6 +588,71 @@ private fun TicketCard(ticket: WorkspaceEntity) {
                 fontSize = 9.sp,
                 color = if (ticket.type == BUG) OrchardColors.clay else OrchardColors.moss,
             )
+            if (workflowRun == null) {
+                TextButton(
+                    onClick = onStartWorkflow,
+                    enabled = !isStarting,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 3.dp),
+                ) {
+                    if (isStarting) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = OrchardColors.moss)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Recalling context", fontSize = 11.sp, color = OrchardColors.moss)
+                    } else {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Start workflow", fontSize = 11.sp, color = OrchardColors.moss)
+                    }
+                }
+            } else {
+                Divider(color = OrchardColors.divider, modifier = Modifier.padding(vertical = 9.dp))
+                val latestEvidence = workflowRun.evidence
+                    .groupBy { it.kind }
+                    .mapValues { (_, records) -> records.maxBy { it.evidenceId } }
+                val passedGates = latestEvidence.values.count { it.passed }
+                val stateColor = if (workflowRun.state == "EVIDENCE_BLOCKED") OrchardColors.clay else OrchardColors.moss
+                Text(
+                    "${workflowRun.state.replace('_', ' ')}  ${workflowRun.context.repository.commitHash.take(8)}",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    color = stateColor,
+                )
+                Text(
+                    "$passedGates/${workflowRun.workflow.evidenceContract.requirements.size} evidence gates passed",
+                    fontSize = 10.sp,
+                    color = OrchardColors.muted,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                workflowRun.context.recalledEpisodes.firstOrNull()?.let { recall ->
+                    Text(
+                        "Prior fix: ${recall.resolution}",
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                        color = OrchardColors.ink,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 7.dp),
+                    )
+                }
+                if (workflowRun.state != "DONE" && workflowRun.state != "CANCELLED") {
+                    TextButton(
+                        onClick = { onCancelWorkflow(workflowRun.runId) },
+                        enabled = !isCancelling,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 3.dp),
+                    ) {
+                        if (isCancelling) {
+                            CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp, color = OrchardColors.clay)
+                        } else {
+                            Icon(Icons.Default.Close, contentDescription = null, tint = OrchardColors.clay, modifier = Modifier.size(15.dp))
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (isCancelling) "Cancelling" else "Cancel workflow", fontSize = 10.sp, color = OrchardColors.clay)
+                    }
+                }
+            }
         }
     }
 }

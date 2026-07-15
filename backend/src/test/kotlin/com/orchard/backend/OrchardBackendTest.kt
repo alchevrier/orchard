@@ -10,6 +10,15 @@ import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceRepository
 import com.orchard.backend.workspace.RepositoryBindingStore
 import com.orchard.backend.workspace.RepositoryView
+import com.orchard.backend.workspace.RepositoryHead
+import com.orchard.backend.workspace.RevisionValidation
+import com.orchard.backend.workspace.EpisodeQuery
+import com.orchard.backend.workspace.EpisodeRecall
+import com.orchard.backend.workspace.WorkflowMemoryStore
+import com.orchard.backend.workspace.WorkflowRun
+import com.orchard.backend.workspace.WorkflowEvent
+import com.orchard.backend.workspace.WorkflowStartStatus
+import com.orchard.backend.workspace.WorkEpisode
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
 import com.orchard.backend.workspace.ENTITY_EPIC
@@ -20,7 +29,9 @@ import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.WorkspaceStore
 import io.ktor.client.request.get
 import io.ktor.client.request.put
+import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
@@ -60,6 +71,31 @@ class WorkspaceStoreTest {
         assertFalse(workspace.applyIntent(intent(ENTITY_TASK, "Wrong project", projectId = 99, epicId = 2, storyId = 3)))
         workspace.rollbackBatch()
         assertEquals(3, workspace.entityCount)
+    }
+
+    @Test
+    fun workflowAdmissionRequiresTaskCleanHeadAndSingleRun() {
+        val cleanHead = RepositoryHead(1, "/repository", "a".repeat(40), "main", "", clean = true)
+        var head = cleanHead
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int): RepositoryHead = head
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+
+        assertEquals(WorkflowStartStatus.UNSUPPORTED_ENTITY, workspace.startWorkflow(3).status)
+        head = cleanHead.copy(clean = false)
+        assertEquals(WorkflowStartStatus.REPOSITORY_DIRTY, workspace.startWorkflow(4).status)
+        head = cleanHead
+        assertEquals(WorkflowStartStatus.CREATED, workspace.startWorkflow(4).status)
+        assertEquals(WorkflowStartStatus.ALREADY_STARTED, workspace.startWorkflow(4).status)
     }
 
     private fun intent(
@@ -287,6 +323,7 @@ class WorkspaceApiTest {
             }
 
             override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int): RepositoryHead? = null
         }
         val workspace = WorkspaceStore(repositoryBindings = bindings)
         workspace.beginBatch()
@@ -317,6 +354,7 @@ class WorkspaceApiTest {
         val bindings = object : RepositoryBindingStore {
             override fun bind(projectId: Int, requestedPath: String) = error("disk full")
             override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int): RepositoryHead? = null
         }
         val workspace = WorkspaceStore(repositoryBindings = bindings)
         workspace.beginBatch()
@@ -331,4 +369,121 @@ class WorkspaceApiTest {
 
         assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
     }
+
+    @Test
+    fun workflowRunRouteCreatesPinnedContext() = testApplication {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId,
+                "/repository",
+                "b".repeat(40),
+                "main",
+                "https://example.test/repository.git",
+                clean = true,
+            )
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        createTaskHierarchy(workspace)
+        application { workspaceApi(workspace) }
+
+        val response = client.post("/api/work-items/4/runs")
+
+        assertEquals(HttpStatusCode.Created, response.status)
+        assertTrue(response.bodyAsText().contains("CONTEXT_READY"))
+        assertTrue(response.bodyAsText().contains("task-completion"))
+    }
+
+    @Test
+    fun workflowRunRouteDoesNotPublishFailedAppend() = testApplication {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "c".repeat(40), "main", "", clean = true,
+            )
+        }
+        val memory = object : WorkflowMemoryStore {
+            override fun loadRuns(): List<WorkflowRun> = emptyList()
+            override fun appendRun(run: WorkflowRun) = error("disk full")
+            override fun loadEvents(): List<WorkflowEvent> = emptyList()
+            override fun appendEvent(event: WorkflowEvent) = error("disk full")
+            override fun recallEpisodes(query: EpisodeQuery): List<EpisodeRecall> = emptyList()
+            override fun appendEpisode(episode: WorkEpisode) = Unit
+            override fun nextEpisodeId(): Long = 1
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings, workflowMemory = memory)
+        createTaskHierarchy(workspace)
+        application { workspaceApi(workspace) }
+
+        val response = client.post("/api/work-items/4/runs")
+        val body = response.bodyAsText()
+
+        assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+        assertFalse(body.contains("CONTEXT_READY"))
+        assertTrue(body.contains("status=0"))
+    }
+
+    @Test
+    fun workflowEventRoutesCompleteAndCancelRuns() = testApplication {
+        val targetRevision = "f".repeat(40)
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "a".repeat(40), "main", "", clean = true,
+            )
+            override fun validateRevision(projectId: Int, baseRevision: String, targetRevision: String) =
+                RevisionValidation(targetRevision, changedFromBase = true)
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        createTaskHierarchy(workspace)
+        assertEquals(WorkflowStartStatus.CREATED, workspace.startWorkflow(4).status)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Cancelled")))
+        workspace.commitBatch()
+        assertEquals(WorkflowStartStatus.CREATED, workspace.startWorkflow(5).status)
+        application { workspaceApi(workspace) }
+
+        val attempt = client.post("/api/workflow-runs/1/attempts") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"description":"First approach","outcome":"Compiler still failed","diagnosticHash":"${"1".repeat(64)}","successful":false}""")
+        }
+        val source = client.post("/api/workflow-runs/1/evidence") {
+            contentType(ContentType.Application.Json)
+            setBody(evidenceJson("SOURCE_DIFF", targetRevision, "", 0, "Source changed"))
+        }
+        val build = client.post("/api/workflow-runs/1/evidence") {
+            contentType(ContentType.Application.Json)
+            setBody(evidenceJson("BUILD", targetRevision, "./gradlew build", 0, "Build passed"))
+        }
+        val test = client.post("/api/workflow-runs/1/evidence") {
+            contentType(ContentType.Application.Json)
+            setBody(evidenceJson("TEST", targetRevision, "./gradlew test", 0, "Tests passed"))
+        }
+        val cancelled = client.post("/api/workflow-runs/2/cancel")
+        val completedBody = test.bodyAsText()
+
+        assertEquals(HttpStatusCode.Created, attempt.status)
+        assertEquals(HttpStatusCode.Created, source.status)
+        assertEquals(HttpStatusCode.Created, build.status)
+        assertEquals(HttpStatusCode.Created, test.status)
+        assertTrue(completedBody.contains("\"state\":\"DONE\""))
+        assertTrue(completedBody.contains("status=3"))
+        assertEquals(HttpStatusCode.OK, cancelled.status)
+        assertTrue(cancelled.bodyAsText().contains("CANCELLED"))
+    }
+
+    private fun createTaskHierarchy(workspace: WorkspaceStore) {
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_PROJECT, DEFAULT_DELIVERY_WORKFLOW_ID, title = "Project")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_EPIC, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, title = "Epic")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_STORY, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, title = "Story")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Task")))
+        workspace.commitBatch()
+    }
+
+    private fun evidenceJson(kind: String, revision: String, command: String, exitCode: Int, summary: String): String =
+        """{"kind":"$kind","revision":"$revision","command":"$command","exitCode":$exitCode,"outputHash":"${"2".repeat(64)}","summary":"$summary","producer":"api-test"}"""
 }

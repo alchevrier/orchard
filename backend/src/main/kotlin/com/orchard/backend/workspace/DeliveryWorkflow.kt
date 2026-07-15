@@ -15,4 +15,27 @@ object DefaultDeliveryWorkflow {
         ENTITY_TASK, ENTITY_BUG -> ENTITY_STORY
         else -> 0
     }
+
+    fun resolve(workItemType: Int): ResolvedWorkflow {
+        require(workItemType == ENTITY_TASK || workItemType == ENTITY_BUG) { "Only tasks and bugs can start a workflow" }
+        val requirements = buildList {
+            add(EvidenceRequirement("SOURCE_DIFF", "A source diff tied to the pinned repository revision."))
+            if (workItemType == ENTITY_BUG) {
+                add(EvidenceRequirement("REGRESSION_TEST", "A regression test that demonstrates the corrected defect."))
+            }
+            add(EvidenceRequirement("BUILD", "A successful build against the resulting revision."))
+            add(EvidenceRequirement("TEST", "A successful relevant test suite against the resulting revision."))
+        }
+        return ResolvedWorkflow(
+            id = "default-delivery-${if (workItemType == ENTITY_BUG) "bug" else "task"}",
+            version = 1,
+            workItemType = workItemType,
+            steps = listOf("RECALL_CONTEXT", "EXECUTE", "VERIFY_EVIDENCE", "DECIDE_TRANSITION"),
+            evidenceContract = EvidenceContract(
+                id = "${if (workItemType == ENTITY_BUG) "bug" else "task"}-completion",
+                version = 1,
+                requirements = requirements,
+            ),
+        )
+    }
 }

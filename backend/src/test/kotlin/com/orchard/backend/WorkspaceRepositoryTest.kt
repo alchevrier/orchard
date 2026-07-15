@@ -8,8 +8,15 @@ import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.ENTITY_STORY
 import com.orchard.backend.workspace.ENTITY_TASK
 import com.orchard.backend.workspace.FileRepositoryBindingStore
+import com.orchard.backend.workspace.FileWorkflowMemoryStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
 import com.orchard.backend.workspace.RepositoryBindStatus
+import com.orchard.backend.workspace.WorkflowStartStatus
+import com.orchard.backend.workspace.WorkEpisode
+import com.orchard.backend.workspace.AttemptSubmission
+import com.orchard.backend.workspace.EvidenceSubmission
+import com.orchard.backend.workspace.RUN_STATE_DONE
+import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_BLOCKED
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceRepository
 import com.orchard.backend.workspace.WorkspaceStore
@@ -159,6 +166,161 @@ class WorkspaceRepositoryTest {
         assertTrue(!unavailable.available)
     }
 
+    @Test
+    fun workflowRunRecoversPinnedContextContractAndPastFixes() = withTempDirectory { directory ->
+        val workspaceDirectory = directory.resolve("workspace")
+        val repositoryDirectory = directory.resolve("bound-repository")
+        Files.createDirectories(repositoryDirectory)
+        Files.writeString(repositoryDirectory.resolve("settings.gradle.kts"), "rootProject.name = \"bound\"\n")
+        runCommand(repositoryDirectory, "git", "init", "--initial-branch=main")
+        runCommand(repositoryDirectory, "git", "config", "user.email", "orchard@example.test")
+        runCommand(repositoryDirectory, "git", "config", "user.name", "Orchard Test")
+        runCommand(repositoryDirectory, "git", "add", "settings.gradle.kts")
+        runCommand(repositoryDirectory, "git", "commit", "-m", "initial")
+        val pinnedRevision = commandOutput(repositoryDirectory, "git", "rev-parse", "HEAD")
+
+        val workflowMemory = FileWorkflowMemoryStore(workspaceDirectory)
+        workflowMemory.appendEpisode(
+            WorkEpisode(
+                episodeId = 1,
+                projectId = 1,
+                workItemType = ENTITY_TASK,
+                workflowId = "default-delivery-task",
+                title = "Fix Gradle JDK target failure",
+                problem = "Gradle compilation failed because the JDK target was unsupported.",
+                failedApproaches = listOf("Changing source compatibility alone did not change the Kotlin target."),
+                resolution = "Configured the Kotlin JVM target consistently with the supported JDK.",
+                evidenceSummary = "The complete Gradle build passed.",
+                sourceRevision = pinnedRevision,
+            )
+        )
+        workflowMemory.appendEpisode(
+            WorkEpisode(
+                episodeId = 2,
+                projectId = 99,
+                workItemType = ENTITY_TASK,
+                workflowId = "default-delivery-task",
+                title = "Fix Gradle JDK target failure",
+                problem = "A different project had the same words.",
+                failedApproaches = emptyList(),
+                resolution = "Out of scope.",
+                evidenceSummary = "None.",
+                sourceRevision = pinnedRevision,
+            )
+        )
+        val store = WorkspaceStore(
+            FileWorkspaceRepository(workspaceDirectory),
+            FileRepositoryBindingStore(workspaceDirectory),
+            workflowMemory,
+        )
+        store.beginBatch()
+        assertTrue(store.applyIntent(intent(ENTITY_PROJECT, "Orchard")))
+        assertTrue(store.applyIntent(intent(ENTITY_EPIC, "Runtime", projectId = 1)))
+        assertTrue(store.applyIntent(intent(ENTITY_STORY, "Build compatibility", projectId = 1, epicId = 2)))
+        assertTrue(store.applyIntent(intent(ENTITY_TASK, "Fix Gradle JDK target", projectId = 1, epicId = 2, storyId = 3)))
+        store.commitBatch()
+        assertEquals(RepositoryBindStatus.BOUND, store.bindRepository(1, repositoryDirectory.toString()).status)
+
+        val started = store.startWorkflow(4)
+
+        assertEquals(WorkflowStartStatus.CREATED, started.status)
+        val run = started.snapshot.workflowRuns.single()
+        assertEquals(pinnedRevision, run.context.repository.commitHash)
+        assertEquals(listOf(1L), run.context.recalledEpisodes.map { it.episodeId })
+        assertEquals(3, run.workflow.evidenceContract.requirements.size)
+        assertTrue("status=1" in started.snapshot.resources.getValue("entity-4").action)
+
+        Files.writeString(repositoryDirectory.resolve("README.md"), "later revision\n")
+        runCommand(repositoryDirectory, "git", "add", "README.md")
+        runCommand(repositoryDirectory, "git", "commit", "-m", "later")
+        val completedRevision = commandOutput(repositoryDirectory, "git", "rev-parse", "HEAD")
+
+        assertEquals(
+            com.orchard.backend.workspace.WorkflowMutationStatus.RECORDED,
+            store.recordAttempt(
+                1,
+                AttemptSubmission(
+                    description = "Change Java source compatibility only",
+                    outcome = "Kotlin still targeted the unsupported bytecode level.",
+                    diagnosticHash = "d".repeat(64),
+                    successful = false,
+                ),
+            ).status,
+        )
+        store.submitEvidence(
+            1,
+            EvidenceSubmission(
+                kind = "SOURCE_DIFF",
+                revision = completedRevision,
+                command = "",
+                exitCode = 0,
+                outputHash = "a".repeat(64),
+                summary = "Aligned Kotlin and Java target configuration.",
+                producer = "test-fixture",
+            ),
+        )
+        val blocked = store.submitEvidence(
+            1,
+            EvidenceSubmission(
+                kind = "BUILD",
+                revision = completedRevision,
+                command = "./gradlew build",
+                exitCode = 1,
+                outputHash = "b".repeat(64),
+                summary = "Build still failed before the corrected retry.",
+                producer = "test-fixture",
+            ),
+        )
+        assertEquals(RUN_STATE_EVIDENCE_BLOCKED, blocked.snapshot.workflowRuns.single().state)
+        store.submitEvidence(
+            1,
+            EvidenceSubmission(
+                kind = "BUILD",
+                revision = completedRevision,
+                command = "./gradlew build",
+                exitCode = 0,
+                outputHash = "c".repeat(64),
+                summary = "Complete build passed.",
+                producer = "test-fixture",
+            ),
+        )
+        val completed = store.submitEvidence(
+            1,
+            EvidenceSubmission(
+                kind = "TEST",
+                revision = completedRevision,
+                command = "./gradlew test",
+                exitCode = 0,
+                outputHash = "e".repeat(64),
+                summary = "Relevant tests passed.",
+                producer = "test-fixture",
+            ),
+        )
+        assertEquals(RUN_STATE_DONE, completed.snapshot.workflowRuns.single().state)
+        assertTrue("status=3" in completed.snapshot.resources.getValue("entity-4").action)
+
+        store.beginBatch()
+        assertTrue(store.applyIntent(intent(ENTITY_TASK, "Fix Gradle JDK target again", projectId = 1, epicId = 2, storyId = 3)))
+        store.commitBatch()
+        val recalled = store.startWorkflow(5).snapshot.workflowRuns.first { it.context.workItemId == 5 }
+        assertTrue(recalled.context.recalledEpisodes.any { recall ->
+            recall.failedApproaches.any { "Kotlin still targeted" in it }
+        })
+
+        val recovered = WorkspaceStore(
+            FileWorkspaceRepository(workspaceDirectory),
+            FileRepositoryBindingStore(workspaceDirectory),
+            FileWorkflowMemoryStore(workspaceDirectory),
+        ).snapshot(0)
+        assertEquals(2, recovered.workflowRuns.size)
+        assertEquals(RUN_STATE_DONE, recovered.workflowRuns.first { it.runId == 1L }.state)
+        assertEquals(pinnedRevision, recovered.workflowRuns.first { it.runId == 1L }.context.repository.commitHash)
+        assertTrue("status=3" in recovered.resources.getValue("entity-4").action)
+        assertTrue(recovered.workflowRuns.first { it.runId == 2L }.context.recalledEpisodes.any { recall ->
+            recall.failedApproaches.any { "Kotlin still targeted" in it }
+        })
+    }
+
     private fun intent(
         type: Int,
         title: String,
@@ -190,5 +352,12 @@ class WorkspaceRepositoryTest {
         val process = ProcessBuilder(command.toList()).directory(directory.toFile()).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
         check(process.waitFor() == 0) { "Command ${command.joinToString(" ")} failed: $output" }
+    }
+
+    private fun commandOutput(directory: Path, vararg command: String): String {
+        val process = ProcessBuilder(command.toList()).directory(directory.toFile()).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().use { it.readText().trim() }
+        check(process.waitFor() == 0) { "Command ${command.joinToString(" ")} failed: $output" }
+        return output
     }
 }

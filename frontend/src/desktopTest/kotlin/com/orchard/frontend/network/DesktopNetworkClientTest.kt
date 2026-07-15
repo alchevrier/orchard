@@ -62,4 +62,91 @@ class DesktopNetworkClientTest {
         assertEquals("main", snapshot.repositories.getValue(7).branch)
         client.close()
     }
+
+    @Test
+    fun startsWorkflowAndDecodesRecalledEpisode() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/work-items/4/runs", request.url.toString())
+            respond(
+                content = """{
+                    "resources":{},
+                    "workflowRuns":[{
+                        "runId":1,
+                        "state":"CONTEXT_READY",
+                        "context":{
+                            "workItemId":4,
+                            "repository":{"commitHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                            "recalledEpisodes":[{
+                                "episodeId":3,
+                                "score":75,
+                                "problem":"Gradle target failed",
+                                "failedApproaches":["Changing Java alone"],
+                                "resolution":"Align Kotlin and Java targets",
+                                "evidenceSummary":"Build passed",
+                                "sourceRevision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            }]
+                        },
+                        "workflow":{
+                            "id":"default-delivery-task",
+                            "version":1,
+                            "evidenceContract":{
+                                "id":"task-completion",
+                                "version":1,
+                                "requirements":[{"kind":"BUILD","description":"Build passes"}]
+                            }
+                        }
+                    }]
+                }""",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val snapshot = client.startWorkflow(4)
+
+        assertEquals("Align Kotlin and Java targets", snapshot.workflowRuns.single().context.recalledEpisodes.single().resolution)
+        client.close()
+    }
+
+    @Test
+    fun submitsEvidenceToWorkflowRun() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/workflow-runs/9/evidence", request.url.toString())
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"kind\":\"BUILD\""))
+            assertTrue(body.contains("\"producer\":\"quality-center\""))
+            respond(
+                content = """{"resources":{},"workflowRuns":[]}""",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        client.submitEvidence(
+            9,
+            EvidenceSubmissionRequest(
+                kind = "BUILD",
+                revision = "a".repeat(40),
+                command = "./gradlew build",
+                exitCode = 0,
+                outputHash = "b".repeat(64),
+                summary = "Build passed",
+                producer = "quality-center",
+            ),
+        )
+
+        client.close()
+    }
 }
