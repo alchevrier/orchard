@@ -6,26 +6,7 @@ import com.orchard.backend.vector.Embedder
 import com.orchard.backend.vector.SemanticChunker
 import com.orchard.backend.vector.VectorStore
 import com.orchard.backend.vector.DocumentClassifier
-import dev.autumn.annotations.ColdChannel
-import dev.autumn.annotations.LongLived
-import dev.autumn.annotations.Pipelined
-import dev.autumn.channel.AutumnChannel
 import java.util.UUID
-
-@Pipelined
-interface CompilationTask {
-    var pathHash: Long
-    var contentHash: Long
-    // Represents strings via external offset mapping
-    var pathOffset: Int
-    var pathLength: Int
-    var contentOffset: Int
-    var contentLength: Int
-}
-
-@LongLived
-@ColdChannel
-val compilerBackgroundQueue = AutumnChannel<CompilationTask>(1024)
 
 /**
  * Executes in a background context (Cold Channel), allowing 
@@ -35,7 +16,6 @@ val compilerBackgroundQueue = AutumnChannel<CompilationTask>(1024)
  * purely functionally or via object instances defined here statically since
  * Autumn does not have an IoC container.
  */
-@LongLived
 class MemoryCompilerPipeline(
     private val classifier: DocumentClassifier,
     private val chunker: SemanticChunker,

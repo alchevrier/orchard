@@ -9,9 +9,9 @@ Orchard requires a persistent memory for specific contexts, localized knowledge,
 ## Decision
 We establish a **Memory Compilation Architecture**:
 - **Source Code (Human Layer)**: All project context, ticket designs, agent assignments, and workflow instructions are written and managed as plain Markdown files. These are editable via the UI, human-readable, and Git-versionable.
-- **The Compiler**: An Autumn-based pipeline (`File Watcher -> Semantic Chunker -> Embedding API -> Vector Store`) runs continuously. It watches the local workspace for changes and hot-reloads the Markdown into a highly compressed vector state.
+- **The Compiler**: A coroutine-based pipeline (`File Watcher -> Semantic Chunker -> Embedding API -> Vector Index`) watches the local workspace and rebuilds derived retrieval state from authoritative Markdown.
 - **Compiled Binary (Agent Layer)**: Agents query the vector store, retrieving only highly-relevant, compressed chunks rather than full documents, keeping their LLM context windows lean, fast, and focused.
 
 ## Consequences
-- Requires running a local file watcher and embedded vector database (e.g., local Chroma, LanceDB, or SQLite-VSS) on the user's machine.
+- Requires running a local file watcher and maintaining a rebuildable file-backed vector index behind Orchard-owned repository interfaces.
 - Ensures the user is never locked out of their AI's reasoning: to change how the agent behaves, they simply edit or commit a change to a `.md` file.
