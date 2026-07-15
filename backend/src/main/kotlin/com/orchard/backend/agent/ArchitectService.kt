@@ -10,6 +10,7 @@ import com.orchard.backend.workspace.MESSAGE_CLARIFY
 import com.orchard.backend.workspace.MESSAGE_CREATED
 import com.orchard.backend.workspace.MESSAGE_OLLAMA_UNAVAILABLE
 import com.orchard.backend.workspace.MESSAGE_REJECTED
+import com.orchard.backend.workspace.MESSAGE_STORAGE_UNAVAILABLE
 import com.orchard.backend.workspace.MESSAGE_UNSUPPORTED_ACTION
 import com.orchard.backend.workspace.MESSAGE_WORKFLOW_HIERARCHY
 import com.orchard.backend.workspace.MESSAGE_WORKFLOW_PARENT_REQUIRED
@@ -203,6 +204,13 @@ class ArchitectService(
             createdCount++
         }
 
+        try {
+            workspace.commitBatch()
+        } catch (exception: Exception) {
+            workspace.rollbackBatch()
+            logger.error("Workspace persistence failed; Architect batch was rolled back", exception)
+            return ArchitectResult(503, workspace.snapshot(MESSAGE_STORAGE_UNAVAILABLE))
+        }
         workspace.markBatchCreated(createdCount)
         val message = if (plan.operations.size > 1) MESSAGE_BATCH_CREATED else MESSAGE_CREATED
         return ArchitectResult(200, workspace.snapshot(message))

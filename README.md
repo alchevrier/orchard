@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 1 complete - Local Architect MVP. The Architect creates projects, epics, stories, tasks, and bugs, including dependent entities in one request. Workspace persistence and downstream agent execution remain future work.
+> **Project status:** Milestone 2 complete - Filesystem Authority. Architect batches survive backend restarts through a checksummed journal and atomic snapshots. Downstream agent execution remains future work.
 
 ## Milestone 1: Local Architect MVP
 
@@ -26,13 +26,34 @@ Delivered and verified:
 - Backend and frontend regression suites run through `./gradlew build`.
 - Live Ollama verification covers non-streaming JSON requests and exact single-intent creation.
 
-Milestone boundaries:
+Milestone 1 boundaries:
 
 - Workspace state holds at most 32 entities in process memory.
-- Restarting the backend clears the board.
 - Create is the only applied action; update, delete, and query are classified but rejected.
 - Ollama must be running locally with `phi3:mini` installed.
-- Filesystem-native state, evidence derivation, and downstream agent execution begin after this milestone.
+- Evidence derivation and downstream agent execution begin after this milestone.
+
+## Milestone 2: Filesystem Authority
+
+Workspace state now has a human-readable authority beneath `~/.orchard/projects/workspace`. The in-memory store is a validated projection recovered at backend startup.
+
+Delivered and verified:
+
+- One checksummed JSONL journal transaction per accepted Architect batch.
+- Monotonic transaction sequences and entity IDs across backend restarts.
+- Checksummed, human-readable JSON snapshots after 32 transactions.
+- Temporary-file writes, flushes, and atomic snapshot replacement.
+- Recovery from a snapshot plus later journal transactions.
+- Quarantine of a malformed or truncated journal tail while preserving the valid prefix.
+- Full hierarchy validation before recovered entities enter the in-memory projection.
+- In-memory rollback and a structured `503` response when durable commit fails.
+- API snapshots expose only committed entities while a batch is in progress.
+
+Milestone 2 boundaries:
+
+- The current authoritative schema covers the 32-item Default Delivery workspace.
+- Database, vector, and embedding state beneath `~/.orchard/db` remains derived and rebuildable.
+- Corrupt authoritative snapshots fail startup rather than silently discarding state.
 
 ## Architecture
 
@@ -43,14 +64,15 @@ flowchart LR
     AS -->|Phase 0| TR[Ollama triage]
     TR -->|Phase 2| PL[Ollama planning]
     PL --> VA[Typed decoding and deterministic validation]
-    VA --> WS[WorkspaceStore]
+    VA --> WS[WorkspaceStore projection]
+    WS --> FS[Checksummed journal and atomic snapshot]
     WS -->|Serialized resource snapshot| UI
 ```
 
 Orchard has two Gradle modules:
 
 - `frontend`: Compose Desktop UI, ordinary Compose state, and a typed Ktor client.
-- `backend`: Ktor servers, Architect orchestration, workflow policy, in-memory workspace state, and the Ollama client.
+- `backend`: Ktor servers, Architect orchestration, workflow policy, durable workspace authority, and the Ollama client.
 
 The backend exposes:
 
@@ -127,20 +149,20 @@ The Default Delivery workflow materializes this as `Atlas -> General -> Import m
 
 ## Local Data
 
-Backend startup creates:
+Backend startup creates the directory structure:
 
 ```text
 ~/.orchard/
 |-- db/
 |-- projects/
+|   `-- workspace/
 `-- rag-shared/
 ```
 
-These directories are runtime state and are not part of the repository.
+These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Corrupt journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
 
 ## Next Milestones
 
-- **Milestone 2 - Filesystem authority:** persist and recover workspace records through a checksummed journal and snapshots.
 - Add status transitions for tasks and bugs.
 - Derive project observations, candidate practices, and executable workflows from evidence.
 - Add role-based agent runs and evidence-based model routing.

@@ -21,6 +21,7 @@ const val MESSAGE_BUSY = 6
 const val MESSAGE_WORKFLOW_PARENT_REQUIRED = 7
 const val MESSAGE_WORKFLOW_HIERARCHY = 8
 const val MESSAGE_BATCH_CREATED = 9
+const val MESSAGE_STORAGE_UNAVAILABLE = 10
 
 @Serializable
 data class WorkspaceResource(
@@ -32,6 +33,7 @@ data class WorkspaceResource(
 @Serializable
 data class WorkspaceSnapshot(val resources: Map<String, WorkspaceResource>)
 
+@Serializable
 data class WorkspaceEntity(
     val id: Int,
     val type: Int,
@@ -42,12 +44,15 @@ data class WorkspaceEntity(
     val status: Int = 0,
 )
 
-class WorkspaceStore {
+class WorkspaceStore(
+    private val repository: WorkspaceRepository = TransientWorkspaceRepository,
+) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
     private var batchEntityCount = 0
     private var batchNextEntityId = 1
 
+    @get:Synchronized
     val entityCount: Int get() = entities.size
     var lastCreatedId: Int = 0
         private set
@@ -66,31 +71,62 @@ class WorkspaceStore {
 
     private var batchLastCreatedId = 0
     private var batchLastCreatedType = 0
+    private var batchActive = false
+    private var committedEntityCount = 0
+    private var committedLastCreatedId = 0
+    private var committedLastCreatedType = 0
 
+    init {
+        restore(repository.load())
+    }
+
+    @Synchronized
     fun beginBatch() {
+        check(!batchActive) { "A workspace batch is already active" }
         batchEntityCount = entities.size
         batchNextEntityId = nextEntityId
         batchLastCreatedId = lastCreatedId
         batchLastCreatedType = lastCreatedType
+        batchActive = true
     }
 
+    @Synchronized
+    fun commitBatch() {
+        check(batchActive) { "No workspace batch is active" }
+        repository.commit(
+            newEntities = entities.subList(batchEntityCount, entities.size).toList(),
+            allEntities = entities.toList(),
+        )
+        committedEntityCount = entities.size
+        committedLastCreatedId = lastCreatedId
+        committedLastCreatedType = lastCreatedType
+        batchActive = false
+    }
+
+    @Synchronized
     fun rollbackBatch() {
+        check(batchActive) { "No workspace batch is active" }
         while (entities.size > batchEntityCount) entities.removeLast()
         nextEntityId = batchNextEntityId
         lastCreatedId = batchLastCreatedId
         lastCreatedType = batchLastCreatedType
+        batchActive = false
     }
 
+    @Synchronized
     fun markBatchCreated(count: Int) {
         lastBatchCreatedCount = count
     }
 
+    @Synchronized
     fun markPlanRejected(operation: Int, reason: Int) {
         lastRejectedOperation = operation
         lastPlanRejectionReason = reason
     }
 
+    @Synchronized
     fun createDefaultEpic(projectId: Int): Boolean {
+        check(batchActive) { "Workspace mutations require an active batch" }
         lastRejectedType = ENTITY_EPIC
         if (entities.size >= MAX_ENTITIES) return false
         if (projectId == 0) {
@@ -105,7 +141,9 @@ class WorkspaceStore {
         return appendEntity(ENTITY_EPIC, projectId, "General", "", DEFAULT_DELIVERY_WORKFLOW_ID)
     }
 
+    @Synchronized
     fun applyIntent(intent: DocumentIntent): Boolean {
+        check(batchActive) { "Workspace mutations require an active batch" }
         lastRejectedType = intent.entityTypeId
         if (entities.size >= MAX_ENTITIES || intent.actionTypeId != ACTION_CREATE) return false
         if (intent.boundWorkflowId != DEFAULT_DELIVERY_WORKFLOW_ID) {
@@ -124,13 +162,19 @@ class WorkspaceStore {
         )
     }
 
+    @Synchronized
     fun entityAt(index: Int): WorkspaceEntity = entities[index]
 
+    @Synchronized
     fun snapshot(messageCode: Int): WorkspaceSnapshot {
         val resources = linkedMapOf<String, WorkspaceResource>()
-        resources["focus"] = WorkspaceResource("FOCUS", lastCreatedId.toString(), lastCreatedType.toString())
+        resources["focus"] = WorkspaceResource(
+            "FOCUS",
+            committedLastCreatedId.toString(),
+            committedLastCreatedType.toString(),
+        )
         resources["message"] = WorkspaceResource("MESSAGE", message(messageCode), "none")
-        entities.forEach { entity ->
+        entities.take(committedEntityCount).forEach { entity ->
             resources["entity-${entity.id}"] = WorkspaceResource(
                 type = typeLabel(entity.type),
                 path = entity.title,
@@ -153,6 +197,30 @@ class WorkspaceStore {
         lastCreatedId = entity.id
         lastCreatedType = entity.type
         return true
+    }
+
+    private fun restore(restoredEntities: List<WorkspaceEntity>) {
+        require(restoredEntities.size <= MAX_ENTITIES) { "Workspace contains more than $MAX_ENTITIES entities" }
+        restoredEntities.forEach { restored ->
+            require(restored.id == nextEntityId) { "Expected workspace entity ID $nextEntityId, found ${restored.id}" }
+            require(restored.type in ENTITY_PROJECT..ENTITY_BUG) { "Unsupported persisted entity type ${restored.type}" }
+            require(restored.workflowId == DEFAULT_DELIVERY_WORKFLOW_ID) { "Unsupported persisted workflow ${restored.workflowId}" }
+            val requiredParentType = DefaultDeliveryWorkflow.requiredParentType(restored.type)
+            if (requiredParentType == 0) {
+                require(restored.parentId == 0) { "Project ${restored.id} cannot have a parent" }
+            } else {
+                require(entity(restored.parentId, requiredParentType) != null) {
+                    "Entity ${restored.id} has invalid parent ${restored.parentId}"
+                }
+            }
+            entities += restored
+            nextEntityId = restored.id + 1
+            lastCreatedId = restored.id
+            lastCreatedType = restored.type
+        }
+        committedEntityCount = entities.size
+        committedLastCreatedId = lastCreatedId
+        committedLastCreatedType = lastCreatedType
     }
 
     private fun validateWorkflowHierarchy(intent: DocumentIntent): Int {
@@ -214,6 +282,7 @@ class WorkspaceStore {
         MESSAGE_WORKFLOW_PARENT_REQUIRED -> "The Default Delivery workflow requires this ${typeLabel(lastRejectedType)} to reference an existing ${typeLabel(DefaultDeliveryWorkflow.requiredParentType(lastRejectedType))} ID."
         MESSAGE_WORKFLOW_HIERARCHY -> "The Default Delivery workflow rejected the parent reference because the complete Project, Epic, and Story hierarchy does not exist or does not match."
         MESSAGE_BATCH_CREATED -> "Created $lastBatchCreatedCount governed items from the Architect plan."
+        MESSAGE_STORAGE_UNAVAILABLE -> "The workspace could not be saved. No changes were applied."
         else -> "Describe a project, epic, story, task, or bug to the Architect."
     }
 

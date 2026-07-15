@@ -6,6 +6,8 @@ import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.vector.OllamaGenerateRequest
 import com.orchard.backend.vector.OllamaOptions
+import com.orchard.backend.workspace.WorkspaceEntity
+import com.orchard.backend.workspace.WorkspaceRepository
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
 import com.orchard.backend.workspace.ENTITY_EPIC
@@ -40,11 +42,17 @@ class WorkspaceStoreTest {
     fun workflowRequiresTheCorrectParentHierarchy() {
         val workspace = WorkspaceStore()
 
+        workspace.beginBatch()
         assertFalse(workspace.applyIntent(intent(ENTITY_STORY, "Orphan story")))
+        workspace.rollbackBatch()
+        workspace.beginBatch()
         assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Orchard")))
         assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Delivery", projectId = 1)))
         assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Ship it", projectId = 1, epicId = 2)))
+        workspace.commitBatch()
+        workspace.beginBatch()
         assertFalse(workspace.applyIntent(intent(ENTITY_TASK, "Wrong project", projectId = 99, epicId = 2, storyId = 3)))
+        workspace.rollbackBatch()
         assertEquals(3, workspace.entityCount)
     }
 
@@ -190,6 +198,27 @@ class ArchitectServiceTest {
         val result = ArchitectService(WorkspaceStore(), provider).submit(ArchitectChatRequest("Create a project"))
 
         assertEquals(422, result.statusCode)
+    }
+
+    @Test
+    fun rollsBackWhenWorkspaceCannotBePersisted() = runTest {
+        val repository = object : WorkspaceRepository {
+            override fun load(): List<WorkspaceEntity> = emptyList()
+            override fun commit(newEntities: List<WorkspaceEntity>, allEntities: List<WorkspaceEntity>) {
+                error("disk full")
+            }
+        }
+        val workspace = WorkspaceStore(repository)
+        val provider = StubModelProvider(
+            triage = """{"actionTypeId":1,"entityTypeId":1,"intentCount":1,"isBatch":0}""",
+            plan = """{"operations":[{"action":"CREATE","entity":"PROJECT","parentOperationIndex":-1,"title":"Lost","content":""}]}""",
+        )
+
+        val result = ArchitectService(workspace, provider).submit(ArchitectChatRequest("Create a project named Durable"))
+
+        assertEquals(503, result.statusCode)
+        assertEquals(0, workspace.entityCount)
+        assertEquals("0", result.snapshot.resources.getValue("focus").path)
     }
 
     @Test

@@ -1,9 +1,9 @@
 # ADR 020: Filesystem-First Project and Shared Intelligence
 
 ## Status
-Proposed
+Accepted
 
-If accepted, this ADR supersedes ADRs 003, 005, and 013. It partially supersedes the storage and retrieval decisions in ADRs 006, 012, and 014.
+This ADR supersedes ADRs 003, 005, and 013. It partially supersedes the storage and retrieval decisions in ADRs 006, 012, and 014.
 
 ## Context
 Orchard must preserve project state, source material, decisions, evidence, execution history, and learned engineering knowledge. Both humans and agents need to inspect, repair, version, search, and reason about that information without requiring a database console, proprietary binary format, or hidden in-process state.

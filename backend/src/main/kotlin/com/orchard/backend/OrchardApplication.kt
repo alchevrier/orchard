@@ -5,6 +5,7 @@ import com.orchard.backend.agent.ArchitectService
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.vector.OllamaClient
 import com.orchard.backend.workspace.MESSAGE_READY
+import com.orchard.backend.workspace.FileWorkspaceRepository
 import com.orchard.backend.workspace.WorkspaceStore
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -22,7 +23,7 @@ import kotlinx.serialization.json.Json
 
 fun main() {
     OrchardPaths.initialize()
-    val workspace = WorkspaceStore()
+    val workspace = WorkspaceStore(FileWorkspaceRepository(OrchardPaths.WORKSPACE_DIR))
     val modelProvider = OllamaClient()
     val architect = ArchitectService(workspace, modelProvider)
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
