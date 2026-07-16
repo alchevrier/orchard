@@ -91,6 +91,8 @@ import com.orchard.frontend.network.StagedPlanArtifactRequirementRequest
 import com.orchard.frontend.network.StagedPlanNodeSubmissionRequest
 import com.orchard.frontend.network.StagedPlanStageSubmissionRequest
 import com.orchard.frontend.network.StageExecutionWorkflowDefinitionResponse
+import com.orchard.frontend.network.CircuitProposalViewResponse
+import com.orchard.frontend.network.CircuitProposalReferenceRequest
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
@@ -132,6 +134,7 @@ private data class WorkspaceSnapshot(
     val workDefinitions: List<WorkDefinitionResponse>,
     val definitionProposals: List<DefinitionProposalViewResponse>,
     val stagedPlans: List<StagedDeliveryPlanViewResponse>,
+    val circuitProposals: List<CircuitProposalViewResponse>,
     val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse>,
     val modelProfiles: List<ModelCapabilityProfileResponse>,
 )
@@ -163,6 +166,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var selectedEpicId by remember { mutableStateOf(0) }
         var planningScopeId by remember { mutableStateOf(0) }
         var isSavingStagedPlan by remember { mutableStateOf(false) }
+        var isGeneratingCircuit by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
 
         LaunchedEffect(Unit) {
@@ -357,13 +361,36 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             snapshot.entities.firstOrNull { it.id == planningScopeId }?.let { scopeEntity ->
                                 val memberTypes = if (scopeEntity.type == EPIC) setOf(STORY) else setOf(TASK, BUG)
                                 val members = snapshot.entities.filter { it.parentId == scopeEntity.id && it.type in memberTypes }
+                                val currentPlan = snapshot.stagedPlans.firstOrNull { it.plan.scopeId == scopeEntity.id }
+                                val proposal = snapshot.circuitProposals
+                                    .filter {
+                                        it.proposal.scopeId == scopeEntity.id && it.acceptedPlanId == null &&
+                                            it.proposal.content.plan.baseRevision == (currentPlan?.plan?.revision ?: 0) &&
+                                            it.proposal.content.plan.baseHash == currentPlan?.plan?.hash
+                                    }
+                                    .maxByOrNull { it.proposal.revision }
                                 StagedPlanDialog(
                                     scope = scopeEntity,
                                     members = members,
-                                    current = snapshot.stagedPlans.firstOrNull { it.plan.scopeId == scopeEntity.id },
+                                    current = currentPlan,
+                                    proposal = proposal,
                                     workflows = snapshot.stageWorkflows,
                                     isSaving = isSavingStagedPlan,
-                                    onDismiss = { if (!isSavingStagedPlan) planningScopeId = 0 },
+                                    isGenerating = isGeneratingCircuit,
+                                    onDismiss = { if (!isSavingStagedPlan && !isGeneratingCircuit) planningScopeId = 0 },
+                                    onGenerate = {
+                                        if (!isGeneratingCircuit) {
+                                            isGeneratingCircuit = true
+                                            requestError = null
+                                            scope.launch {
+                                                executeRequest { networkClient.generateCircuitProposal(scopeEntity.id) }
+                                                    .onFailure {
+                                                        requestError = it.message ?: "The Architect could not synthesize a circuit proposal."
+                                                    }
+                                                isGeneratingCircuit = false
+                                            }
+                                        }
+                                    },
                                     onSave = { plan ->
                                         isSavingStagedPlan = true
                                         requestError = null
@@ -500,6 +527,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             response.workDefinitions,
             response.definitionProposals,
             response.stagedPlans,
+            response.circuitProposals,
             response.stageWorkflows,
             response.modelProfiles,
         )
@@ -855,37 +883,51 @@ private fun StagedPlanDialog(
     scope: WorkspaceEntity,
     members: List<WorkspaceEntity>,
     current: StagedDeliveryPlanViewResponse?,
+    proposal: CircuitProposalViewResponse?,
     workflows: List<StageExecutionWorkflowDefinitionResponse>,
     isSaving: Boolean,
+    isGenerating: Boolean,
     onDismiss: () -> Unit,
+    onGenerate: () -> Unit,
     onSave: (StagedDeliveryPlanSubmissionRequest) -> Unit,
 ) {
-    var title by remember(scope.id, current?.plan?.hash) {
-        mutableStateOf(current?.plan?.title ?: "${scope.title} delivery circuit")
+    val proposedPlan = proposal?.proposal?.content?.plan
+    var title by remember(scope.id, current?.plan?.hash, proposal?.proposal?.hash) {
+        mutableStateOf(proposedPlan?.title ?: current?.plan?.title ?: "${scope.title} delivery circuit")
     }
-    var drafts by remember(scope.id, current?.plan?.hash, members.map { it.id }) {
-        val currentNodes = current?.plan?.stages.orEmpty().flatMap { stage -> stage.nodes.map { stage.ordinal to it } }
+    var drafts by remember(scope.id, current?.plan?.hash, proposal?.proposal?.hash, members.map { it.id }) {
         mutableStateOf(
             members.mapIndexed { index, member ->
-                val existing = currentNodes.firstOrNull { it.second.workItemId == member.id }
+                val proposed = proposedPlan?.stages.orEmpty().flatMapIndexed { stageIndex, stage ->
+                    stage.nodes.map { stageIndex + 1 to it }
+                }.firstOrNull { it.second.workItemId == member.id }
+                val existing = current?.plan?.stages.orEmpty().flatMap { stage ->
+                    stage.nodes.map { stage.ordinal to it }
+                }.firstOrNull { it.second.workItemId == member.id }
                 PlanNodeDraft(
                     workItemId = member.id,
-                    nodeId = existing?.second?.nodeId ?: "item-${member.id}",
-                    stage = existing?.first?.toString() ?: "1",
-                    dependsOn = existing?.second?.dependsOn?.joinToString(",").orEmpty(),
-                    produces = existing?.second?.produces?.joinToString(",") {
+                    nodeId = proposed?.second?.nodeId ?: existing?.second?.nodeId ?: "item-${member.id}",
+                    stage = (proposed?.first ?: existing?.first)?.toString() ?: "1",
+                    dependsOn = (proposed?.second?.dependsOn ?: existing?.second?.dependsOn).orEmpty().joinToString(","),
+                    produces = (proposed?.second?.produces ?: existing?.second?.produces).orEmpty().joinToString(",") {
                         "${it.kind}:${it.name}:${it.evidenceKind}"
-                    }.orEmpty(),
-                    consumes = existing?.second?.consumes?.joinToString(",") { "${it.producerNodeId}:${it.kind}" }.orEmpty(),
+                    },
+                    consumes = (proposed?.second?.consumes ?: existing?.second?.consumes).orEmpty()
+                        .joinToString(",") { "${it.producerNodeId}:${it.kind}" },
                 )
             }
         )
     }
-    var workflowByStage by remember(scope.id, current?.plan?.hash) {
+    var workflowByStage by remember(scope.id, current?.plan?.hash, proposal?.proposal?.hash) {
+        val sourceStages = proposedPlan?.stages?.mapIndexed { index, stage ->
+            Triple(index + 1, stage.executionWorkflowId, stage.executionWorkflowVersion)
+        } ?: current?.plan?.stages.orEmpty().map { stage ->
+            Triple(stage.ordinal, stage.executionWorkflowId, stage.executionWorkflowVersion)
+        }
         mutableStateOf(
-            current?.plan?.stages.orEmpty().associate { stage ->
-                stage.ordinal to workflows.firstOrNull {
-                    it.id == stage.executionWorkflowId && it.version == stage.executionWorkflowVersion
+            sourceStages.associate { (ordinal, workflowId, workflowVersion) ->
+                ordinal to workflows.firstOrNull {
+                    it.id == workflowId && it.version == workflowVersion
                 }
             }.filterValues { it != null }.mapValues { requireNotNull(it.value) }
         )
@@ -923,16 +965,35 @@ private fun StagedPlanDialog(
                     value = title,
                     onValueChange = { title = it },
                     label = { Text("Circuit title") },
-                    enabled = !isSaving,
+                    enabled = !isSaving && !isGenerating,
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                proposal?.proposal?.content?.let { content ->
+                    Surface(
+                        color = OrchardColors.storyBand,
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                "ARCHITECT PROPOSAL R${proposal.proposal.revision}",
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp,
+                                color = OrchardColors.moss,
+                            )
+                            content.observations.forEach { Text("Observed: $it", fontSize = 11.sp, color = OrchardColors.ink) }
+                            content.assumptions.forEach { Text("Assumption: $it", fontSize = 11.sp, color = OrchardColors.clay) }
+                        }
+                    }
+                }
                 stages.forEach { ordinal ->
                     val workflow = workflowByStage[ordinal]
                     Box {
                         TextButton(
                             onClick = { selectingWorkflowFor = ordinal },
-                            enabled = !isSaving && workflows.isNotEmpty(),
+                            enabled = !isSaving && !isGenerating && workflows.isNotEmpty(),
                         ) {
                             Text("Stage $ordinal workflow: ${workflow?.id ?: "Select"}@${workflow?.version ?: "-"}")
                         }
@@ -964,7 +1025,7 @@ private fun StagedPlanDialog(
                                 onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(stage = value.filter(Char::isDigit)) } },
                                 label = { Text("Stage") },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                enabled = !isSaving,
+                                enabled = !isSaving && !isGenerating,
                                 singleLine = true,
                                 modifier = Modifier.width(90.dp),
                             )
@@ -972,7 +1033,7 @@ private fun StagedPlanDialog(
                                 value = draft.nodeId,
                                 onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(nodeId = value) } },
                                 label = { Text("Node ID") },
-                                enabled = !isSaving,
+                                enabled = !isSaving && !isGenerating,
                                 singleLine = true,
                                 modifier = Modifier.weight(1f),
                             )
@@ -980,28 +1041,30 @@ private fun StagedPlanDialog(
                                 value = draft.dependsOn,
                                 onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(dependsOn = value) } },
                                 label = { Text("Dependencies") },
-                                enabled = !isSaving,
+                                enabled = !isSaving && !isGenerating,
                                 singleLine = true,
                                 modifier = Modifier.weight(1f),
                             )
                         }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(
-                                value = draft.produces,
-                                onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(produces = value) } },
-                                label = { Text("Outputs") },
-                                enabled = !isSaving,
-                                singleLine = true,
-                                modifier = Modifier.weight(1f),
-                            )
-                            OutlinedTextField(
-                                value = draft.consumes,
-                                onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(consumes = value) } },
-                                label = { Text("Inputs") },
-                                enabled = !isSaving,
-                                singleLine = true,
-                                modifier = Modifier.weight(1f),
-                            )
+                        if (scope.type == STORY) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = draft.produces,
+                                    onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(produces = value) } },
+                                    label = { Text("Outputs") },
+                                    enabled = !isSaving && !isGenerating,
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                OutlinedTextField(
+                                    value = draft.consumes,
+                                    onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(consumes = value) } },
+                                    label = { Text("Inputs") },
+                                    enabled = !isSaving && !isGenerating,
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                         }
                     }
                     Divider(color = OrchardColors.divider)
@@ -1010,7 +1073,7 @@ private fun StagedPlanDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = valid && !isSaving,
+                enabled = valid && !isSaving && !isGenerating,
                 onClick = {
                     onSave(
                         StagedDeliveryPlanSubmissionRequest(
@@ -1018,10 +1081,11 @@ private fun StagedPlanDialog(
                             title.trim(),
                             parsed.groupBy { requireNotNull(it.first) }.toSortedMap().map { (ordinal, entries) ->
                                 val existingStage = current?.plan?.stages?.firstOrNull { it.ordinal == ordinal }
+                                val proposedStage = proposedPlan?.stages?.getOrNull(ordinal - 1)
                                 val workflow = requireNotNull(workflowByStage[ordinal])
                                 StagedPlanStageSubmissionRequest(
-                                    stageId = existingStage?.stageId ?: "stage-$ordinal",
-                                    title = existingStage?.title ?: "Stage $ordinal",
+                                    stageId = proposedStage?.stageId ?: existingStage?.stageId ?: "stage-$ordinal",
+                                    title = proposedStage?.title ?: existingStage?.title ?: "Stage $ordinal",
                                     executionWorkflowId = workflow.id,
                                     executionWorkflowVersion = workflow.version,
                                     nodes = entries.map { (_, draft) ->
@@ -1037,15 +1101,26 @@ private fun StagedPlanDialog(
                             },
                             baseRevision = current?.plan?.revision ?: 0,
                             baseHash = current?.plan?.hash,
+                            sourceProposal = proposal?.proposal?.let {
+                                CircuitProposalReferenceRequest(it.proposalId, it.hash)
+                            },
                         )
                     )
                 },
             ) {
                 if (isSaving) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                else Text("Accept circuit")
+                else Text(if (proposal == null) "Accept circuit" else "Accept proposal")
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !isSaving) { Text("Cancel") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onGenerate, enabled = !isSaving && !isGenerating) {
+                    if (isGenerating) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    else Text(if (proposal == null) "Generate proposal" else "Regenerate")
+                }
+                TextButton(onClick = onDismiss, enabled = !isSaving && !isGenerating) { Text("Cancel") }
+            }
+        },
         shape = RoundedCornerShape(8.dp),
         backgroundColor = OrchardColors.surface,
     )

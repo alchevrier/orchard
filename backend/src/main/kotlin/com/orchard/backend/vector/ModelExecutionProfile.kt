@@ -62,12 +62,22 @@ object DefaultModelExecutionProfiles {
         requiredCapabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
     )
 
+    val boundedCircuitSynthesis = ModelExecutionProfile(
+        id = "bounded-circuit-synthesis-v1",
+        version = 1,
+        reasoningClass = "BOUNDED_CIRCUIT_SYNTHESIS",
+        inputBudgetTokens = 12_000,
+        outputBudgetTokens = 3_000,
+        requiredCapabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+    )
+
     fun resolve(id: String): ModelExecutionProfile = when (id) {
         boundedDefinitionReasoning.id -> boundedDefinitionReasoning
+        boundedCircuitSynthesis.id -> boundedCircuitSynthesis
         else -> throw IllegalArgumentException("Unknown model execution profile $id")
     }
 
-    fun all(): List<ModelExecutionProfile> = listOf(boundedDefinitionReasoning)
+    fun all(): List<ModelExecutionProfile> = listOf(boundedDefinitionReasoning, boundedCircuitSynthesis)
 }
 
 fun effectiveModelExecutionProfile(

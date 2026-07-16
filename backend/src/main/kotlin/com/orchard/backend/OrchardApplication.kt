@@ -4,6 +4,8 @@ import com.orchard.backend.agent.ArchitectChatRequest
 import com.orchard.backend.agent.ArchitectService
 import com.orchard.backend.agent.DefinitionIntelligenceService
 import com.orchard.backend.agent.ProposalGenerationStatus
+import com.orchard.backend.agent.CircuitIntelligenceService
+import com.orchard.backend.agent.CircuitGenerationStatus
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.vector.OllamaClient
 import com.orchard.backend.vector.FileModelProfileSettingsStore
@@ -22,6 +24,7 @@ import com.orchard.backend.workspace.FileWorkDefinitionStore
 import com.orchard.backend.workspace.FileDefinitionCollaborationStore
 import com.orchard.backend.workspace.FileModelExperienceStore
 import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
+import com.orchard.backend.workspace.FileCircuitProposalStore
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
@@ -64,6 +67,7 @@ fun main() {
         FileDefinitionCollaborationStore(OrchardPaths.WORKSPACE_DIR),
         FileModelExperienceStore(OrchardPaths.WORKSPACE_DIR),
         FileStagedDeliveryPlanStore(OrchardPaths.WORKSPACE_DIR),
+        FileCircuitProposalStore(OrchardPaths.WORKSPACE_DIR),
     )
     val modelProvider = OllamaClient()
     val resourceController = MachineResourceController(
@@ -77,8 +81,14 @@ fun main() {
         FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
         resourceController,
     )
+    val circuitIntelligence = CircuitIntelligenceService(
+        workspace,
+        listOf(modelProvider),
+        FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
+        resourceController,
+    )
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
-        workspaceApi(workspace, definitionIntelligence)
+        workspaceApi(workspace, definitionIntelligence, circuitIntelligence)
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
         architectApi(architect)
@@ -95,6 +105,7 @@ fun main() {
 fun Application.workspaceApi(
     workspace: WorkspaceStore,
     definitionIntelligence: DefinitionIntelligenceService? = null,
+    circuitIntelligence: CircuitIntelligenceService? = null,
 ) {
     configureJson()
     routing {
@@ -159,7 +170,55 @@ fun Application.workspaceApi(
             val status = when (result.status) {
                 StagedPlanStatus.ACCEPTED -> HttpStatusCode.Created
                 StagedPlanStatus.SCOPE_NOT_FOUND -> HttpStatusCode.NotFound
+                StagedPlanStatus.PROPOSAL_NOT_FOUND -> HttpStatusCode.NotFound
                 StagedPlanStatus.PLAN_LOCKED -> HttpStatusCode.Conflict
+                StagedPlanStatus.STALE_PLAN -> HttpStatusCode.Conflict
+                StagedPlanStatus.INVALID_SCOPE,
+                StagedPlanStatus.INVALID_PLAN -> HttpStatusCode.UnprocessableEntity
+                StagedPlanStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result.snapshot)
+        }
+        post("/api/staged-plan-proposals/{scopeId}/generate") {
+            val scopeId = call.parameters["scopeId"]?.toIntOrNull()
+            if (scopeId == null || scopeId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            if (circuitIntelligence == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable, workspace.snapshot(MESSAGE_READY))
+                return@post
+            }
+            val result = circuitIntelligence.propose(scopeId)
+            val status = when (result.status) {
+                CircuitGenerationStatus.CREATED -> HttpStatusCode.Created
+                CircuitGenerationStatus.SCOPE_NOT_FOUND -> HttpStatusCode.NotFound
+                CircuitGenerationStatus.PLAN_LOCKED,
+                CircuitGenerationStatus.BUSY,
+                CircuitGenerationStatus.STALE_CONTEXT -> HttpStatusCode.Conflict
+                CircuitGenerationStatus.INVALID_SCOPE,
+                CircuitGenerationStatus.CONTEXT_BUDGET_EXCEEDED,
+                CircuitGenerationStatus.INVALID_OUTPUT -> HttpStatusCode.UnprocessableEntity
+                CircuitGenerationStatus.RESOURCE_CAPACITY_UNAVAILABLE -> HttpStatusCode.TooManyRequests
+                CircuitGenerationStatus.NO_COMPATIBLE_MODEL,
+                CircuitGenerationStatus.MODEL_UNAVAILABLE,
+                CircuitGenerationStatus.STORAGE_UNAVAILABLE,
+                CircuitGenerationStatus.RESOURCE_TELEMETRY_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result.snapshot)
+        }
+        post("/api/staged-plan-proposals/{proposalId}/accept") {
+            val proposalId = call.parameters["proposalId"]?.toLongOrNull()
+            if (proposalId == null || proposalId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.acceptCircuitProposal(proposalId)
+            val status = when (result.status) {
+                StagedPlanStatus.ACCEPTED -> HttpStatusCode.Created
+                StagedPlanStatus.SCOPE_NOT_FOUND -> HttpStatusCode.NotFound
+                StagedPlanStatus.PROPOSAL_NOT_FOUND -> HttpStatusCode.NotFound
+                StagedPlanStatus.PLAN_LOCKED,
                 StagedPlanStatus.STALE_PLAN -> HttpStatusCode.Conflict
                 StagedPlanStatus.INVALID_SCOPE,
                 StagedPlanStatus.INVALID_PLAN -> HttpStatusCode.UnprocessableEntity

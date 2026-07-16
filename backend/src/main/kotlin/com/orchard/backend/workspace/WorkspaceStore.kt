@@ -2,6 +2,8 @@ package com.orchard.backend.workspace
 
 import com.orchard.backend.api.DocumentIntent
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -47,6 +49,7 @@ data class WorkspaceSnapshot(
     val definitionProposals: List<DefinitionProposalView> = emptyList(),
     val modelProfiles: List<ModelCapabilityProfile> = emptyList(),
     val stagedPlans: List<StagedDeliveryPlanView> = emptyList(),
+    val circuitProposals: List<CircuitProposalView> = emptyList(),
     val stageWorkflows: List<StageExecutionWorkflowDefinition> = StageExecutionWorkflowRegistry.all(),
 )
 
@@ -109,6 +112,7 @@ class WorkspaceStore(
     private val collaborationStore: DefinitionCollaborationStore = TransientDefinitionCollaborationStore(),
     private val modelExperienceStore: ModelExperienceStore = TransientModelExperienceStore(),
     private val stagedPlanStore: StagedDeliveryPlanStore = TransientStagedDeliveryPlanStore(),
+    private val circuitProposalStore: CircuitProposalStore = TransientCircuitProposalStore(),
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -146,12 +150,14 @@ class WorkspaceStore(
     private val collaborationEvents = mutableListOf<DefinitionCollaborationEvent>()
     private val modelExperienceEvents = mutableListOf<ModelExperienceEvent>()
     private val stagedPlans = mutableListOf<StagedDeliveryPlan>()
+    private val circuitProposals = mutableListOf<CircuitProposal>()
     private var nextRunId = 1L
     private var nextEventId = 1L
     private var nextDefinitionId = 1L
     private var nextCollaborationEventId = 1L
     private var nextModelExperienceEventId = 1L
     private var nextStagedPlanId = 1L
+    private var nextCircuitProposalId = 1L
     private var stagedPlanMessage = ""
 
     init {
@@ -163,6 +169,7 @@ class WorkspaceStore(
         restoreEvents(workflowMemory.loadEvents())
         validateRunReplacements()
         restoreStagedPlans(stagedPlanStore.load())
+        restoreCircuitProposals(circuitProposalStore.load())
     }
 
     @Synchronized
@@ -542,6 +549,106 @@ class WorkspaceStore(
         modelCapabilityProfiles(modelExperienceEvents, authoritativeModelSatisfaction())
 
     @Synchronized
+    fun circuitSynthesisContext(scopeId: Int): CircuitSynthesisContext? {
+        val scope = committedEntity(scopeId)
+            ?.takeIf { it.type in setOf(ENTITY_EPIC, ENTITY_STORY) }
+            ?: return null
+        val active = activeStagedPlan(scope.id)
+        return CircuitSynthesisContext(
+            scopeId = scope.id,
+            scopeType = scope.type,
+            scopeTitle = scope.title,
+            scopeContent = scope.content,
+            members = directPlanChildren(scope).map { member ->
+                CircuitSynthesisMember(
+                    workItemId = member.id,
+                    workItemType = member.type,
+                    title = member.title,
+                    content = member.content,
+                    definition = workDefinitions.lastOrNull { it.workItemId == member.id },
+                    artifactEvidenceKinds = if (member.type in setOf(ENTITY_TASK, ENTITY_BUG)) {
+                        DefaultDeliveryWorkflow.resolve(
+                            member.type,
+                            workDefinitions.lastOrNull { it.workItemId == member.id },
+                        ).evidenceContract.requirements.map { it.kind }
+                    } else {
+                        emptyList()
+                    },
+                )
+            },
+            activePlan = active,
+            planLocked = active?.stages?.flatMap { it.nodes }?.any { planNodeStarted(it.workItemId) } == true,
+            stageWorkflows = StageExecutionWorkflowRegistry.all(),
+        )
+    }
+
+    @Synchronized
+    fun recordCircuitProposal(
+        content: CircuitProposalContent,
+        provenance: CircuitExecutionProvenance,
+        expectedContext: CircuitSynthesisContext? = null,
+    ): CircuitProposalResult {
+        val submission = content.plan
+        val scope = committedEntity(submission.scopeId)
+            ?: return circuitProposalFailure(CircuitProposalStatus.SCOPE_NOT_FOUND)
+        if (scope.type !in setOf(ENTITY_EPIC, ENTITY_STORY)) {
+            return circuitProposalFailure(CircuitProposalStatus.INVALID_SCOPE)
+        }
+        if (expectedContext != null && circuitSynthesisContext(scope.id) != expectedContext) {
+            return circuitProposalFailure(CircuitProposalStatus.STALE_CONTEXT)
+        }
+        val current = activeStagedPlan(scope.id)
+        if (current?.stages?.flatMap { it.nodes }?.any { planNodeStarted(it.workItemId) } == true) {
+            return circuitProposalFailure(CircuitProposalStatus.PLAN_LOCKED)
+        }
+        if (
+            submission.baseRevision != (current?.revision ?: 0) ||
+            submission.baseHash != current?.hash ||
+            submission.sourceProposal != null
+        ) return circuitProposalFailure(CircuitProposalStatus.STALE_CONTEXT)
+        val stages = normalizedPlanStages(submission)
+            ?: return circuitProposalFailure(CircuitProposalStatus.INVALID_PROPOSAL)
+        if (
+            stages.flatMap { it.nodes }.mapTo(linkedSetOf()) { it.workItemId } !=
+            directPlanChildren(scope).mapTo(linkedSetOf()) { it.id }
+        ) return circuitProposalFailure(CircuitProposalStatus.INVALID_PROPOSAL)
+        val normalizedContent = content.copy(
+            plan = submission.copy(
+                title = submission.title.trim(),
+                stages = stages.map(::stageSubmission),
+            ),
+            observations = content.observations.map(String::trim),
+            assumptions = content.assumptions.map(String::trim),
+        )
+        val proposal = newCircuitProposal(
+            proposalId = nextCircuitProposalId,
+            scopeId = scope.id,
+            revision = circuitProposals.count { it.scopeId == scope.id } + 1,
+            content = normalizedContent,
+            provenance = provenance,
+        )
+        return try {
+            circuitProposalStore.append(proposal)
+            circuitProposals += proposal
+            nextCircuitProposalId++
+            CircuitProposalResult(CircuitProposalStatus.RECORDED, snapshot(MESSAGE_STAGED_DELIVERY_PLAN), proposal)
+        } catch (_: Exception) {
+            circuitProposalFailure(CircuitProposalStatus.STORAGE_UNAVAILABLE)
+        }
+    }
+
+    @Synchronized
+    fun acceptCircuitProposal(proposalId: Long): StagedPlanResult {
+        val proposal = circuitProposals.singleOrNull { it.proposalId == proposalId }
+            ?: return stagedPlanFailure(StagedPlanStatus.PROPOSAL_NOT_FOUND, "The circuit proposal does not exist.")
+        return acceptStagedPlan(
+            proposal.content.plan.copy(
+                sourceProposal = CircuitProposalReference(proposal.proposalId, proposal.hash),
+            )
+        )
+    }
+
+    @Synchronized
     fun acceptStagedPlan(submission: StagedDeliveryPlanSubmission): StagedPlanResult {
         val scope = committedEntity(submission.scopeId)
             ?: return stagedPlanFailure(StagedPlanStatus.SCOPE_NOT_FOUND, "The staged-plan scope does not exist.")
@@ -559,6 +666,14 @@ class WorkspaceStore(
             StagedPlanStatus.STALE_PLAN,
             "The staged plan changed after this edit began. Reload the active circuit before revising it.",
         )
+        val sourceProposal = submission.sourceProposal?.let { reference ->
+            circuitProposals.singleOrNull {
+                it.proposalId == reference.proposalId && it.hash == reference.proposalHash &&
+                    it.scopeId == submission.scopeId &&
+                    it.content.plan.baseRevision == submission.baseRevision &&
+                    it.content.plan.baseHash == submission.baseHash
+            } ?: return stagedPlanFailure(StagedPlanStatus.INVALID_PLAN, "The circuit proposal provenance is invalid.")
+        }
         val stages = normalizedPlanStages(submission) ?: return stagedPlanFailure(
             StagedPlanStatus.INVALID_PLAN,
             "The staged plan hierarchy, dependencies, artifacts, or workflows are invalid.",
@@ -570,6 +685,10 @@ class WorkspaceStore(
                 "The staged plan must contain every current direct child exactly once.",
             )
         }
+        val acceptedProposalUnchanged = sourceProposal?.let { proposal ->
+            proposal.content.plan.title.trim() == submission.title.trim() &&
+                normalizedPlanStages(proposal.content.plan) == stages
+        } == true
         val revision = stagedPlans.count { it.scopeId == scope.id } + 1
         val acceptedAt = java.time.Instant.now().toString()
         val hashSource = Json.encodeToString(
@@ -582,6 +701,8 @@ class WorkspaceStore(
                 stages,
                 COLLABORATOR_HUMAN,
                 acceptedAt,
+                submission.sourceProposal,
+                acceptedProposalUnchanged,
             )
         )
         val plan = StagedDeliveryPlan(
@@ -593,6 +714,8 @@ class WorkspaceStore(
             stages = stages,
             acceptedAt = acceptedAt,
             hash = stagedPlanHash(hashSource),
+            sourceProposal = submission.sourceProposal,
+            acceptedProposalUnchanged = acceptedProposalUnchanged,
         )
         return try {
             stagedPlanStore.append(plan)
@@ -923,6 +1046,7 @@ class WorkspaceStore(
             definitionProposalViews(),
             modelProfiles(),
             stagedPlanViews(),
+            circuitProposalViews(),
             StageExecutionWorkflowRegistry.all(),
         )
     }
@@ -1105,12 +1229,43 @@ class WorkspaceStore(
                         plan.stages,
                         plan.acceptedBy,
                         plan.acceptedAt,
+                        plan.sourceProposal,
+                        plan.acceptedProposalUnchanged,
                     )
                 )
             )
             require(plan.hash == expectedHash) { "Staged plan ${plan.planId} hash is invalid" }
             stagedPlans += plan
             nextStagedPlanId++
+        }
+    }
+
+    private fun restoreCircuitProposals(restoredProposals: List<CircuitProposal>) {
+        restoredProposals.forEach { proposal ->
+            require(proposal.proposalId == nextCircuitProposalId) {
+                "Expected circuit proposal ID $nextCircuitProposalId, found ${proposal.proposalId}"
+            }
+            val scope = committedEntity(proposal.scopeId)
+            require(scope?.type in setOf(ENTITY_EPIC, ENTITY_STORY)) {
+                "Circuit proposal ${proposal.proposalId} references an invalid scope"
+            }
+            val execution = modelExperienceEvents.mapNotNull { it.execution }
+                .singleOrNull { it.executionId == proposal.provenance.executionId }
+            require(
+                execution != null && execution.workItemId == proposal.scopeId &&
+                    execution.profile.id == proposal.provenance.executionProfileId &&
+                    com.orchard.backend.vector.modelBindingFingerprint(execution.binding) == proposal.provenance.bindingFingerprint &&
+                    execution.promptHash == proposal.provenance.promptHash &&
+                    execution.envelopeHash == proposal.provenance.contextHash &&
+                    execution.outputHash == proposal.provenance.outputHash && execution.schemaValid
+            ) { "Circuit proposal ${proposal.proposalId} references invalid model execution evidence" }
+            circuitProposals += proposal
+            nextCircuitProposalId++
+        }
+        stagedPlans.mapNotNull { plan -> plan.sourceProposal?.let { plan to it } }.forEach { (plan, reference) ->
+            require(circuitProposals.any { it.proposalId == reference.proposalId && it.hash == reference.proposalHash }) {
+                "Staged plan ${plan.planId} references an invalid circuit proposal"
+            }
         }
     }
 
@@ -1164,6 +1319,27 @@ class WorkspaceStore(
                         MODEL_SATISFACTION_ACCEPTED_AFTER_EDIT
                     },
                     humanRevisionFields = changedFields,
+                )
+            )
+        }
+        stagedPlans.forEach { plan ->
+            val reference = plan.sourceProposal ?: return@forEach
+            val proposal = circuitProposals.singleOrNull {
+                it.proposalId == reference.proposalId && it.hash == reference.proposalHash
+            } ?: return@forEach
+            add(
+                ModelSatisfactionObservation(
+                    satisfactionId = plan.planId,
+                    executionId = proposal.provenance.executionId,
+                    workItemId = proposal.scopeId,
+                    proposalId = proposal.proposalId,
+                    signal = if (plan.acceptedProposalUnchanged) {
+                        MODEL_SATISFACTION_ACCEPTED_UNCHANGED
+                    } else {
+                        MODEL_SATISFACTION_ACCEPTED_AFTER_EDIT
+                    },
+                    humanRevisionFields = circuitRevisionFields(proposal.content.plan, plan),
+                    recordedAt = plan.acceptedAt,
                 )
             )
         }
@@ -1379,6 +1555,24 @@ class WorkspaceStore(
             before.regressionCriterion != after.regressionCriterion,
         ).count { it }
 
+    private fun circuitRevisionFields(before: StagedDeliveryPlanSubmission, after: StagedDeliveryPlan): Int {
+        val beforeStages = before.stages
+        return listOf(
+            before.title.trim() != after.title,
+            beforeStages.size != after.stages.size,
+            beforeStages.map { it.stageId.trim() } != after.stages.map { it.stageId },
+            beforeStages.map { it.title.trim() } != after.stages.map { it.title },
+            beforeStages.map { it.executionWorkflowId.trim() to it.executionWorkflowVersion } !=
+                after.stages.map { it.executionWorkflowId to it.executionWorkflowVersion },
+            beforeStages.flatMap { it.nodes }.map { it.nodeId.trim() to it.workItemId } !=
+                after.stages.flatMap { it.nodes }.map { it.nodeId to it.workItemId },
+            beforeStages.flatMap { it.nodes }.map { it.dependsOn.map(String::trim) } !=
+                after.stages.flatMap { it.nodes }.map { it.dependsOn },
+            beforeStages.flatMap { it.nodes }.map { it.consumes } != after.stages.flatMap { it.nodes }.map { it.consumes },
+            beforeStages.flatMap { it.nodes }.map { it.produces } != after.stages.flatMap { it.nodes }.map { it.produces },
+        ).count { it }
+    }
+
     private fun normalizedPlanStages(submission: StagedDeliveryPlanSubmission): List<StagedPlanStage>? {
         val scope = committedEntity(submission.scopeId) ?: return null
         if (
@@ -1494,6 +1688,22 @@ class WorkspaceStore(
                 else -> false
             }
         }
+
+    private fun stageSubmission(stage: StagedPlanStage): StagedPlanStageSubmission = StagedPlanStageSubmission(
+        stageId = stage.stageId,
+        title = stage.title,
+        executionWorkflowId = stage.executionWorkflowId,
+        executionWorkflowVersion = stage.executionWorkflowVersion,
+        nodes = stage.nodes.map { node ->
+            StagedPlanNodeSubmission(
+                nodeId = node.nodeId,
+                workItemId = node.workItemId,
+                dependsOn = node.dependsOn,
+                consumes = node.consumes,
+                produces = node.produces,
+            )
+        },
+    )
 
     private fun activeStagedPlan(scopeId: Int): StagedDeliveryPlan? = stagedPlans.lastOrNull { it.scopeId == scopeId }
 
@@ -1647,6 +1857,21 @@ class WorkspaceStore(
             }, stagedPlanArtifactInstances(plan))
         }
 
+    private fun circuitProposalViews(): List<CircuitProposalView> = circuitProposals.map { proposal ->
+        val accepted = stagedPlans.lastOrNull {
+            it.sourceProposal?.proposalId == proposal.proposalId &&
+                it.sourceProposal.proposalHash == proposal.hash
+        }
+        CircuitProposalView(
+            proposal = proposal,
+            acceptedPlanId = accepted?.planId,
+            acceptedUnchanged = accepted?.acceptedProposalUnchanged == true,
+        )
+    }
+
+    private fun circuitProposalFailure(status: CircuitProposalStatus): CircuitProposalResult =
+        CircuitProposalResult(status, snapshot(MESSAGE_STAGED_DELIVERY_PLAN))
+
     private fun stagedPlanFailure(status: StagedPlanStatus, message: String): StagedPlanResult {
         stagedPlanMessage = message
         return StagedPlanResult(status, snapshot(MESSAGE_STAGED_DELIVERY_PLAN))
@@ -1772,6 +1997,7 @@ class WorkspaceStore(
 }
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 private data class StagedPlanHashSource(
     val planId: Long,
     val revision: Int,
@@ -1781,4 +2007,8 @@ private data class StagedPlanHashSource(
     val stages: List<StagedPlanStage>,
     val acceptedBy: String,
     val acceptedAt: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val sourceProposal: CircuitProposalReference? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val acceptedProposalUnchanged: Boolean = false,
 )

@@ -45,6 +45,9 @@ import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.resource.FileMachineUsagePolicyStore
 import com.orchard.backend.resource.MachineUsagePolicy
 import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
+import com.orchard.backend.workspace.FileCircuitProposalStore
+import com.orchard.backend.workspace.CircuitProposalContent
+import com.orchard.backend.workspace.CircuitExecutionProvenance
 import com.orchard.backend.workspace.StagedDeliveryPlanSubmission
 import com.orchard.backend.workspace.StagedPlanNodeSubmission
 import com.orchard.backend.workspace.StagedPlanStageSubmission
@@ -63,6 +66,92 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class WorkspaceRepositoryTest {
+    @Test
+    fun circuitProposalAndSourcePinnedAcceptanceRecoverAfterRestart() = withTempDirectory { directory ->
+        val first = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            modelExperienceStore = FileModelExperienceStore(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+            circuitProposalStore = FileCircuitProposalStore(directory),
+        )
+        first.beginBatch()
+        assertTrue(first.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(first.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(first.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(first.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        first.commitBatch()
+        val binding = ModelBindingProfile(
+            "circuit-binding",
+            "test",
+            "circuit-model",
+            20_000,
+            setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+        val execution = requireNotNull(
+            first.recordModelExecution(
+                ModelExecutionObservationDraft(
+                    profile = DefaultModelExecutionProfiles.boundedCircuitSynthesis,
+                    binding = binding,
+                    workflowStepId = "SYNTHESIZE_CIRCUIT",
+                    workItemId = 3,
+                    envelopeHash = "b".repeat(64),
+                    promptHash = "a".repeat(64),
+                    outputHash = "c".repeat(64),
+                    inputTokens = 1_000,
+                    outputTokens = 200,
+                    latencyMillis = 50,
+                    schemaValid = true,
+                )
+            )
+        )
+        val proposal = requireNotNull(
+            first.recordCircuitProposal(
+                CircuitProposalContent(
+                    StagedDeliveryPlanSubmission(
+                        3,
+                        "Generated circuit",
+                        listOf(
+                            StagedPlanStageSubmission(
+                                "delivery", "Delivery", "sequential-delivery-v1",
+                                nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                            )
+                        ),
+                    ),
+                    observations = listOf("The Story has one Task."),
+                ),
+                CircuitExecutionProvenance(
+                    executor = "profile:bounded-circuit-synthesis-v1",
+                    model = binding.model,
+                    executionProfileId = DefaultModelExecutionProfiles.boundedCircuitSynthesis.id,
+                    bindingFingerprint = modelBindingFingerprint(binding),
+                    promptVersion = 1,
+                    promptHash = "a".repeat(64),
+                    contextHash = "b".repeat(64),
+                    outputHash = "c".repeat(64),
+                    executionId = execution.executionId,
+                ),
+            ).proposal
+        )
+        assertEquals(StagedPlanStatus.ACCEPTED, first.acceptCircuitProposal(proposal.proposalId).status)
+
+        val recovered = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            modelExperienceStore = FileModelExperienceStore(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+            circuitProposalStore = FileCircuitProposalStore(directory),
+        ).snapshot(MESSAGE_READY)
+
+        assertEquals(proposal.hash, recovered.circuitProposals.single().proposal.hash)
+        assertEquals(recovered.stagedPlans.single().plan.planId, recovered.circuitProposals.single().acceptedPlanId)
+        assertTrue(recovered.stagedPlans.single().plan.acceptedProposalUnchanged)
+        assertEquals(
+            1,
+            recovered.modelProfiles.single { it.executionProfileId == "bounded-circuit-synthesis-v1" }
+                .acceptedUnchangedCount,
+        )
+        assertTrue(Files.readString(directory.resolve("circuit-proposals.jsonl")).contains("\"checksum\""))
+    }
+
     @Test
     fun stagedDeliveryCircuitRecoversAfterRestart() = withTempDirectory { directory ->
         val first = WorkspaceStore(

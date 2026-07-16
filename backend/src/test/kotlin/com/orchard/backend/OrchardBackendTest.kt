@@ -4,6 +4,8 @@ import com.orchard.backend.agent.ArchitectChatRequest
 import com.orchard.backend.agent.ArchitectService
 import com.orchard.backend.agent.DefinitionIntelligenceService
 import com.orchard.backend.agent.ProposalGenerationStatus
+import com.orchard.backend.agent.CircuitIntelligenceService
+import com.orchard.backend.agent.CircuitGenerationStatus
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.resource.MachineCapacityMonitor
 import com.orchard.backend.resource.MachineCapacitySnapshot
@@ -904,7 +906,12 @@ class DefinitionIntelligenceServiceTest {
         val proposal = service.propose(4)
 
         assertEquals(ModelProfileUpdateStatus.UPDATED, update.status)
-        assertEquals(8_000, service.profileConfigurations().single().effectiveProfile.inputBudgetTokens)
+        assertEquals(
+            8_000,
+            service.profileConfigurations().single {
+                it.effectiveProfile.id == "bounded-definition-reasoning-v1"
+            }.effectiveProfile.inputBudgetTokens,
+        )
         assertEquals(0, smallCalls)
         assertEquals(1_500, preferredOutputBudget)
         assertEquals(9_500, preferredContextWindow)
@@ -1009,7 +1016,12 @@ class DefinitionIntelligenceServiceTest {
         )
 
         assertEquals(ModelProfileUpdateStatus.NO_COMPATIBLE_BINDING, result.status)
-        assertEquals(12_000, result.configurations.single().effectiveProfile.inputBudgetTokens)
+        assertEquals(
+            12_000,
+            result.configurations.single {
+                it.effectiveProfile.id == "bounded-definition-reasoning-v1"
+            }.effectiveProfile.inputBudgetTokens,
+        )
     }
 
     @Test
@@ -1270,7 +1282,199 @@ class DefinitionIntelligenceServiceTest {
     """.trimIndent()
 }
 
+class CircuitIntelligenceServiceTest {
+        @Test
+        fun generationIsProposalOnlyAndHumanAcceptancePinsItsProvenance() = runTest {
+                val workspace = circuitWorkspace()
+                val prompts = mutableListOf<String>()
+                val service = CircuitIntelligenceService(workspace, circuitProvider(prompts), systemPrompt = "circuit policy")
+
+                val generated = service.propose(3)
+
+                assertEquals(CircuitGenerationStatus.CREATED, generated.status)
+                assertTrue(generated.snapshot.stagedPlans.isEmpty())
+                val proposal = generated.snapshot.circuitProposals.single().proposal
+                assertEquals(3, proposal.scopeId)
+                assertEquals(listOf(4, 5), proposal.content.plan.stages.flatMap { it.nodes }.map { it.workItemId })
+                assertTrue(prompts.single().contains("forbiddenActions"))
+                assertTrue(prompts.single().contains("artifactEvidenceKinds"))
+
+                val accepted = workspace.acceptCircuitProposal(proposal.proposalId)
+                val plan = accepted.snapshot.stagedPlans.single().plan
+
+                assertEquals(StagedPlanStatus.ACCEPTED, accepted.status)
+                assertEquals(proposal.proposalId, plan.sourceProposal?.proposalId)
+                assertEquals(proposal.hash, plan.sourceProposal?.proposalHash)
+                assertTrue(plan.acceptedProposalUnchanged)
+                assertEquals(plan.planId, accepted.snapshot.circuitProposals.single().acceptedPlanId)
+                assertTrue(accepted.snapshot.circuitProposals.single().acceptedUnchanged)
+                val profile = accepted.snapshot.modelProfiles.single {
+                    it.executionProfileId == "bounded-circuit-synthesis-v1"
+                }
+                assertEquals(1, profile.acceptedUnchangedCount)
+                assertEquals(0, profile.acceptedAfterEditCount)
+        }
+
+        @Test
+        fun staleProposalCannotReplaceAPlanAcceptedAfterGeneration() = runTest {
+                val workspace = circuitWorkspace()
+                val service = CircuitIntelligenceService(workspace, circuitProvider(mutableListOf()), systemPrompt = "policy")
+                val proposal = service.propose(3).snapshot.circuitProposals.single().proposal
+                val competing = proposal.content.plan.copy(title = "Human circuit")
+
+                assertEquals(StagedPlanStatus.ACCEPTED, workspace.acceptStagedPlan(competing).status)
+                assertEquals(StagedPlanStatus.STALE_PLAN, workspace.acceptCircuitProposal(proposal.proposalId).status)
+                assertEquals("Human circuit", workspace.snapshot(MESSAGE_READY).stagedPlans.single().plan.title)
+        }
+
+            @Test
+            fun editedAcceptanceRecordsStructuralCircuitRevisionSize() = runTest {
+                val workspace = circuitWorkspace()
+                val proposal = CircuitIntelligenceService(
+                    workspace,
+                    circuitProvider(mutableListOf()),
+                    systemPrompt = "policy",
+                ).propose(3).snapshot.circuitProposals.single().proposal
+                val edited = proposal.content.plan.copy(
+                    title = "Human-edited circuit",
+                    stages = proposal.content.plan.stages.mapIndexed { index, stage ->
+                        if (index == 1) stage.copy(title = "Human implementation", executionWorkflowId = "sequential-delivery-v1")
+                        else stage
+                    },
+                    sourceProposal = com.orchard.backend.workspace.CircuitProposalReference(proposal.proposalId, proposal.hash),
+                )
+
+                val accepted = workspace.acceptStagedPlan(edited)
+                val profile = accepted.snapshot.modelProfiles.single {
+                    it.executionProfileId == "bounded-circuit-synthesis-v1"
+                }
+
+                assertEquals(StagedPlanStatus.ACCEPTED, accepted.status)
+                assertTrue(!accepted.snapshot.stagedPlans.single().plan.acceptedProposalUnchanged)
+                assertEquals(1, profile.acceptedAfterEditCount)
+                assertEquals(3.0, profile.averageHumanRevisionFields)
+            }
+
+        private fun circuitWorkspace(): WorkspaceStore = WorkspaceStore().also { workspace ->
+                workspace.beginBatch()
+                check(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_PROJECT, DEFAULT_DELIVERY_WORKFLOW_ID, title = "Project")))
+                check(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_EPIC, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, title = "Epic")))
+                check(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_STORY, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, title = "Story")))
+                check(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Contract")))
+                check(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Implementation")))
+                workspace.commitBatch()
+        }
+
+        private fun circuitProvider(prompts: MutableList<String>) = object : ModelProvider {
+                override suspend fun triage(prompt: String): String = error("unused")
+                override suspend fun plan(
+                        prompt: String,
+                        actionType: Int,
+                        entityType: Int,
+                        workspace: WorkspaceStore,
+                ): String = error("unused")
+
+                override suspend fun executeCircuitSynthesis(
+                        prompt: String,
+                        maxOutputTokens: Int,
+                        contextWindowTokens: Int,
+                ): com.orchard.backend.vector.ModelGeneration {
+                        prompts += prompt
+                        return com.orchard.backend.vector.ModelGeneration(circuitJson(), 1_000, 300)
+                }
+
+                override fun bindingProfile() = ModelBindingProfile(
+                        "circuit-test",
+                        "test",
+                        "circuit-model",
+                        20_000,
+                        setOf(MODEL_CAPABILITY_STRICT_JSON),
+                )
+        }
+
+        private fun circuitJson() = """
+                {
+                    "title": "Generated delivery circuit",
+                    "stages": [
+                        {
+                            "stageId": "contract",
+                            "title": "Establish boundary",
+                            "executionWorkflowId": "contract-design-v1",
+                            "executionWorkflowVersion": 1,
+                            "nodes": [
+                                {"nodeId": "contract", "workItemId": 4, "dependsOn": [], "consumes": [], "produces": []}
+                            ]
+                        },
+                        {
+                            "stageId": "implementation",
+                            "title": "Implement",
+                            "executionWorkflowId": "parallel-implementation-v1",
+                            "executionWorkflowVersion": 1,
+                            "nodes": [
+                                {"nodeId": "implementation", "workItemId": 5, "dependsOn": ["contract"], "consumes": [], "produces": []}
+                            ]
+                        }
+                    ],
+                    "observations": ["Implementation follows the contract task."],
+                    "assumptions": ["The task titles imply the intended order."]
+                }
+        """.trimIndent()
+}
+
 class WorkspaceApiTest {
+    @Test
+    fun circuitProposalRoutesSeparateGenerationFromHumanAcceptance() = testApplication {
+        val workspace = WorkspaceStore()
+        createTaskHierarchy(workspace)
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+
+            override suspend fun executeCircuitSynthesis(
+                prompt: String,
+                maxOutputTokens: Int,
+                contextWindowTokens: Int,
+            ) = com.orchard.backend.vector.ModelGeneration(
+                """{
+                    "title":"Generated circuit",
+                    "stages":[{
+                        "stageId":"delivery",
+                        "title":"Delivery",
+                        "executionWorkflowId":"sequential-delivery-v1",
+                        "executionWorkflowVersion":1,
+                        "nodes":[{"nodeId":"task","workItemId":4,"dependsOn":[],"consumes":[],"produces":[]}]
+                    }],
+                    "observations":[],
+                    "assumptions":[]
+                }""".trimIndent(),
+                1_000,
+                200,
+            )
+
+            override fun bindingProfile() = ModelBindingProfile(
+                "api-circuit", "test", "circuit-model", 20_000, setOf(MODEL_CAPABILITY_STRICT_JSON)
+            )
+        }
+        val service = CircuitIntelligenceService(workspace, provider, systemPrompt = "policy")
+        application { workspaceApi(workspace, circuitIntelligence = service) }
+
+        val generated = client.post("/api/staged-plan-proposals/3/generate")
+        assertEquals(HttpStatusCode.Created, generated.status)
+        val generatedBody = generated.bodyAsText()
+        assertTrue(generatedBody.contains("\"circuitProposals\":[{"))
+        assertTrue(!generatedBody.contains("\"stagedPlans\":[{"))
+
+        val accepted = client.post("/api/staged-plan-proposals/1/accept")
+        assertEquals(HttpStatusCode.Created, accepted.status)
+        assertTrue(accepted.bodyAsText().contains("\"acceptedProposalUnchanged\":true"))
+        assertTrue(accepted.bodyAsText().contains("\"proposalId\":1"))
+    }
+
     @Test
     fun stagedPlanRouteRejectsOversizedBody() = testApplication {
         application { workspaceApi(WorkspaceStore()) }

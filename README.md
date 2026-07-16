@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 8.0 complete - Staged Delivery Circuits. Epic and Story work now has durable dependency graphs, executable registered stage policies, Story-level evidence-backed artifact signals, and stale-editor protection.
+> **Project status:** Milestone 8.1 complete - Architect Circuit Synthesis. The local Architect can propose validated Epic and Story circuits, while humans retain edit and acceptance authority and stale proposals cannot overwrite newer plans.
 
 ## Milestone 1: Local Architect MVP
 
@@ -259,6 +259,33 @@ Milestone 8.0 boundaries:
 - Built-in stage workflows are versioned policy; installing user-authored workflow implementations is not yet supported.
 - One Orchard backend process owns each workspace authority directory; cross-process stale-conflict classification is outside this milestone.
 
+### Milestone 8.1: Architect Circuit Synthesis
+
+Orchard can now ask the local Architect to decompose an existing Epic or Story into a reviewable staged circuit proposal. Generation remains proposal-only: deterministic validation and explicit human acceptance are still required before a graph becomes execution authority.
+
+Delivered and verified:
+
+- Dedicated `bounded-circuit-synthesis-v1` reasoning profile with configurable input and output apertures.
+- Immutable synthesis envelopes containing exact hierarchy, accepted definitions, valid evidence kinds, active plan base, and registered stage workflows.
+- Strict JSON output for stages, nodes, dependency wires, typed artifact signals, observations, and assumptions.
+- Deterministic post-generation validation of complete membership, workflow pins, graph ordering, artifact contracts, and authority bounds.
+- Append-only checksummed `circuit-proposals.jsonl` authority with monotonic IDs, revisions, model provenance, and restart recovery.
+- Model execution evidence for success, invalid output, provider failure, resource denial, token overflow, and cancellation.
+- Stale-context rejection when hierarchy or active plan authority changes during inference.
+- Proposal-only generation API and a separate explicit acceptance API.
+- Desktop generation from Epic and Story planners, visible observations and assumptions, and editable proposal fields.
+- Accepted plans pin the source proposal ID and hash and distinguish unchanged acceptance from human-edited acceptance.
+- Structural edit-distance evidence feeds model capability memory and future binding selection.
+- Cross-journal recovery validates model execution, proposal provenance, and accepted plan references together.
+
+Milestone 8.1 boundaries:
+
+- Synthesis organizes existing children; it does not materialize new Stories, Tasks, or Bugs.
+- Epic synthesis emits completion dependencies only until Story output aggregation has an explicit authority model.
+- Regeneration appends a new proposal; feedback-threaded circuit revisions and proposal history UX remain future work.
+- The existing profile API can configure synthesis apertures, while the desktop settings dialog currently focuses on the primary Work Definition profile.
+- Generation does not start eligible nodes. Durable queues, automatic dispatch, worktree isolation, and integration ownership belong to Milestone 8.2.
+
 ## Architecture
 
 ```mermaid
@@ -281,6 +308,8 @@ flowchart LR
     ME --> CP
     WD -->|READY manifest| WM
     WS --> SC[Staged delivery circuit]
+    AS -->|Proposal only| CSP[Circuit synthesis proposal]
+    CSP -->|Human review and acceptance| SC
     SC -->|dependency and artifact gates| WM
     WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI

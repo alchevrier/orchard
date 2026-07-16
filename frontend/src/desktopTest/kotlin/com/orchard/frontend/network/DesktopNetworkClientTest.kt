@@ -26,6 +26,7 @@ class DesktopNetworkClientTest {
             val body = request.body.toByteArray().decodeToString()
             assertTrue(body.contains("\"executionWorkflowId\":\"contract-v1\""))
             assertTrue(body.contains("\"dependsOn\":[\"api\"]"))
+            assertTrue(body.contains("\"sourceProposal\":{\"proposalId\":7"))
             respond(
                 content = """{"resources":{},"stagedPlans":[]}""",
                 status = HttpStatusCode.Created,
@@ -50,11 +51,74 @@ class DesktopNetworkClientTest {
                     nodes = listOf(StagedPlanNodeSubmissionRequest("screen", 5, dependsOn = listOf("api"))),
                 ),
             ),
+            sourceProposal = CircuitProposalReferenceRequest(7, "a".repeat(64)),
         )
 
         val response = client.acceptStagedPlan(request)
 
         assertTrue(response.stagedPlans.isEmpty())
+        client.close()
+    }
+
+    @Test
+    fun generatesAndDecodesCircuitProposal() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/staged-plan-proposals/3/generate", request.url.toString())
+            respond(
+                content = """{
+                    "resources":{},
+                    "circuitProposals":[{
+                        "proposal":{
+                            "proposalId":1,
+                            "scopeId":3,
+                            "revision":1,
+                            "actor":"LOCAL_LLM",
+                            "content":{
+                                "plan":{
+                                    "scopeId":3,
+                                    "title":"Generated circuit",
+                                    "stages":[{
+                                        "stageId":"delivery",
+                                        "title":"Delivery",
+                                        "executionWorkflowId":"sequential-delivery-v1",
+                                        "executionWorkflowVersion":1,
+                                        "nodes":[{"nodeId":"task","workItemId":4}]
+                                    }]
+                                },
+                                "observations":["One task is in scope."],
+                                "assumptions":[]
+                            },
+                            "provenance":{
+                                "executor":"profile:bounded-circuit-synthesis-v1",
+                                "model":"phi3:mini",
+                                "executionProfileId":"bounded-circuit-synthesis-v1",
+                                "bindingFingerprint":"${"a".repeat(64)}",
+                                "promptVersion":1,
+                                "promptHash":"${"b".repeat(64)}",
+                                "contextHash":"${"c".repeat(64)}",
+                                "outputHash":"${"d".repeat(64)}",
+                                "executionId":1
+                            },
+                            "createdAt":"2026-07-17T00:00:00Z",
+                            "hash":"${"e".repeat(64)}"
+                        }
+                    }]
+                }""".trimIndent(),
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val proposal = client.generateCircuitProposal(3).circuitProposals.single().proposal
+
+        assertEquals("Generated circuit", proposal.content.plan.title)
+        assertEquals("bounded-circuit-synthesis-v1", proposal.provenance.executionProfileId)
         client.close()
     }
 

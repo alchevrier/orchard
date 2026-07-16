@@ -8,6 +8,8 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.time.Instant
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -55,6 +57,7 @@ data class StagedDeliveryPlanSubmission(
     val stages: List<StagedPlanStageSubmission>,
     val baseRevision: Int = 0,
     val baseHash: String? = null,
+    val sourceProposal: CircuitProposalReference? = null,
 )
 
 @Serializable
@@ -125,6 +128,7 @@ data class StagedPlanStage(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class StagedDeliveryPlan(
     val planId: Long,
     val revision: Int,
@@ -135,6 +139,10 @@ data class StagedDeliveryPlan(
     val acceptedBy: String = COLLABORATOR_HUMAN,
     val acceptedAt: String = Instant.now().toString(),
     val hash: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val sourceProposal: CircuitProposalReference? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val acceptedProposalUnchanged: Boolean = false,
 )
 
 @Serializable
@@ -168,6 +176,7 @@ data class StagedDeliveryPlanView(
 enum class StagedPlanStatus {
     ACCEPTED,
     SCOPE_NOT_FOUND,
+    PROPOSAL_NOT_FOUND,
     INVALID_SCOPE,
     INVALID_PLAN,
     PLAN_LOCKED,

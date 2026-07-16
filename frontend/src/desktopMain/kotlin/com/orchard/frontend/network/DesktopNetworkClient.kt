@@ -47,6 +47,12 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
             setBody(plan)
         }.successBody()
 
+    suspend fun generateCircuitProposal(scopeId: Int): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/staged-plan-proposals/$scopeId/generate").successBody()
+
+    suspend fun acceptCircuitProposal(proposalId: Long): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/staged-plan-proposals/$proposalId/accept").successBody()
+
     suspend fun submitArchitectPrompt(prompt: String): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8086/api/architect/chat") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
@@ -136,6 +142,7 @@ data class WorkspaceSnapshotResponse(
     val definitionProposals: List<DefinitionProposalViewResponse> = emptyList(),
     val modelProfiles: List<ModelCapabilityProfileResponse> = emptyList(),
     val stagedPlans: List<StagedDeliveryPlanViewResponse> = emptyList(),
+    val circuitProposals: List<CircuitProposalViewResponse> = emptyList(),
     val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse> = emptyList(),
 )
 
@@ -183,6 +190,52 @@ data class StagedDeliveryPlanSubmissionRequest(
     val stages: List<StagedPlanStageSubmissionRequest>,
     val baseRevision: Int = 0,
     val baseHash: String? = null,
+    val sourceProposal: CircuitProposalReferenceRequest? = null,
+)
+
+@Serializable
+data class CircuitProposalReferenceRequest(
+    val proposalId: Long,
+    val proposalHash: String,
+)
+
+@Serializable
+data class CircuitExecutionProvenanceResponse(
+    val executor: String,
+    val model: String,
+    val executionProfileId: String,
+    val bindingFingerprint: String,
+    val promptVersion: Int,
+    val promptHash: String,
+    val contextHash: String,
+    val outputHash: String,
+    val executionId: Long,
+)
+
+@Serializable
+data class CircuitProposalContentResponse(
+    val plan: StagedDeliveryPlanSubmissionRequest,
+    val observations: List<String> = emptyList(),
+    val assumptions: List<String> = emptyList(),
+)
+
+@Serializable
+data class CircuitProposalResponse(
+    val proposalId: Long,
+    val scopeId: Int,
+    val revision: Int,
+    val actor: String,
+    val content: CircuitProposalContentResponse,
+    val provenance: CircuitExecutionProvenanceResponse,
+    val createdAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class CircuitProposalViewResponse(
+    val proposal: CircuitProposalResponse,
+    val acceptedPlanId: Long? = null,
+    val acceptedUnchanged: Boolean = false,
 )
 
 @Serializable
@@ -230,6 +283,8 @@ data class StagedDeliveryPlanResponse(
     val acceptedBy: String,
     val acceptedAt: String,
     val hash: String,
+    val sourceProposal: CircuitProposalReferenceRequest? = null,
+    val acceptedProposalUnchanged: Boolean = false,
 )
 
 @Serializable
