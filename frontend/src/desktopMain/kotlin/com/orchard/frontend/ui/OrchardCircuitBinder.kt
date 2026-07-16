@@ -31,6 +31,8 @@ import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedTextField
+import androidx.compose.material.RadioButton
+import androidx.compose.material.Slider
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -42,6 +44,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -56,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -72,11 +76,19 @@ import com.orchard.frontend.network.WorkflowRunResponse
 import com.orchard.frontend.network.WorkDefinitionResponse
 import com.orchard.frontend.network.WorkDefinitionSubmissionRequest
 import com.orchard.frontend.network.AcceptanceCriterionRequest
+import com.orchard.frontend.network.DefinitionProposalViewResponse
+import com.orchard.frontend.network.ModelCapabilityProfileResponse
+import com.orchard.frontend.network.ModelProfileConfigurationResponse
+import com.orchard.frontend.network.ModelProfileOverrideRequest
+import com.orchard.frontend.network.MachineResourceConfigurationResponse
+import com.orchard.frontend.network.MachineUsagePolicyRequest
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.math.roundToInt
 
 private const val PROJECT = "PROJECT"
 private const val EPIC = "EPIC"
@@ -109,10 +121,14 @@ private data class WorkspaceSnapshot(
     val repositories: Map<Int, RepositoryResponse>,
     val workflowRuns: List<WorkflowRunResponse>,
     val workDefinitions: List<WorkDefinitionResponse>,
+    val definitionProposals: List<DefinitionProposalViewResponse>,
+    val modelProfiles: List<ModelCapabilityProfileResponse>,
 )
 
 class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
-    private val requestMutex = Mutex()
+    private val responseMutex = Mutex()
+    private val requestSequence = AtomicLong()
+    private var appliedResponseSequence = 0L
     private var response by mutableStateOf(WorkspaceSnapshotResponse())
 
     @Composable
@@ -124,7 +140,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var cancellingRunId by remember { mutableStateOf(0L) }
         var definingWorkItemId by remember { mutableStateOf(0) }
         var isSubmittingDefinition by remember { mutableStateOf(false) }
+        var analyzingWorkItemIds by remember { mutableStateOf(emptySet<Int>()) }
         var requestError by remember { mutableStateOf<String?>(null) }
+        var showModelSettings by remember { mutableStateOf(false) }
+        var modelProfileConfigurations by remember { mutableStateOf(emptyList<ModelProfileConfigurationResponse>()) }
+        var machineResourceConfiguration by remember { mutableStateOf<MachineResourceConfigurationResponse?>(null) }
+        var isLoadingModelSettings by remember { mutableStateOf(false) }
+        var isSavingModelSettings by remember { mutableStateOf(false) }
+        var isSavingMachinePolicy by remember { mutableStateOf(false) }
         var selectedProjectId by remember { mutableStateOf(0) }
         var selectedEpicId by remember { mutableStateOf(0) }
         val scope = rememberCoroutineScope()
@@ -180,6 +203,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                     isBindingRepository = isBindingRepository,
                     startingWorkItemId = startingWorkItemId,
                     cancellingRunId = cancellingRunId,
+                    analyzingWorkItemIds = analyzingWorkItemIds,
                     onSelectEpic = { selectedEpicId = it },
                     onBindRepository = {
                         val selectedPath = chooseRepositoryDirectory(activeRepository?.path)
@@ -216,11 +240,40 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                         }
                     },
                     onDefineWork = { workItemId -> definingWorkItemId = workItemId },
+                    onAnalyzeWork = { workItemId ->
+                        if (workItemId !in analyzingWorkItemIds) {
+                            analyzingWorkItemIds = analyzingWorkItemIds + workItemId
+                            requestError = null
+                            scope.launch {
+                                generateDefinitionProposal(workItemId)
+                                    .onSuccess { definingWorkItemId = workItemId }
+                                    .onFailure { requestError = it.message ?: "The local model could not propose a definition." }
+                                analyzingWorkItemIds = analyzingWorkItemIds - workItemId
+                            }
+                        }
+                    },
                     onRefresh = {
                         scope.launch {
                             requestError = null
                             refreshWorkspace().onFailure {
                                 requestError = it.message ?: "Unable to refresh the workspace."
+                            }
+                        }
+                    },
+                    onOpenSettings = {
+                        if (!isLoadingModelSettings) {
+                            isLoadingModelSettings = true
+                            scope.launch {
+                                runCatching {
+                                    networkClient.getModelProfileConfigurations() to
+                                        networkClient.getMachineResourceConfiguration()
+                                }.onSuccess { (profiles, resources) ->
+                                        modelProfileConfigurations = profiles
+                                        machineResourceConfiguration = resources
+                                        showModelSettings = true
+                                    }
+                                    .onFailure { requestError = it.message ?: "Unable to load model settings." }
+                                isLoadingModelSettings = false
                             }
                         }
                     },
@@ -235,17 +288,50 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 )
             }
             snapshot.entities.firstOrNull { it.id == definingWorkItemId }?.let { workItem ->
+                val latestProposal = snapshot.definitionProposals
+                    .filter { it.proposal.workItemId == workItem.id }
+                    .maxByOrNull { it.proposal.revision }
                 WorkDefinitionDialog(
                     workItem = workItem,
                     current = snapshot.workDefinitions.firstOrNull { it.workItemId == workItem.id },
+                    latestProposal = latestProposal,
+                    modelProfile = latestProposal?.proposal?.provenance?.bindingFingerprint?.let { fingerprint ->
+                        snapshot.modelProfiles.firstOrNull { it.bindingFingerprint == fingerprint }
+                    },
                     isSubmitting = isSubmittingDefinition,
+                    isAnalyzing = workItem.id in analyzingWorkItemIds,
                     onDismiss = { if (!isSubmittingDefinition) definingWorkItemId = 0 },
-                    onSubmit = { definition ->
+                    onAnalyze = {
+                        if (workItem.id !in analyzingWorkItemIds) {
+                            analyzingWorkItemIds = analyzingWorkItemIds + workItem.id
+                            scope.launch {
+                                generateDefinitionProposal(workItem.id)
+                                    .onFailure { requestError = it.message ?: "The local model could not revise the proposal." }
+                                analyzingWorkItemIds = analyzingWorkItemIds - workItem.id
+                            }
+                        }
+                    },
+                    onFeedback = { proposalId, feedback ->
+                        if (!isSubmittingDefinition) {
+                            isSubmittingDefinition = true
+                            scope.launch {
+                                submitDefinitionFeedback(proposalId, feedback)
+                                    .onFailure { requestError = it.message ?: "The feedback could not be recorded." }
+                                isSubmittingDefinition = false
+                            }
+                        }
+                    },
+                    onSubmit = { proposalId, definition ->
                         if (!isSubmittingDefinition) {
                             isSubmittingDefinition = true
                             requestError = null
                             scope.launch {
-                                submitWorkDefinition(workItem.id, definition)
+                                val operation = if (proposalId == null) {
+                                    submitWorkDefinition(workItem.id, definition)
+                                } else {
+                                    acceptDefinitionProposal(proposalId, definition)
+                                }
+                                operation
                                     .onSuccess { definingWorkItemId = 0 }
                                     .onFailure { requestError = it.message ?: "Unable to assess the work definition." }
                                 isSubmittingDefinition = false
@@ -253,6 +339,44 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                         }
                     },
                 )
+            }
+            if (showModelSettings) {
+                val resourceConfiguration = machineResourceConfiguration
+                modelProfileConfigurations.firstOrNull()?.let { configuration ->
+                    if (resourceConfiguration == null) return@let
+                    ModelProfileSettingsDialog(
+                        configuration = configuration,
+                        resourceConfiguration = resourceConfiguration,
+                        isSaving = isSavingModelSettings,
+                        isSavingMachinePolicy = isSavingMachinePolicy,
+                        onDismiss = {
+                            if (!isSavingModelSettings && !isSavingMachinePolicy) showModelSettings = false
+                        },
+                        onSaveMachinePolicy = { policy ->
+                            isSavingMachinePolicy = true
+                            requestError = null
+                            scope.launch {
+                                runCatching { networkClient.updateMachineUsagePolicy(policy) }
+                                    .onSuccess { machineResourceConfiguration = it }
+                                    .onFailure { requestError = it.message ?: "Unable to save machine usage policy." }
+                                isSavingMachinePolicy = false
+                            }
+                        },
+                        onSave = { override ->
+                            isSavingModelSettings = true
+                            requestError = null
+                            scope.launch {
+                                runCatching { networkClient.updateModelProfile(override) }
+                                    .onSuccess {
+                                        modelProfileConfigurations = it
+                                        showModelSettings = false
+                                    }
+                                    .onFailure { requestError = it.message ?: "Unable to save model settings." }
+                                isSavingModelSettings = false
+                            }
+                        },
+                    )
+                }
             }
         }
     }
@@ -280,14 +404,33 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         networkClient.submitWorkDefinition(workItemId, definition)
     }
 
+    private suspend fun generateDefinitionProposal(workItemId: Int): Result<Unit> = executeRequest {
+        networkClient.generateDefinitionProposal(workItemId)
+    }
+
+    private suspend fun submitDefinitionFeedback(proposalId: Long, content: String): Result<Unit> = executeRequest {
+        networkClient.submitDefinitionFeedback(proposalId, content)
+    }
+
+    private suspend fun acceptDefinitionProposal(
+        proposalId: Long,
+        definition: WorkDefinitionSubmissionRequest,
+    ): Result<Unit> = executeRequest {
+        networkClient.acceptDefinitionProposal(proposalId, definition)
+    }
+
     private suspend fun cancelWorkflow(runId: Long): Result<Unit> = executeRequest {
         networkClient.cancelWorkflow(runId)
     }
 
     private suspend fun executeRequest(request: suspend () -> WorkspaceSnapshotResponse): Result<Unit> {
-        return requestMutex.withLock {
-            runCatching {
-                response = request()
+        val sequence = requestSequence.incrementAndGet()
+        return runCatching { request() }.map { snapshot ->
+            responseMutex.withLock {
+                if (sequence > appliedResponseSequence) {
+                    response = snapshot
+                    appliedResponseSequence = sequence
+                }
             }
         }
     }
@@ -319,6 +462,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             response.repositories,
             response.workflowRuns,
             response.workDefinitions,
+            response.definitionProposals,
+            response.modelProfiles,
         )
     }
 
@@ -422,12 +567,15 @@ private fun WorkspaceBoard(
     isBindingRepository: Boolean,
     startingWorkItemId: Int,
     cancellingRunId: Long,
+    analyzingWorkItemIds: Set<Int>,
     onSelectEpic: (Int) -> Unit,
     onBindRepository: () -> Unit,
     onStartWorkflow: (Int) -> Unit,
     onCancelWorkflow: (Long) -> Unit,
     onDefineWork: (Int) -> Unit,
+    onAnalyzeWork: (Int) -> Unit,
     onRefresh: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val project = snapshot.entities.firstOrNull { it.id == projectId }
     val stories = snapshot.entities.filter { it.type == STORY && it.parentId == epicId }
@@ -441,8 +589,13 @@ private fun WorkspaceBoard(
                 Text(project?.title ?: "Workspace", fontSize = 27.sp, fontWeight = FontWeight.Black, color = OrchardColors.ink)
                 Text("AI-governed delivery backlog", fontSize = 13.sp, color = OrchardColors.muted)
             }
-            IconButton(onClick = onRefresh) {
-                Icon(Icons.Default.Refresh, contentDescription = "Refresh workspace", tint = OrchardColors.muted)
+            Row {
+                IconButton(onClick = onOpenSettings) {
+                    Icon(Icons.Default.Settings, contentDescription = "Model profile settings", tint = OrchardColors.muted)
+                }
+                IconButton(onClick = onRefresh) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh workspace", tint = OrchardColors.muted)
+                }
             }
         }
         Divider(color = OrchardColors.divider)
@@ -483,11 +636,14 @@ private fun WorkspaceBoard(
                         tickets = snapshot.entities.filter { it.parentId == story.id && (it.type == TASK || it.type == BUG) },
                         workflowRuns = snapshot.workflowRuns,
                         workDefinitions = snapshot.workDefinitions,
+                        definitionProposals = snapshot.definitionProposals,
                         startingWorkItemId = startingWorkItemId,
                         onStartWorkflow = onStartWorkflow,
                         cancellingRunId = cancellingRunId,
                         onCancelWorkflow = onCancelWorkflow,
                         onDefineWork = onDefineWork,
+                        analyzingWorkItemIds = analyzingWorkItemIds,
+                        onAnalyzeWork = onAnalyzeWork,
                     )
                 }
             }
@@ -574,11 +730,14 @@ private fun StoryBoard(
     tickets: List<WorkspaceEntity>,
     workflowRuns: List<WorkflowRunResponse>,
     workDefinitions: List<WorkDefinitionResponse>,
+    definitionProposals: List<DefinitionProposalViewResponse>,
     startingWorkItemId: Int,
     onStartWorkflow: (Int) -> Unit,
     cancellingRunId: Long,
     onCancelWorkflow: (Long) -> Unit,
     onDefineWork: (Int) -> Unit,
+    analyzingWorkItemIds: Set<Int>,
+    onAnalyzeWork: (Int) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().background(OrchardColors.storyBand, RoundedCornerShape(8.dp)).padding(18.dp),
@@ -596,11 +755,15 @@ private fun StoryBoard(
                             ticket = ticket,
                             workflowRun = workflowRuns.firstOrNull { it.context.workItemId == ticket.id },
                             workDefinition = workDefinitions.firstOrNull { it.workItemId == ticket.id },
+                            latestProposal = definitionProposals.filter { it.proposal.workItemId == ticket.id }
+                                .maxByOrNull { it.proposal.revision },
                             isStarting = startingWorkItemId == ticket.id,
                             onStartWorkflow = { onStartWorkflow(ticket.id) },
                             isCancelling = workflowRuns.firstOrNull { it.context.workItemId == ticket.id }?.runId == cancellingRunId,
                             onCancelWorkflow = { runId -> onCancelWorkflow(runId) },
                             onDefineWork = { onDefineWork(ticket.id) },
+                            isAnalyzing = ticket.id in analyzingWorkItemIds,
+                            onAnalyzeWork = { onAnalyzeWork(ticket.id) },
                         )
                     }
                     if (statusTickets.isEmpty()) {
@@ -617,11 +780,14 @@ private fun TicketCard(
     ticket: WorkspaceEntity,
     workflowRun: WorkflowRunResponse?,
     workDefinition: WorkDefinitionResponse?,
+    latestProposal: DefinitionProposalViewResponse?,
     isStarting: Boolean,
     onStartWorkflow: () -> Unit,
     isCancelling: Boolean,
     onCancelWorkflow: (Long) -> Unit,
     onDefineWork: () -> Unit,
+    isAnalyzing: Boolean,
+    onAnalyzeWork: () -> Unit,
 ) {
     Surface(
         color = OrchardColors.white,
@@ -663,6 +829,41 @@ private fun TicketCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 4.dp),
                     )
+                }
+                latestProposal?.let { proposal ->
+                    Text(
+                        "${proposal.proposal.actor.replace('_', ' ')} PROPOSAL  R${proposal.proposal.revision}",
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                        color = OrchardColors.muted,
+                        modifier = Modifier.padding(top = 5.dp),
+                    )
+                    proposal.feedback.lastOrNull()?.let { feedback ->
+                        Text(
+                            "Feedback: ${feedback.content}",
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = OrchardColors.ink,
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = onAnalyzeWork,
+                    enabled = !isAnalyzing,
+                    modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 3.dp),
+                ) {
+                    if (isAnalyzing) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = OrchardColors.moss)
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(15.dp))
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (latestProposal == null) "Analyze with local model" else "Ask model to revise", fontSize = 11.sp, color = OrchardColors.moss)
                 }
                 TextButton(
                     onClick = onDefineWork,
@@ -752,30 +953,257 @@ private fun TicketCard(
 }
 
 @Composable
+private fun ModelProfileSettingsDialog(
+    configuration: ModelProfileConfigurationResponse,
+    resourceConfiguration: MachineResourceConfigurationResponse,
+    isSaving: Boolean,
+    isSavingMachinePolicy: Boolean,
+    onDismiss: () -> Unit,
+    onSaveMachinePolicy: (MachineUsagePolicyRequest) -> Unit,
+    onSave: (ModelProfileOverrideRequest) -> Unit,
+) {
+    var inputBudget by remember(configuration.effectiveProfile.inputBudgetTokens) {
+        mutableStateOf(configuration.effectiveProfile.inputBudgetTokens.toString())
+    }
+    var outputBudget by remember(configuration.effectiveProfile.outputBudgetTokens) {
+        mutableStateOf(configuration.effectiveProfile.outputBudgetTokens.toString())
+    }
+    var preferredBindingId by remember(configuration.override?.preferredBindingId) {
+        mutableStateOf(configuration.override?.preferredBindingId)
+    }
+    var capacityPercent by remember(resourceConfiguration.policy.capacityPercent) {
+        mutableStateOf(resourceConfiguration.policy.capacityPercent)
+    }
+    var minimumFreeMemoryMiB by remember(resourceConfiguration.policy.minimumFreeMemoryBytes) {
+        mutableStateOf((resourceConfiguration.policy.minimumFreeMemoryBytes / MEBIBYTE).toString())
+    }
+    var maxConcurrentExecutions by remember(resourceConfiguration.policy.maxConcurrentModelExecutions) {
+        mutableStateOf(resourceConfiguration.policy.maxConcurrentModelExecutions.toString())
+    }
+    val inputTokens = inputBudget.toIntOrNull()
+    val outputTokens = outputBudget.toIntOrNull()
+    val validNumbers = inputTokens != null && outputTokens != null && inputTokens >= 1_024 && outputTokens >= 256
+    val requiredCapacity = if (validNumbers) requireNotNull(inputTokens).toLong() + requireNotNull(outputTokens).toLong() else Long.MAX_VALUE
+    val compatibleDraftBindings = configuration.installedBindings.filter {
+        it.contextWindowTokens.toLong() >= requiredCapacity &&
+            it.capabilities.containsAll(configuration.effectiveProfile.requiredCapabilities)
+    }
+    val selectedBindingFits = if (preferredBindingId == null) {
+        compatibleDraftBindings.isNotEmpty()
+    } else {
+        compatibleDraftBindings.any { it.bindingId == preferredBindingId }
+    }
+    val minimumFreeMiB = minimumFreeMemoryMiB.toLongOrNull()
+    val minimumFreeBytes = minimumFreeMiB?.takeIf { it <= Long.MAX_VALUE / MEBIBYTE }?.times(MEBIBYTE)
+    val maxConcurrent = maxConcurrentExecutions.toIntOrNull()
+    val validResourcePolicy = minimumFreeBytes != null && minimumFreeBytes >= 0 &&
+        minimumFreeBytes < resourceConfiguration.capacity.totalMemoryBytes &&
+        maxConcurrent != null && maxConcurrent in 1..resourceConfiguration.capacity.logicalProcessors
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("Execution settings", fontWeight = FontWeight.Bold)
+                Text(configuration.effectiveProfile.id, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = OrchardColors.muted)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.width(520.dp).heightIn(max = 680.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("MACHINE CAPACITY", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
+                Text(
+                    "${formatGiB(resourceConfiguration.capacity.availableMemoryBytes)} available of " +
+                        "${formatGiB(resourceConfiguration.capacity.totalMemoryBytes)} · " +
+                        "${resourceConfiguration.capacity.systemCpuLoad?.let { "${(it * 100).roundToInt()}% CPU load" } ?: "CPU load unavailable"} · " +
+                        "${resourceConfiguration.activeLeases} active leases",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = OrchardColors.muted,
+                )
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Orchard share", fontSize = 12.sp, modifier = Modifier.width(110.dp))
+                    Slider(
+                        value = capacityPercent.toFloat(),
+                        onValueChange = { capacityPercent = it.roundToInt() },
+                        valueRange = 1f..100f,
+                        steps = 98,
+                        enabled = !isSavingMachinePolicy,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text("$capacityPercent%", fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.width(42.dp))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = minimumFreeMemoryMiB,
+                        onValueChange = { minimumFreeMemoryMiB = it.filter(Char::isDigit) },
+                        enabled = !isSavingMachinePolicy,
+                        label = { Text("Minimum free memory (MiB)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = maxConcurrentExecutions,
+                        onValueChange = { maxConcurrentExecutions = it.filter(Char::isDigit) },
+                        enabled = !isSavingMachinePolicy,
+                        label = { Text("Concurrent model jobs") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                resourceConfiguration.lastAdmission?.let { admission ->
+                    Text(
+                        "${admission.decision}: ${admission.reason}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = if (admission.decision == "ADMITTED") OrchardColors.moss else OrchardColors.clay,
+                    )
+                }
+                TextButton(
+                    enabled = validResourcePolicy && !isSavingMachinePolicy,
+                    onClick = {
+                        onSaveMachinePolicy(
+                            MachineUsagePolicyRequest(
+                                capacityPercent,
+                                requireNotNull(minimumFreeBytes),
+                                requireNotNull(maxConcurrent),
+                            )
+                        )
+                    },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    if (isSavingMachinePolicy) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    else Text("Save machine policy")
+                }
+                Divider(color = OrchardColors.divider)
+                Text("MODEL APERTURE", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = inputBudget,
+                        onValueChange = { inputBudget = it.filter(Char::isDigit) },
+                        enabled = !isSaving,
+                        label = { Text("Input aperture (tokens)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = outputBudget,
+                        onValueChange = { outputBudget = it.filter(Char::isDigit) },
+                        enabled = !isSaving,
+                        label = { Text("Output reserve (tokens)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    "Default ${configuration.defaultProfile.inputBudgetTokens} input + " +
+                        "${configuration.defaultProfile.outputBudgetTokens} output",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = OrchardColors.muted,
+                )
+                Divider(color = OrchardColors.divider)
+                Text("MODEL BINDING", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable(enabled = !isSaving) { preferredBindingId = null },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = preferredBindingId == null, onClick = { preferredBindingId = null }, enabled = !isSaving)
+                    Text("Automatic routing", fontSize = 12.sp)
+                }
+                configuration.installedBindings.forEach { binding ->
+                    val compatible = binding.contextWindowTokens.toLong() >= requiredCapacity &&
+                        binding.capabilities.containsAll(configuration.effectiveProfile.requiredCapabilities)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable(enabled = compatible && !isSaving) {
+                            preferredBindingId = binding.bindingId
+                        },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = preferredBindingId == binding.bindingId,
+                            onClick = { preferredBindingId = binding.bindingId },
+                            enabled = compatible && !isSaving,
+                        )
+                        Column {
+                            Text(binding.model, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                "${binding.provider} · ${binding.contextWindowTokens} token capacity",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = if (compatible) OrchardColors.muted else OrchardColors.clay,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = validNumbers && selectedBindingFits && !isSaving,
+                onClick = {
+                    onSave(
+                        ModelProfileOverrideRequest(
+                            profileId = configuration.effectiveProfile.id,
+                            inputBudgetTokens = requireNotNull(inputTokens),
+                            outputBudgetTokens = requireNotNull(outputTokens),
+                            preferredBindingId = preferredBindingId,
+                        )
+                    )
+                },
+            ) {
+                if (isSaving) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                else Text("Save profile")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !isSaving) { Text("Cancel") } },
+        shape = RoundedCornerShape(8.dp),
+        backgroundColor = OrchardColors.surface,
+    )
+}
+
+private const val MEBIBYTE = 1_048_576L
+
+private fun formatGiB(bytes: Long): String = "%.1f GiB".format(bytes.toDouble() / 1_073_741_824.0)
+
+@Composable
 private fun WorkDefinitionDialog(
     workItem: WorkspaceEntity,
     current: WorkDefinitionResponse?,
+    latestProposal: DefinitionProposalViewResponse?,
+    modelProfile: ModelCapabilityProfileResponse?,
     isSubmitting: Boolean,
+    isAnalyzing: Boolean,
     onDismiss: () -> Unit,
-    onSubmit: (WorkDefinitionSubmissionRequest) -> Unit,
+    onAnalyze: () -> Unit,
+    onFeedback: (Long, String) -> Unit,
+    onSubmit: (Long?, WorkDefinitionSubmissionRequest) -> Unit,
 ) {
-    val existing = current?.definition
-    var requestedOutcome by remember(workItem.id, current?.hash) { mutableStateOf(existing?.requestedOutcome.orEmpty()) }
-    var currentBehavior by remember(workItem.id, current?.hash) { mutableStateOf(existing?.currentBehavior.orEmpty()) }
-    var requiredBehavior by remember(workItem.id, current?.hash) { mutableStateOf(existing?.requiredBehavior.orEmpty()) }
-    var scope by remember(workItem.id, current?.hash) { mutableStateOf(existing?.scope.orEmpty().joinToString("\n")) }
-    var nonGoals by remember(workItem.id, current?.hash) { mutableStateOf(existing?.nonGoals.orEmpty().joinToString("\n")) }
-    var constraints by remember(workItem.id, current?.hash) { mutableStateOf(existing?.constraints.orEmpty().joinToString("\n")) }
-    var criteria by remember(workItem.id, current?.hash) {
+    val existing = latestProposal?.proposal?.content?.definition ?: current?.definition
+    val revisionKey = latestProposal?.proposal?.hash ?: current?.hash
+    var requestedOutcome by remember(workItem.id, revisionKey) { mutableStateOf(existing?.requestedOutcome.orEmpty()) }
+    var currentBehavior by remember(workItem.id, revisionKey) { mutableStateOf(existing?.currentBehavior.orEmpty()) }
+    var requiredBehavior by remember(workItem.id, revisionKey) { mutableStateOf(existing?.requiredBehavior.orEmpty()) }
+    var scope by remember(workItem.id, revisionKey) { mutableStateOf(existing?.scope.orEmpty().joinToString("\n")) }
+    var nonGoals by remember(workItem.id, revisionKey) { mutableStateOf(existing?.nonGoals.orEmpty().joinToString("\n")) }
+    var constraints by remember(workItem.id, revisionKey) { mutableStateOf(existing?.constraints.orEmpty().joinToString("\n")) }
+    var criteria by remember(workItem.id, revisionKey) {
         mutableStateOf(existing?.acceptanceCriteria.orEmpty().joinToString("\n") { it.description })
     }
-    var verification by remember(workItem.id, current?.hash) {
+    var verification by remember(workItem.id, revisionKey) {
         mutableStateOf(existing?.acceptanceCriteria.orEmpty().joinToString("\n") { it.verification })
     }
-    var questions by remember(workItem.id, current?.hash) { mutableStateOf(existing?.unresolvedQuestions.orEmpty().joinToString("\n")) }
-    var splits by remember(workItem.id, current?.hash) { mutableStateOf(existing?.proposedSplitTitles.orEmpty().joinToString("\n")) }
-    var reproduction by remember(workItem.id, current?.hash) { mutableStateOf(existing?.reproduction.orEmpty()) }
-    var regression by remember(workItem.id, current?.hash) { mutableStateOf(existing?.regressionCriterion.orEmpty()) }
+    var questions by remember(workItem.id, revisionKey) { mutableStateOf(existing?.unresolvedQuestions.orEmpty().joinToString("\n")) }
+    var splits by remember(workItem.id, revisionKey) { mutableStateOf(existing?.proposedSplitTitles.orEmpty().joinToString("\n")) }
+    var reproduction by remember(workItem.id, revisionKey) { mutableStateOf(existing?.reproduction.orEmpty()) }
+    var regression by remember(workItem.id, revisionKey) { mutableStateOf(existing?.regressionCriterion.orEmpty()) }
+    var feedback by remember(workItem.id, revisionKey) { mutableStateOf("") }
 
     fun lines(value: String): List<String> = value.lines().map(String::trim).filter(String::isNotEmpty)
 
@@ -792,29 +1220,74 @@ private fun WorkDefinitionDialog(
                 modifier = Modifier.width(620.dp).heightIn(max = 680.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                DefinitionField("Requested outcome", requestedOutcome) { requestedOutcome = it }
-                DefinitionField("Current behavior", currentBehavior) { currentBehavior = it }
-                DefinitionField("Required behavior", requiredBehavior) { requiredBehavior = it }
-                DefinitionField("Scope (one per line)", scope) { scope = it }
-                DefinitionField("Non-goals (one per line)", nonGoals) { nonGoals = it }
-                DefinitionField("Constraints (one per line)", constraints) { constraints = it }
-                DefinitionField("Acceptance criteria (one per line)", criteria) { criteria = it }
-                DefinitionField("Verification for each criterion (one per line)", verification) { verification = it }
+                DefinitionField("Requested outcome", requestedOutcome, !isAnalyzing) { requestedOutcome = it }
+                DefinitionField("Current behavior", currentBehavior, !isAnalyzing) { currentBehavior = it }
+                DefinitionField("Required behavior", requiredBehavior, !isAnalyzing) { requiredBehavior = it }
+                DefinitionField("Scope (one per line)", scope, !isAnalyzing) { scope = it }
+                DefinitionField("Non-goals (one per line)", nonGoals, !isAnalyzing) { nonGoals = it }
+                DefinitionField("Constraints (one per line)", constraints, !isAnalyzing) { constraints = it }
+                DefinitionField("Acceptance criteria (one per line)", criteria, !isAnalyzing) { criteria = it }
+                DefinitionField("Verification for each criterion (one per line)", verification, !isAnalyzing) { verification = it }
                 if (workItem.type == BUG) {
-                    DefinitionField("Reproduction", reproduction) { reproduction = it }
-                    DefinitionField("Regression criterion", regression) { regression = it }
+                    DefinitionField("Reproduction", reproduction, !isAnalyzing) { reproduction = it }
+                    DefinitionField("Regression criterion", regression, !isAnalyzing) { regression = it }
                 }
-                DefinitionField("Unresolved questions (one per line)", questions) { questions = it }
-                DefinitionField("Proposed split titles (one per line)", splits) { splits = it }
+                DefinitionField("Unresolved questions (one per line)", questions, !isAnalyzing) { questions = it }
+                DefinitionField("Proposed split titles (one per line)", splits, !isAnalyzing) { splits = it }
+                latestProposal?.let { proposal ->
+                    Divider(color = OrchardColors.divider, modifier = Modifier.padding(vertical = 4.dp))
+                    modelProfile?.let { profile ->
+                        Text(
+                            "MODEL MEMORY  ${profile.binding.model}",
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            color = OrchardColors.moss,
+                        )
+                        Text(
+                            "${profile.executionProfileId} · ${profile.sampleCount} runs · " +
+                                "${(profile.schemaValidityRate * 100).toInt()}% valid · " +
+                                "${profile.acceptedUnchangedCount} unchanged · " +
+                                "${profile.acceptedAfterEditCount} edited · " +
+                                "${profile.revisionRequestedCount} revised · ${profile.medianLatencyMillis} ms median",
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                            color = OrchardColors.muted,
+                        )
+                    }
+                    if (proposal.proposal.content.observations.isNotEmpty()) {
+                        Text("OBSERVATIONS", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
+                        Text(proposal.proposal.content.observations.joinToString("\n"), fontSize = 11.sp, lineHeight = 16.sp)
+                    }
+                    if (proposal.proposal.content.assumptions.isNotEmpty()) {
+                        Text("ASSUMPTIONS", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.clay)
+                        Text(proposal.proposal.content.assumptions.joinToString("\n"), fontSize = 11.sp, lineHeight = 16.sp)
+                    }
+                    DefinitionField("Human feedback for the next revision", feedback, !isAnalyzing) { feedback = it }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        TextButton(
+                            onClick = { onFeedback(proposal.proposal.proposalId, feedback) },
+                            enabled = feedback.isNotBlank() && !isSubmitting && !isAnalyzing,
+                        ) { Text("Record feedback") }
+                        TextButton(onClick = onAnalyze, enabled = !isSubmitting && !isAnalyzing) {
+                            if (isAnalyzing) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            else Text("Generate revision")
+                        }
+                    }
+                } ?: TextButton(onClick = onAnalyze, enabled = !isSubmitting && !isAnalyzing) {
+                    if (isAnalyzing) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    else Text("Analyze with local model")
+                }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = !isSubmitting,
+                enabled = !isSubmitting && !isAnalyzing,
                 onClick = {
                     val descriptions = lines(criteria)
                     val verifications = lines(verification)
                     onSubmit(
+                        latestProposal?.proposal?.proposalId,
                         WorkDefinitionSubmissionRequest(
                             requestedOutcome = requestedOutcome,
                             currentBehavior = currentBehavior,
@@ -834,20 +1307,21 @@ private fun WorkDefinitionDialog(
                 },
             ) {
                 if (isSubmitting) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                else Text("Assess definition")
+                else Text(if (latestProposal == null) "Assess human definition" else "Accept and assess")
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !isSubmitting) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !isSubmitting && !isAnalyzing) { Text("Cancel") } },
         shape = RoundedCornerShape(8.dp),
         backgroundColor = OrchardColors.surface,
     )
 }
 
 @Composable
-private fun DefinitionField(label: String, value: String, onValueChange: (String) -> Unit) {
+private fun DefinitionField(label: String, value: String, enabled: Boolean, onValueChange: (String) -> Unit) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
+        enabled = enabled,
         label = { Text(label, fontSize = 11.sp) },
         modifier = Modifier.fillMaxWidth(),
         minLines = 2,

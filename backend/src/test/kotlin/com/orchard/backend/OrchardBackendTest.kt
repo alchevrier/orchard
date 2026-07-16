@@ -2,8 +2,28 @@ package com.orchard.backend
 
 import com.orchard.backend.agent.ArchitectChatRequest
 import com.orchard.backend.agent.ArchitectService
+import com.orchard.backend.agent.DefinitionIntelligenceService
+import com.orchard.backend.agent.ProposalGenerationStatus
 import com.orchard.backend.api.DocumentIntent
+import com.orchard.backend.resource.MachineCapacityMonitor
+import com.orchard.backend.resource.MachineCapacitySnapshot
+import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.MachineUsagePolicy
+import com.orchard.backend.resource.ModelResourceDemand
+import com.orchard.backend.resource.ResourceAdmissionDecision
+import com.orchard.backend.resource.TransientMachineUsagePolicyStore
+import com.orchard.backend.resource.SystemMachineCapacityMonitor
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.ModelBindingProfile
+import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
+import com.orchard.backend.vector.DefaultModelExecutionProfiles
+import com.orchard.backend.vector.ModelBindingEvidence
+import com.orchard.backend.vector.ModelProfileResolver
+import com.orchard.backend.vector.modelBindingFingerprint
+import com.orchard.backend.vector.ModelProfileOverride
+import com.orchard.backend.vector.ModelProfileUpdateStatus
+import com.orchard.backend.vector.TransientModelProfileSettingsStore
+import com.orchard.backend.vector.ModelProfileSettingsStore
 import com.orchard.backend.vector.OllamaGenerateRequest
 import com.orchard.backend.vector.OllamaOptions
 import com.orchard.backend.workspace.WorkspaceEntity
@@ -22,6 +42,13 @@ import com.orchard.backend.workspace.DEFINITION_READY
 import com.orchard.backend.workspace.WorkDefinitionStatus
 import com.orchard.backend.workspace.WorkflowStepEngine
 import com.orchard.backend.workspace.FACT_WORK_ITEM_EXISTS
+import com.orchard.backend.workspace.ACTION_ACCEPT
+import com.orchard.backend.workspace.ACTION_FEEDBACK
+import com.orchard.backend.workspace.COLLABORATOR_HUMAN
+import com.orchard.backend.workspace.COLLABORATOR_LOCAL_LLM
+import com.orchard.backend.workspace.DefinitionExecutionProvenance
+import com.orchard.backend.workspace.DefinitionProposalContent
+import com.orchard.backend.workspace.DefinitionCollaborationStatus
 import com.orchard.backend.workspace.EpisodeQuery
 import com.orchard.backend.workspace.EpisodeRecall
 import com.orchard.backend.workspace.WorkflowMemoryStore
@@ -49,15 +76,90 @@ import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class WorkspaceStoreTest {
+    @Test
+    fun humanFeedbackAndEditsRemainDistinctFromLlmProposalAuthority() {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        val binding = ModelBindingProfile(
+            "ollama:phi3:test",
+            "ollama",
+            "phi3:mini",
+            8_000,
+            setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+        val execution = workspace.recordModelExecution(
+            com.orchard.backend.workspace.ModelExecutionObservationDraft(
+                DefaultModelExecutionProfiles.boundedDefinitionReasoning,
+                binding,
+                "DEFINE_TASK",
+                4,
+                "b".repeat(64),
+                "a".repeat(64),
+                "c".repeat(64),
+                100,
+                50,
+                1,
+                true,
+            )
+        )!!
+
+        val proposed = workspace.recordDefinitionProposal(
+            4,
+            COLLABORATOR_LOCAL_LLM,
+            DefinitionProposalContent(
+                definition = readyDefinition(),
+                observations = listOf("The capability is absent."),
+                assumptions = listOf("The existing component remains the integration boundary."),
+            ),
+            DefinitionExecutionProvenance(
+                executor = "ollama-work-definition",
+                model = "phi3:mini",
+                executionProfileId = DefaultModelExecutionProfiles.boundedDefinitionReasoning.id,
+                bindingFingerprint = modelBindingFingerprint(binding),
+                promptVersion = 1,
+                promptHash = "a".repeat(64),
+                contextHash = "b".repeat(64),
+                outputHash = "c".repeat(64),
+                executionId = execution.executionId,
+            ),
+        )
+        assertEquals(DefinitionCollaborationStatus.RECORDED, proposed.status)
+        assertEquals(
+            DefinitionCollaborationStatus.RECORDED,
+            workspace.recordDefinitionFeedback(proposed.proposal!!.proposalId, "Keep the public API unchanged.").status,
+        )
+
+        val accepted = workspace.acceptDefinitionProposal(
+            proposed.proposal.proposalId,
+            readyDefinition().copy(constraints = listOf("Keep the public API unchanged")),
+        )
+
+        assertEquals(WorkDefinitionStatus.RECORDED, accepted.status)
+        val proposals = accepted.snapshot.definitionProposals
+        assertEquals(listOf(COLLABORATOR_LOCAL_LLM, COLLABORATOR_HUMAN), proposals.map { it.proposal.actor })
+        assertEquals("Keep the public API unchanged.", proposals.first().feedback.single().content)
+        assertEquals(proposals.last().proposal.proposalId, accepted.snapshot.workDefinitions.single().sourceProposal?.proposalId)
+        assertEquals(DEFINITION_READY, accepted.snapshot.workDefinitions.single().assessment.status)
+    }
+
     @Test
     fun latestDefinitionRevisionControlsDeliveryAdmission() {
         val bindings = object : RepositoryBindingStore {
@@ -84,12 +186,22 @@ class WorkspaceStoreTest {
 
         val ready = workspace.submitWorkDefinition(4, readyDefinition())
         assertEquals(2, ready.snapshot.workDefinitions.single().revision)
+        val readyProposal = ready.snapshot.definitionProposals.last().proposal
+        assertEquals(COLLABORATOR_HUMAN, readyProposal.actor)
+        assertEquals(readyProposal.proposalId, ready.snapshot.workDefinitions.single().sourceProposal?.proposalId)
         val started = workspace.startWorkflow(4)
         assertEquals(WorkflowStartStatus.CREATED, started.status)
         assertEquals(2L, started.snapshot.workflowRuns.single().workDefinition?.definitionId)
         assertEquals(
             WorkDefinitionStatus.WORKFLOW_ALREADY_STARTED,
             workspace.submitWorkDefinition(4, readyDefinition()).status,
+        )
+        assertEquals(
+            WorkDefinitionStatus.WORKFLOW_ALREADY_STARTED,
+            workspace.acceptDefinitionProposal(
+                readyProposal.proposalId,
+                readyDefinition().copy(constraints = listOf("A post-start edit")),
+            ).status,
         )
     }
 
@@ -192,9 +304,87 @@ class OllamaRequestTest {
         assertTrue("\"stream\":false" in payload)
         assertTrue("\"format\":\"json\"" in payload)
     }
+
+    @Test
+    fun ollamaOptionsSerializeRequestedContextCapacity() {
+        val options = OllamaOptions(
+            temperature = 0,
+            seed = 42,
+            numPredict = 2_000,
+            numContext = 131_072,
+            numThread = 1,
+        )
+
+        val payload = Json.encodeToString(options)
+
+        assertTrue("\"num_predict\":2000" in payload)
+        assertTrue("\"num_ctx\":131072" in payload)
+        assertTrue("\"num_thread\":1" in payload)
+    }
+
+    @Test
+    fun routesProvenProfileByReliabilityAndHumanSatisfaction() {
+        fun provider(id: String) = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                id,
+                "test",
+                id,
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+        }
+        val lowerSatisfaction = provider("lower-satisfaction")
+        val preferred = provider("preferred")
+
+        val selected = ModelProfileResolver.resolve(
+            DefaultModelExecutionProfiles.boundedDefinitionReasoning,
+            listOf(lowerSatisfaction, preferred),
+            listOf(
+                ModelBindingEvidence(modelBindingFingerprint(lowerSatisfaction.bindingProfile()), 12_000, 2_000, 10, 1.0, 1, 2, 7, 500),
+                ModelBindingEvidence(modelBindingFingerprint(preferred.bindingProfile()), 12_000, 2_000, 10, 1.0, 7, 2, 1, 900),
+            ),
+        )
+
+        assertEquals("preferred", selected.bindingProfile().bindingId)
+    }
 }
 
 class ArchitectServiceTest {
+    @Test
+    fun resourcePolicyRejectsArchitectBeforeTriage() = runTest {
+        var triageCalls = 0
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = "{}".also { triageCalls++ }
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun architectResourceDemand() = ModelResourceDemand(250, 1)
+        }
+        val controller = MachineResourceController(
+            TransientMachineUsagePolicyStore(MachineUsagePolicy(20, 0, 2)),
+            object : MachineCapacityMonitor {
+                override fun snapshot() = MachineCapacitySnapshot(1_000, 900, 8, 0.0)
+            },
+        )
+
+        val result = ArchitectService(WorkspaceStore(), provider, controller).submit(
+            ArchitectChatRequest("Create a project")
+        )
+
+        assertEquals(429, result.statusCode)
+        assertEquals(0, triageCalls)
+    }
+
     @Test
     fun preservesExplicitTitleAndContent() = runTest {
         val workspace = WorkspaceStore()
@@ -365,7 +555,696 @@ class ArchitectServiceTest {
     }
 }
 
+class MachineResourceControllerTest {
+    @Test
+    fun observesMostRestrictiveProcessCgroupV2Ancestor() {
+        val directory = createTempDirectory("orchard-cgroup-test")
+        try {
+            val root = directory.resolve("cgroup")
+            val parent = root.resolve("user.slice")
+            val process = parent.resolve("orchard.service")
+            Files.createDirectories(process)
+            Files.writeString(directory.resolve("meminfo"), "MemTotal: 1000 kB\nMemAvailable: 900 kB\n")
+            Files.writeString(directory.resolve("self-cgroup"), "0::/user.slice/orchard.service\n")
+            Files.writeString(root.resolve("cgroup.controllers"), "memory cpu\n")
+            Files.writeString(root.resolve("memory.max"), "max\n")
+            Files.writeString(parent.resolve("memory.max"), "600000\n")
+            Files.writeString(parent.resolve("memory.current"), "200000\n")
+            Files.writeString(process.resolve("memory.max"), "800000\n")
+            Files.writeString(process.resolve("memory.current"), "300000\n")
+
+            val snapshot = SystemMachineCapacityMonitor(
+                directory.resolve("meminfo"),
+                directory.resolve("self-cgroup"),
+                root,
+                directory.resolve("v1-memory"),
+            ).snapshot()
+
+            assertEquals(600_000, snapshot.totalMemoryBytes)
+            assertEquals(400_000, snapshot.availableMemoryBytes)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun enforcesUserShareAndReleasesReservations() {
+        val controller = controller(MachineUsagePolicy(20, 0, 4), total = 1_000, available = 900)
+
+        val first = controller.tryAcquire(ModelResourceDemand(150, 1))
+        val overShare = controller.tryAcquire(ModelResourceDemand(60, 1))
+        first.lease?.close()
+        val afterRelease = controller.tryAcquire(ModelResourceDemand(60, 1))
+
+        assertEquals(ResourceAdmissionDecision.ADMITTED, first.evidence.decision)
+        assertEquals(ResourceAdmissionDecision.POLICY_CAPACITY_EXCEEDED, overShare.evidence.decision)
+        assertEquals(ResourceAdmissionDecision.ADMITTED, afterRelease.evidence.decision)
+        afterRelease.lease?.close()
+    }
+
+    @Test
+    fun liveAvailableCapacityOverridesTheoreticalUserShare() {
+        val controller = controller(MachineUsagePolicy(100, 100, 4), total = 1_000, available = 250)
+
+        val result = controller.tryAcquire(ModelResourceDemand(151, 1))
+
+        assertEquals(ResourceAdmissionDecision.LIVE_CAPACITY_EXCEEDED, result.evidence.decision)
+        assertEquals(250, result.evidence.capacity.availableMemoryBytes)
+    }
+
+    @Test
+    fun cumulativeReservationsCannotExceedLiveAvailableMemory() {
+        val controller = controller(MachineUsagePolicy(100, 0, 4), total = 2_000, available = 1_000)
+
+        val first = controller.tryAcquire(ModelResourceDemand(600, 1))
+        val second = controller.tryAcquire(ModelResourceDemand(600, 1))
+
+        assertEquals(ResourceAdmissionDecision.ADMITTED, first.evidence.decision)
+        assertEquals(ResourceAdmissionDecision.LIVE_CAPACITY_EXCEEDED, second.evidence.decision)
+        first.lease?.close()
+    }
+
+    @Test
+    fun unavailableCpuTelemetryFailsClosed() {
+        val controller = MachineResourceController(
+            TransientMachineUsagePolicyStore(MachineUsagePolicy(100, 0, 4)),
+            object : MachineCapacityMonitor {
+                override fun snapshot() = MachineCapacitySnapshot(2_000, 2_000, 8, null)
+            },
+        )
+
+        val result = controller.tryAcquire(ModelResourceDemand(100, 1))
+
+        assertEquals(ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE, result.evidence.decision)
+    }
+
+    private fun controller(
+        policy: MachineUsagePolicy,
+        total: Long,
+        available: Long,
+    ) = MachineResourceController(
+        TransientMachineUsagePolicyStore(policy),
+        object : MachineCapacityMonitor {
+            override fun snapshot() = MachineCapacitySnapshot(total, available, 8, 0.0)
+        },
+    )
+}
+
+class DefinitionIntelligenceServiceTest {
+    @Test
+    fun userOverrideSelectsPreferredBindingAndAppliesOutputReserve() = runTest {
+        val workspace = definitionWorkspace()
+        var smallCalls = 0
+        var preferredOutputBudget = 0
+        var preferredContextWindow = 0
+        fun provider(id: String, onExecute: (Int) -> Unit) = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                id,
+                "test",
+                id,
+                20_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int): com.orchard.backend.vector.ModelGeneration {
+                onExecute(maxOutputTokens)
+                return com.orchard.backend.vector.ModelGeneration(proposalJson(), 1_000, 200)
+            }
+            override suspend fun executeWorkDefinition(
+                prompt: String,
+                maxOutputTokens: Int,
+                contextWindowTokens: Int,
+            ): com.orchard.backend.vector.ModelGeneration {
+                if (id == "preferred") preferredContextWindow = contextWindowTokens
+                return executeWorkDefinition(prompt, maxOutputTokens)
+            }
+        }
+        val settings = TransientModelProfileSettingsStore()
+        val service = DefinitionIntelligenceService(
+            workspace,
+            listOf(
+                provider("small") { smallCalls++ },
+                provider("preferred") { preferredOutputBudget = it },
+            ),
+            settings,
+            systemPrompt = "policy",
+        )
+
+        val update = service.updateProfile(
+            ModelProfileOverride("bounded-definition-reasoning-v1", 8_000, 1_500, "preferred")
+        )
+        val proposal = service.propose(4)
+
+        assertEquals(ModelProfileUpdateStatus.UPDATED, update.status)
+        assertEquals(8_000, service.profileConfigurations().single().effectiveProfile.inputBudgetTokens)
+        assertEquals(0, smallCalls)
+        assertEquals(1_500, preferredOutputBudget)
+        assertEquals(9_500, preferredContextWindow)
+        assertEquals(ProposalGenerationStatus.CREATED, proposal.status)
+        assertEquals("preferred", proposal.snapshot.modelProfiles.single().binding.bindingId)
+    }
+
+    @Test
+    fun refusesInferenceWhenConfiguredMachineShareCannotFitDemand() = runTest {
+        val workspace = definitionWorkspace()
+        var providerCalls = 0
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "resource-bound",
+                "test",
+                "model",
+                20_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override fun resourceDemand(profile: com.orchard.backend.vector.ModelExecutionProfile) =
+                ModelResourceDemand(250, 1)
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int) =
+                com.orchard.backend.vector.ModelGeneration(proposalJson(), 1_000, 200).also { providerCalls++ }
+        }
+        val resources = MachineResourceController(
+            TransientMachineUsagePolicyStore(MachineUsagePolicy(20, 0, 4)),
+            object : MachineCapacityMonitor {
+                override fun snapshot() = MachineCapacitySnapshot(1_000, 900, 8, 0.0)
+            },
+        )
+        val service = DefinitionIntelligenceService(
+            workspace,
+            listOf(provider),
+            TransientModelProfileSettingsStore(),
+            resources,
+            systemPrompt = "policy",
+        )
+
+        val result = service.propose(4)
+
+        assertEquals(ProposalGenerationStatus.RESOURCE_CAPACITY_UNAVAILABLE, result.status)
+        assertEquals(0, providerCalls)
+        assertEquals(ResourceAdmissionDecision.POLICY_CAPACITY_EXCEEDED, resources.configuration().lastAdmission?.decision)
+    }
+
+    @Test
+    fun distinctWorkItemsCanReachInferenceConcurrently() = runTest {
+        val workspace = definitionWorkspace()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(definitionIntent(ENTITY_TASK, "Second task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        val started = AtomicInteger()
+        val bothStarted = CompletableDeferred<Unit>()
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "parallel",
+                "test",
+                "model",
+                20_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int): com.orchard.backend.vector.ModelGeneration {
+                if (started.incrementAndGet() == 2) bothStarted.complete(Unit)
+                bothStarted.await()
+                return com.orchard.backend.vector.ModelGeneration(proposalJson(), 1_000, 200)
+            }
+        }
+        val service = DefinitionIntelligenceService(workspace, provider, systemPrompt = "policy")
+
+        val first = async { service.propose(4) }
+        val second = async { service.propose(5) }
+
+        assertEquals(ProposalGenerationStatus.CREATED, first.await().status)
+        assertEquals(ProposalGenerationStatus.CREATED, second.await().status)
+        assertEquals(2, started.get())
+    }
+
+    @Test
+    fun rejectsProfileOverrideThatNoInstalledBindingCanRun() {
+        val service = DefinitionIntelligenceService(
+            definitionWorkspace(),
+            proposalProvider("bounded", 14_000, mutableListOf()),
+            systemPrompt = "policy",
+        )
+
+        val result = service.updateProfile(
+            ModelProfileOverride("bounded-definition-reasoning-v1", 13_000, 2_000)
+        )
+
+        assertEquals(ModelProfileUpdateStatus.NO_COMPATIBLE_BINDING, result.status)
+        assertEquals(12_000, result.configurations.single().effectiveProfile.inputBudgetTokens)
+    }
+
+    @Test
+    fun localModelRevisesProposalFromHumanFeedbackWithoutCreatingAuthority() = runTest {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(definitionIntent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(definitionIntent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(definitionIntent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(definitionIntent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        val prompts = mutableListOf<String>()
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
+            override suspend fun proposeWorkDefinition(prompt: String): String {
+                prompts += prompt
+                return proposalJson()
+            }
+            override fun modelIdentity(): String = "phi3:test"
+            override fun bindingProfile() = ModelBindingProfile(
+                "phi3:test",
+                "test",
+                "phi3:test",
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+        }
+        val service = DefinitionIntelligenceService(workspace, provider, systemPrompt = "proposal policy v1")
+
+        val first = service.propose(4)
+        val firstProposal = first.snapshot.definitionProposals.single().proposal
+        workspace.recordDefinitionFeedback(firstProposal.proposalId, "Preserve the public API exactly.")
+        val latest = service.propose(4)
+
+        assertEquals(ProposalGenerationStatus.CREATED, first.status)
+        assertEquals(ProposalGenerationStatus.CREATED, latest.status)
+        assertEquals(2, latest.snapshot.definitionProposals.size)
+        assertTrue("Preserve the public API exactly." in prompts.last())
+        assertTrue(latest.snapshot.definitionProposals.all { it.proposal.actor == COLLABORATOR_LOCAL_LLM })
+        assertEquals("phi3:test", latest.snapshot.definitionProposals.last().proposal.provenance?.model)
+        assertTrue(latest.snapshot.definitionProposals.all { it.proposal.provenance?.executionId != null })
+        assertEquals(2, latest.snapshot.modelProfiles.single().sampleCount)
+        assertEquals(1, latest.snapshot.modelProfiles.single().revisionRequestedCount)
+        assertTrue(latest.snapshot.workDefinitions.isEmpty())
+    }
+
+    @Test
+    fun selectsCompatibleBindingForWorkflowProfile() = runTest {
+        val workspace = definitionWorkspace()
+        val incompatiblePrompts = mutableListOf<String>()
+        val compatiblePrompts = mutableListOf<String>()
+        val service = DefinitionIntelligenceService(
+            workspace,
+            listOf(
+                proposalProvider("too-small", 13_999, incompatiblePrompts),
+                proposalProvider("compatible", 14_000, compatiblePrompts),
+            ),
+            systemPrompt = "proposal policy v1",
+        )
+
+        val result = service.propose(4)
+
+        assertEquals(ProposalGenerationStatus.CREATED, result.status)
+        assertTrue(incompatiblePrompts.isEmpty())
+        assertEquals(1, compatiblePrompts.size)
+        assertEquals("compatible", result.snapshot.modelProfiles.single().binding.bindingId)
+    }
+
+    @Test
+    fun refusesInferenceWhenMandatoryEnvelopeExceedsProfileBudget() = runTest {
+        val workspace = definitionWorkspace()
+        val prompts = mutableListOf<String>()
+        val service = DefinitionIntelligenceService(
+            workspace,
+            proposalProvider("bounded", 14_000, prompts),
+            systemPrompt = "proposal policy v1",
+        )
+        val first = service.propose(4)
+        val proposalId = first.snapshot.definitionProposals.single().proposal.proposalId
+        repeat(16) { index ->
+            workspace.recordDefinitionFeedback(proposalId, "$index:${"x".repeat(4_090)}")
+        }
+
+        val overflow = service.propose(4)
+
+        assertEquals(ProposalGenerationStatus.CONTEXT_BUDGET_EXCEEDED, overflow.status)
+        assertEquals(1, prompts.size)
+        assertEquals(1, overflow.snapshot.modelProfiles.single().sampleCount)
+    }
+
+    @Test
+    fun projectsFeedbackAndAcceptanceAsDistinctSatisfactionSignals() = runTest {
+        val workspace = definitionWorkspace()
+        val service = DefinitionIntelligenceService(
+            workspace,
+            proposalProvider("satisfaction", 14_000, mutableListOf()),
+            systemPrompt = "proposal policy v1",
+        )
+        val first = service.propose(4)
+        workspace.recordDefinitionFeedback(
+            first.snapshot.definitionProposals.single().proposal.proposalId,
+            "Preserve compatibility.",
+        )
+        val second = service.propose(4)
+        val secondProposal = second.snapshot.definitionProposals.last().proposal
+        workspace.acceptDefinitionProposal(
+            secondProposal.proposalId,
+            secondProposal.content.definition.copy(constraints = listOf("Preserve compatibility")),
+        )
+        val third = service.propose(4)
+        val accepted = workspace.acceptDefinitionProposal(third.snapshot.definitionProposals.last().proposal.proposalId)
+
+        val profile = accepted.snapshot.modelProfiles.single()
+        assertEquals(3, profile.sampleCount)
+        assertEquals(1, profile.revisionRequestedCount)
+        assertEquals(1, profile.acceptedAfterEditCount)
+        assertEquals(1.0, profile.averageHumanRevisionFields)
+        assertEquals(1, profile.acceptedUnchangedCount)
+    }
+
+    @Test
+    fun rejectsOutputWhenProviderMeasuresInputBeyondProfileBudget() = runTest {
+        val workspace = definitionWorkspace()
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "measured-overflow",
+                "test",
+                "measured-overflow",
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int) =
+                com.orchard.backend.vector.ModelGeneration(proposalJson(), 12_001, 200)
+        }
+
+        val result = DefinitionIntelligenceService(workspace, provider, systemPrompt = "policy").propose(4)
+
+        assertEquals(ProposalGenerationStatus.INVALID_OUTPUT, result.status)
+        assertEquals(1, result.snapshot.modelProfiles.single().sampleCount)
+        assertTrue(result.snapshot.definitionProposals.isEmpty())
+    }
+
+    @Test
+    fun recordsCancelledModelInvocationBeforePropagatingCancellation() = runTest {
+        val workspace = definitionWorkspace()
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "cancelled",
+                "test",
+                "cancelled",
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int): com.orchard.backend.vector.ModelGeneration {
+                throw CancellationException("cancelled by test")
+            }
+        }
+        val service = DefinitionIntelligenceService(workspace, provider, systemPrompt = "policy")
+
+        try {
+            service.propose(4)
+            error("Expected cancellation")
+        } catch (_: CancellationException) {
+            assertEquals(1, workspace.snapshot(0).modelProfiles.single().sampleCount)
+            assertEquals(0.0, workspace.snapshot(0).modelProfiles.single().schemaValidityRate)
+        }
+    }
+
+    private fun definitionWorkspace(): WorkspaceStore = WorkspaceStore().also { workspace ->
+        workspace.beginBatch()
+        check(workspace.applyIntent(definitionIntent(ENTITY_PROJECT, "Project")))
+        check(workspace.applyIntent(definitionIntent(ENTITY_EPIC, "Epic", projectId = 1)))
+        check(workspace.applyIntent(definitionIntent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        check(workspace.applyIntent(definitionIntent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+    }
+
+    private fun proposalProvider(
+        bindingId: String,
+        contextWindowTokens: Int,
+        prompts: MutableList<String>,
+    ): ModelProvider = object : ModelProvider {
+        override suspend fun triage(prompt: String): String = error("unused")
+        override suspend fun plan(
+            prompt: String,
+            actionType: Int,
+            entityType: Int,
+            workspace: WorkspaceStore,
+        ): String = error("unused")
+
+        override suspend fun proposeWorkDefinition(prompt: String): String {
+            prompts += prompt
+            return proposalJson()
+        }
+
+        override fun modelIdentity(): String = bindingId
+
+        override fun bindingProfile(): ModelBindingProfile = ModelBindingProfile(
+            bindingId = bindingId,
+            provider = "test",
+            model = bindingId,
+            contextWindowTokens = contextWindowTokens,
+            capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+    }
+
+    private fun definitionIntent(
+        type: Int,
+        title: String,
+        projectId: Int = 0,
+        epicId: Int = 0,
+        storyId: Int = 0,
+    ) = DocumentIntent(
+        ACTION_CREATE,
+        type,
+        DEFAULT_DELIVERY_WORKFLOW_ID,
+        projectId,
+        epicId,
+        storyId,
+        title,
+    )
+
+    private fun proposalJson(): String = """
+        {
+          "definition": {
+            "requestedOutcome": "Complete the bounded task",
+            "currentBehavior": "The capability is absent",
+            "requiredBehavior": "The capability is available",
+            "scope": ["Bounded component"],
+            "nonGoals": ["Unrelated components"],
+            "constraints": [],
+            "acceptanceCriteria": [
+              {"description": "The capability works", "verification": "Run its focused test"}
+            ],
+            "unresolvedQuestions": [],
+            "proposedSplitTitles": [],
+            "reproduction": "",
+            "regressionCriterion": ""
+          },
+          "observations": ["The task requests a missing capability."],
+          "assumptions": ["The bounded component is the intended integration point."]
+        }
+    """.trimIndent()
+}
+
 class WorkspaceApiTest {
+    @Test
+    fun machineResourcePolicyRouteUsesLiveCapacityAndPersistsUserShare() = testApplication {
+        val resources = MachineResourceController(
+            TransientMachineUsagePolicyStore(),
+            object : MachineCapacityMonitor {
+                override fun snapshot() = MachineCapacitySnapshot(10_000, 8_000, 8, 0.25)
+            },
+        )
+        val provider = proposalProviderForApi()
+        val service = DefinitionIntelligenceService(
+            WorkspaceStore(),
+            listOf(provider),
+            TransientModelProfileSettingsStore(),
+            resources,
+            systemPrompt = "policy",
+        )
+        application { workspaceApi(WorkspaceStore(), service) }
+
+        val updated = client.put("/api/machine-resources/policy") {
+            contentType(ContentType.Application.Json)
+            setBody(Json.encodeToString(MachineUsagePolicy(20, 1_000, 2)))
+        }
+        val read = client.get("/api/machine-resources")
+
+        assertEquals(HttpStatusCode.OK, updated.status)
+        assertEquals(HttpStatusCode.OK, read.status)
+        assertTrue(read.bodyAsText().contains("\"capacityPercent\":20"))
+        assertTrue(read.bodyAsText().contains("\"availableMemoryBytes\":8000"))
+    }
+
+    @Test
+    fun modelProfileRouteReturnsServiceUnavailableForCorruptSettingsAuthority() = testApplication {
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "binding",
+                "test",
+                "model",
+                20_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+        }
+        val failingStore = object : ModelProfileSettingsStore {
+            override fun load(): List<ModelProfileOverride> = error("checksum mismatch")
+            override fun save(overrides: List<ModelProfileOverride>) = Unit
+        }
+        val service = DefinitionIntelligenceService(
+            WorkspaceStore(),
+            listOf(provider),
+            failingStore,
+            systemPrompt = "policy",
+        )
+        application { workspaceApi(WorkspaceStore(), service) }
+
+        val response = client.get("/api/model-profiles")
+
+        assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+    }
+
+    private fun proposalProviderForApi() = object : ModelProvider {
+        override suspend fun triage(prompt: String): String = error("unused")
+        override suspend fun plan(
+            prompt: String,
+            actionType: Int,
+            entityType: Int,
+            workspace: WorkspaceStore,
+        ): String = error("unused")
+        override fun bindingProfile() = ModelBindingProfile(
+            "binding",
+            "test",
+            "model",
+            20_000,
+            setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+    }
+
+    @Test
+    fun modelProfileRoutePersistsEffectiveUserAperture() = testApplication {
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(
+                prompt: String,
+                actionType: Int,
+                entityType: Int,
+                workspace: WorkspaceStore,
+            ): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "local-binding",
+                "test",
+                "local-model",
+                20_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+        }
+        val service = DefinitionIntelligenceService(WorkspaceStore(), provider, systemPrompt = "policy")
+        application { workspaceApi(WorkspaceStore(), service) }
+
+        val response = client.put("/api/model-profiles/bounded-definition-reasoning-v1") {
+            contentType(ContentType.Application.Json)
+            setBody(
+                Json.encodeToString(
+                    ModelProfileOverride("bounded-definition-reasoning-v1", 7_000, 1_500, "local-binding")
+                )
+            )
+        }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("\"inputBudgetTokens\":7000"))
+        assertTrue(body.contains("\"outputBudgetTokens\":1500"))
+        assertTrue(body.contains("\"preferredBindingId\":\"local-binding\""))
+    }
+
+    @Test
+    fun definitionProposalRoutesSupportHumanLlmIterationAndAcceptance() = testApplication {
+        val workspace = WorkspaceStore()
+        createTaskHierarchy(workspace)
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
+            override suspend fun proposeWorkDefinition(prompt: String): String =
+                """{"definition":${Json.encodeToString(definition())},"observations":["Existing behavior is documented."],"assumptions":["The loader remains the boundary."]}"""
+            override fun modelIdentity(): String = "phi3:test"
+            override fun bindingProfile() = ModelBindingProfile(
+                "phi3:test",
+                "test",
+                "phi3:test",
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+        }
+        val intelligence = DefinitionIntelligenceService(workspace, provider, systemPrompt = "proposal policy v1")
+        application { workspaceApi(workspace, intelligence) }
+
+        val first = client.post("/api/work-items/4/definition-proposals")
+        val feedback = client.post("/api/definition-proposals/1/feedback") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"content":"Do not change the storage format."}""")
+        }
+        val revised = client.post("/api/work-items/4/definition-proposals")
+        val invalidAcceptance = client.post("/api/definition-proposals/3/accept") {
+            contentType(ContentType.Application.Json)
+            setBody(
+                Json.encodeToString(
+                    AcceptDefinitionProposalRequest(definition().copy(requestedOutcome = "x".repeat(4097)))
+                )
+            )
+        }
+        val acceptance = client.post("/api/definition-proposals/3/accept") {
+            contentType(ContentType.Application.Json)
+            setBody(
+                Json.encodeToString(
+                    AcceptDefinitionProposalRequest(
+                        definition().copy(constraints = listOf("Existing saved orders remain compatible", "Keep public APIs stable"))
+                    )
+                )
+            )
+        }
+
+        assertEquals(HttpStatusCode.Created, first.status)
+        assertEquals(HttpStatusCode.Created, feedback.status)
+        assertEquals(HttpStatusCode.Created, revised.status)
+        assertEquals(HttpStatusCode.UnprocessableEntity, invalidAcceptance.status)
+        assertEquals(HttpStatusCode.Created, acceptance.status)
+        val acceptedBody = acceptance.bodyAsText()
+        assertTrue(acceptedBody.contains("\"actor\":\"HUMAN\""))
+        assertTrue(acceptedBody.contains("\"sourceProposal\":{\"proposalId\":4"))
+        assertTrue(acceptedBody.contains("\"status\":\"READY\""))
+    }
+
     @Test
     fun definitionRouteRecordsAReadySystemWorkflowRevision() = testApplication {
         val workspace = WorkspaceStore()
@@ -381,6 +1260,8 @@ class WorkspaceApiTest {
         val body = response.bodyAsText()
         assertTrue(body.contains("\"id\":\"default-definition-task\""))
         assertTrue(body.contains("\"status\":\"READY\""))
+        assertTrue(body.contains("\"actor\":\"HUMAN\""))
+        assertTrue(body.contains("\"sourceProposal\":{\"proposalId\":1"))
         assertTrue(body.contains(Regex("\\\"hash\\\":\\\"[0-9a-f]{64}\\\"")))
     }
 
@@ -408,6 +1289,9 @@ class WorkspaceApiTest {
         assertEquals(DEFINITION_READY, readyTask.status)
         assertFalse(WorkflowStepEngine.canStart(definitionStep, emptySet()))
         assertTrue(WorkflowStepEngine.canStart(definitionStep, setOf(FACT_WORK_ITEM_EXISTS)))
+        assertFalse(WorkflowStepEngine.canPerform(definitionStep, COLLABORATOR_LOCAL_LLM, ACTION_FEEDBACK))
+        assertFalse(WorkflowStepEngine.canPerform(definitionStep, COLLABORATOR_LOCAL_LLM, ACTION_ACCEPT))
+        assertTrue(WorkflowStepEngine.canPerform(definitionStep, COLLABORATOR_HUMAN, ACTION_ACCEPT))
     }
 
     @Test

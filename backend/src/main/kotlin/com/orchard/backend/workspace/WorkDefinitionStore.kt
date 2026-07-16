@@ -8,10 +8,13 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.time.Instant
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class WorkDefinitionManifest(
     val definitionId: Long,
     val revision: Int,
@@ -21,6 +24,8 @@ data class WorkDefinitionManifest(
     val definition: WorkDefinitionSubmission,
     val assessment: DefinitionAssessment,
     val hash: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val sourceProposal: DefinitionProposalReference? = null,
 )
 
 interface WorkDefinitionStore {
@@ -46,20 +51,15 @@ class FileWorkDefinitionStore(private val directory: Path) : WorkDefinitionStore
     private val json = Json { encodeDefaults = true }
 
     @Synchronized
-    override fun load(): List<WorkDefinitionManifest> {
-        if (!Files.exists(path)) return emptyList()
-        return Files.readAllLines(path, Charsets.UTF_8)
-            .filter { it.isNotBlank() }
-            .mapIndexed { index, line ->
-                val envelope = runCatching { json.decodeFromString<DefinitionEnvelope>(line) }
-                    .getOrElse { throw IllegalStateException("Cannot decode work definition ${index + 1}", it) }
-                require(envelope.version == FORMAT_VERSION) { "Unsupported work definition format ${envelope.version}" }
-                require(envelope.checksum == definitionChecksum(json.encodeToString(envelope.value))) {
-                    "Checksum mismatch in work definition ${index + 1}"
-                }
-                validate(envelope.value, index + 1L)
-                envelope.value
-            }
+    override fun load(): List<WorkDefinitionManifest> = loadRecoverableJsonl(path, "work-definitions") { line, recordNumber ->
+        val envelope = runCatching { json.decodeFromString<DefinitionEnvelope>(line) }
+            .getOrElse { throw IllegalStateException("Cannot decode work definition $recordNumber", it) }
+        require(envelope.version == FORMAT_VERSION) { "Unsupported work definition format ${envelope.version}" }
+        require(envelope.checksum == definitionChecksum(json.encodeToString(envelope.value))) {
+            "Checksum mismatch in work definition $recordNumber"
+        }
+        validate(envelope.value, recordNumber.toLong())
+        envelope.value
     }
 
     @Synchronized
@@ -99,6 +99,7 @@ fun newWorkDefinitionManifest(
     workflow: SystemWorkflow,
     definition: WorkDefinitionSubmission,
     assessment: DefinitionAssessment,
+    sourceProposal: DefinitionProposalReference? = null,
 ): WorkDefinitionManifest {
     val unsigned = WorkDefinitionManifest(
         definitionId = definitionId,
@@ -109,6 +110,7 @@ fun newWorkDefinitionManifest(
         definition = definition,
         assessment = assessment,
         hash = "",
+        sourceProposal = sourceProposal,
     )
     return unsigned.copy(hash = workDefinitionHash(unsigned))
 }

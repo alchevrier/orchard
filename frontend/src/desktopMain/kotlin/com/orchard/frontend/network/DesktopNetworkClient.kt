@@ -9,8 +9,11 @@ import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -19,6 +22,24 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
 
     suspend fun getWorkspace(): WorkspaceSnapshotResponse =
         client.get("http://127.0.0.1:8085/api/workspace").body()
+
+    suspend fun getModelProfileConfigurations(): List<ModelProfileConfigurationResponse> =
+        client.get("http://127.0.0.1:8085/api/model-profiles").successBody()
+
+    suspend fun updateModelProfile(override: ModelProfileOverrideRequest): List<ModelProfileConfigurationResponse> =
+        client.put("http://127.0.0.1:8085/api/model-profiles/${override.profileId}") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(override)
+        }.successBody()
+
+    suspend fun getMachineResourceConfiguration(): MachineResourceConfigurationResponse =
+        client.get("http://127.0.0.1:8085/api/machine-resources").successBody()
+
+    suspend fun updateMachineUsagePolicy(policy: MachineUsagePolicyRequest): MachineResourceConfigurationResponse =
+        client.put("http://127.0.0.1:8085/api/machine-resources/policy") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(policy)
+        }.successBody()
 
     suspend fun submitArchitectPrompt(prompt: String): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8086/api/architect/chat") {
@@ -42,6 +63,23 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
         headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
         setBody(definition)
     }.body()
+
+    suspend fun generateDefinitionProposal(workItemId: Int): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/work-items/$workItemId/definition-proposals").successBody()
+
+    suspend fun submitDefinitionFeedback(proposalId: Long, content: String): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/definition-proposals/$proposalId/feedback") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(DefinitionFeedbackRequest(content))
+        }.successBody()
+
+    suspend fun acceptDefinitionProposal(
+        proposalId: Long,
+        definition: WorkDefinitionSubmissionRequest,
+    ): WorkspaceSnapshotResponse = client.post("http://127.0.0.1:8085/api/definition-proposals/$proposalId/accept") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(AcceptDefinitionProposalRequest(definition))
+    }.successBody()
 
     suspend fun submitEvidence(runId: Long, evidence: EvidenceSubmissionRequest): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8085/api/workflow-runs/$runId/evidence") {
@@ -89,7 +127,103 @@ data class WorkspaceSnapshotResponse(
     val repositories: Map<Int, RepositoryResponse> = emptyMap(),
     val workflowRuns: List<WorkflowRunResponse> = emptyList(),
     val workDefinitions: List<WorkDefinitionResponse> = emptyList(),
+    val definitionProposals: List<DefinitionProposalViewResponse> = emptyList(),
+    val modelProfiles: List<ModelCapabilityProfileResponse> = emptyList(),
 )
+
+@Serializable
+data class ModelProfileOverrideRequest(
+    val profileId: String,
+    val inputBudgetTokens: Int,
+    val outputBudgetTokens: Int,
+    val preferredBindingId: String? = null,
+)
+
+@Serializable
+data class ModelProfileConfigurationResponse(
+    val defaultProfile: ModelExecutionProfileResponse,
+    val effectiveProfile: ModelExecutionProfileResponse,
+    val override: ModelProfileOverrideRequest? = null,
+    val installedBindings: List<ModelBindingProfileResponse>,
+    val compatibleBindingIds: List<String>,
+)
+
+@Serializable
+data class ModelExecutionProfileResponse(
+    val id: String,
+    val version: Int,
+    val reasoningClass: String,
+    val inputBudgetTokens: Int,
+    val outputBudgetTokens: Int,
+    val requiredCapabilities: Set<String>,
+)
+
+@Serializable
+data class ModelCapabilityProfileResponse(
+    val executionProfileId: String,
+    val executionProfileVersion: Int,
+    val inputBudgetTokens: Int,
+    val outputBudgetTokens: Int,
+    val binding: ModelBindingProfileResponse,
+    val bindingFingerprint: String,
+    val sampleCount: Int,
+    val schemaValidityRate: Double,
+    val acceptedUnchangedCount: Int,
+    val acceptedAfterEditCount: Int,
+    val revisionRequestedCount: Int,
+    val averageHumanRevisionFields: Double,
+    val medianLatencyMillis: Long,
+    val confidence: Double,
+)
+
+@Serializable
+data class ModelBindingProfileResponse(
+    val bindingId: String,
+    val provider: String,
+    val model: String,
+    val contextWindowTokens: Int,
+    val capabilities: Set<String>,
+    val configuration: Map<String, String> = emptyMap(),
+    val modelDigest: String? = null,
+)
+
+@Serializable
+data class MachineUsagePolicyRequest(
+    val capacityPercent: Int,
+    val minimumFreeMemoryBytes: Long,
+    val maxConcurrentModelExecutions: Int,
+)
+
+@Serializable
+data class MachineResourceConfigurationResponse(
+    val policy: MachineUsagePolicyRequest,
+    val capacity: MachineCapacitySnapshotResponse,
+    val reservedMemoryBytes: Long,
+    val reservedCpuUnits: Int,
+    val activeLeases: Int,
+    val lastAdmission: ResourceAdmissionEvidenceResponse? = null,
+)
+
+@Serializable
+data class MachineCapacitySnapshotResponse(
+    val totalMemoryBytes: Long,
+    val availableMemoryBytes: Long,
+    val logicalProcessors: Int,
+    val systemCpuLoad: Double?,
+    val observedAt: String,
+)
+
+@Serializable
+data class ResourceAdmissionEvidenceResponse(
+    val decision: String,
+    val reason: String,
+)
+
+@Serializable
+private data class DefinitionFeedbackRequest(val content: String)
+
+@Serializable
+private data class AcceptDefinitionProposalRequest(val definition: WorkDefinitionSubmissionRequest)
 
 @Serializable
 data class WorkspaceResourceResponse(
@@ -166,6 +300,53 @@ data class DefinitionAssessmentResponse(
 )
 
 @Serializable
+data class DefinitionProposalViewResponse(
+    val proposal: DefinitionProposalResponse,
+    val feedback: List<DefinitionFeedbackResponse> = emptyList(),
+    val acceptedDefinitionId: Long? = null,
+)
+
+@Serializable
+data class DefinitionProposalResponse(
+    val proposalId: Long,
+    val workItemId: Int,
+    val revision: Int,
+    val parentProposalId: Long? = null,
+    val actor: String,
+    val content: DefinitionProposalContentResponse,
+    val provenance: DefinitionExecutionProvenanceResponse? = null,
+    val hash: String,
+)
+
+@Serializable
+data class DefinitionProposalContentResponse(
+    val definition: WorkDefinitionSubmissionRequest,
+    val observations: List<String> = emptyList(),
+    val assumptions: List<String> = emptyList(),
+)
+
+@Serializable
+data class DefinitionExecutionProvenanceResponse(
+    val executor: String,
+    val model: String,
+    val executionProfileId: String,
+    val bindingFingerprint: String,
+    val promptVersion: Int,
+    val promptHash: String,
+    val contextHash: String,
+    val outputHash: String,
+    val executionId: Long,
+)
+
+@Serializable
+data class DefinitionFeedbackResponse(
+    val feedbackId: Long,
+    val proposalId: Long,
+    val actor: String,
+    val content: String,
+)
+
+@Serializable
 data class EvidenceSubmissionRequest(
     val kind: String,
     val revision: String,
@@ -234,3 +415,8 @@ data class EvidenceRequirementResponse(
     val kind: String,
     val description: String,
 )
+
+private suspend inline fun <reified T> HttpResponse.successBody(): T {
+    if (!status.isSuccess()) error("Orchard returned HTTP ${status.value}: ${bodyAsText().take(512)}")
+    return body()
+}

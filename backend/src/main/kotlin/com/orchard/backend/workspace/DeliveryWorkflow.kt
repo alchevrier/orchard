@@ -66,6 +66,14 @@ object DefaultDeliveryWorkflow {
                 WorkflowTransitionSignal(SIGNAL_COMPLETED, RUN_STATE_DONE, true),
                 WorkflowTransitionSignal(SIGNAL_CANCELLED, RUN_STATE_CANCELLED, true),
             ),
+            interactionContract = WorkflowInteractionContract(
+                actorAuthorities = listOf(
+                    WorkflowActorAuthority(EXECUTOR_HUMAN, listOf("EXECUTE", "PRODUCE_EVIDENCE", "CANCEL")),
+                    WorkflowActorAuthority(EXECUTOR_AGENT, listOf("EXECUTE", "PRODUCE_EVIDENCE")),
+                    WorkflowActorAuthority(EXECUTOR_DETERMINISTIC_TOOL, listOf("PRODUCE_EVIDENCE")),
+                    WorkflowActorAuthority(ACTOR_DETERMINISTIC_POLICY, listOf(ACTION_ASSESS)),
+                )
+            ),
         )
         return ResolvedWorkflow(
             id = "default-delivery-${if (workItemType == ENTITY_BUG) "bug" else "task"}",

@@ -19,6 +19,110 @@ import kotlin.test.assertTrue
 
 class DesktopNetworkClientTest {
     @Test
+    fun updatesMachineUsagePolicyAndDecodesLiveCapacity() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Put, request.method)
+            assertEquals("http://127.0.0.1:8085/api/machine-resources/policy", request.url.toString())
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"capacityPercent\":20"))
+            assertTrue(body.contains("\"minimumFreeMemoryBytes\":2147483648"))
+            respond(
+                content = """{
+                    "policy":{"capacityPercent":20,"minimumFreeMemoryBytes":2147483648,"maxConcurrentModelExecutions":2},
+                    "capacity":{"totalMemoryBytes":34359738368,"availableMemoryBytes":17179869184,"logicalProcessors":8,"systemCpuLoad":0.25,"observedAt":"2026-07-16T00:00:00Z"},
+                    "reservedMemoryBytes":0,"reservedCpuUnits":0,"activeLeases":0
+                }""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val result = client.updateMachineUsagePolicy(MachineUsagePolicyRequest(20, 2_147_483_648, 2))
+
+        assertEquals(20, result.policy.capacityPercent)
+        assertEquals(17_179_869_184, result.capacity.availableMemoryBytes)
+        client.close()
+    }
+
+    @Test
+    fun updatesModelProfileApertureAndPreferredBinding() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Put, request.method)
+            assertEquals(
+                "http://127.0.0.1:8085/api/model-profiles/bounded-definition-reasoning-v1",
+                request.url.toString(),
+            )
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"inputBudgetTokens\":7000"))
+            assertTrue(body.contains("\"outputBudgetTokens\":1500"))
+            assertTrue(body.contains("\"preferredBindingId\":\"local-binding\""))
+            respond(
+                content = "[]",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val result = client.updateModelProfile(
+            ModelProfileOverrideRequest("bounded-definition-reasoning-v1", 7_000, 1_500, "local-binding")
+        )
+
+        assertTrue(result.isEmpty())
+        client.close()
+    }
+
+    @Test
+    fun decodesDerivedModelCapabilityProfile() = runBlocking {
+        val engine = MockEngine {
+            respond(
+                content = """{
+                    "resources":{},
+                    "modelProfiles":[{
+                        "executionProfileId":"bounded-definition-reasoning-v1",
+                        "executionProfileVersion":1,
+                        "inputBudgetTokens":12000,
+                        "outputBudgetTokens":2000,
+                        "binding":{"bindingId":"ollama:phi3:mini","provider":"ollama","model":"phi3:mini","contextWindowTokens":131072,"capabilities":["STRICT_JSON"]},
+                        "bindingFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "sampleCount":4,
+                        "schemaValidityRate":0.75,
+                        "acceptedUnchangedCount":1,
+                        "acceptedAfterEditCount":1,
+                        "revisionRequestedCount":2,
+                        "averageHumanRevisionFields":1.0,
+                        "medianLatencyMillis":850,
+                        "confidence":0.2857142857
+                    }]
+                }""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val profile = client.getWorkspace().modelProfiles.single()
+
+        assertEquals("phi3:mini", profile.binding.model)
+        assertEquals(4, profile.sampleCount)
+        assertEquals(2, profile.revisionRequestedCount)
+        client.close()
+    }
+
+    @Test
     fun decodesWorkspaceSnapshotFromConflictResponse() = runBlocking {
         val engine = MockEngine {
             respond(
@@ -184,6 +288,29 @@ class DesktopNetworkClientTest {
                 ),
             ),
         )
+
+        client.close()
+    }
+
+    @Test
+    fun sendsHumanFeedbackToDefinitionProposal() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/definition-proposals/7/feedback", request.url.toString())
+            assertTrue(request.body.toByteArray().decodeToString().contains("Preserve the interaction model"))
+            respond(
+                content = """{"resources":{},"definitionProposals":[]}""",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        client.submitDefinitionFeedback(7, "Preserve the interaction model")
 
         client.close()
     }

@@ -1,8 +1,11 @@
 package com.orchard.backend.workspace
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class WorkflowStepDefinition(
     val id: String,
     val version: Int,
@@ -11,6 +14,21 @@ data class WorkflowStepDefinition(
     val executionContract: WorkflowExecutionContract,
     val evidenceContract: EvidenceContract,
     val transitionSignals: List<WorkflowTransitionSignal>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val interactionContract: WorkflowInteractionContract? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val modelExecutionProfileId: String? = null,
+)
+
+@Serializable
+data class WorkflowInteractionContract(
+    val actorAuthorities: List<WorkflowActorAuthority>,
+)
+
+@Serializable
+data class WorkflowActorAuthority(
+    val actor: String,
+    val allowedActions: List<String>,
 )
 
 @Serializable
@@ -45,6 +63,12 @@ object WorkflowStepEngine {
     fun resolveSignal(step: WorkflowStepDefinition, signal: String): WorkflowTransitionSignal =
         step.transitionSignals.singleOrNull { it.signal == signal }
             ?: throw IllegalArgumentException("Step ${step.id} does not declare signal $signal")
+
+    fun canPerform(step: WorkflowStepDefinition, actor: String, action: String): Boolean =
+        step.interactionContract?.actorAuthorities
+            ?.singleOrNull { it.actor == actor }
+            ?.allowedActions
+            ?.contains(action) == true
 }
 
 const val SIGNAL_EVIDENCE_ACCEPTED = "EVIDENCE_ACCEPTED"
@@ -66,3 +90,10 @@ const val CONTEXT_EPISODIC_MEMORY = "EPISODIC_MEMORY"
 const val EXECUTOR_HUMAN = "HUMAN"
 const val EXECUTOR_AGENT = "AGENT"
 const val EXECUTOR_DETERMINISTIC_TOOL = "DETERMINISTIC_TOOL"
+
+const val ACTOR_DETERMINISTIC_POLICY = "DETERMINISTIC_POLICY"
+const val ACTION_PROPOSE = "PROPOSE"
+const val ACTION_REVISE = "REVISE"
+const val ACTION_FEEDBACK = "FEEDBACK"
+const val ACTION_ACCEPT = "ACCEPT"
+const val ACTION_ASSESS = "ASSESS"

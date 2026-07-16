@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 5 complete - System Workflows. Every new Task or Bug must now produce a versioned, unambiguous Work Definition before its delivery workflow can start.
+> **Project status:** Milestone 7.2 complete - Resource-Aware Parallel Admission. Users delegate a configurable share of machine capacity while live host telemetry and deterministic resource leases govern parallel local-model execution.
 
 ## Milestone 1: Local Architect MVP
 
@@ -129,12 +129,105 @@ Delivered and verified:
 - Desktop definition editor and card-level readiness projection; Start Workflow is offered only at `READY`.
 - Real-Git restart coverage proves definitions, pinned runs, acceptance gates, completion episodes, and recall recover together.
 
-Milestone 5 boundaries:
+### Milestone 6: Collaborative Work Definition authority
+
+Tasks and Bugs now support an iterative human-LLM definition loop before delivery:
+
+- invoke the local model from the work item or definition editor
+- inspect model observations separately from assumptions
+- record human feedback as a durable artifact
+- ask the model for a feedback-aware revision
+- edit any proposal into a distinct human-authored revision
+- explicitly accept a proposal before deterministic assessment
+
+The workflow step declares actor-specific authority. HUMAN may propose, revise, provide feedback, and accept. LOCAL_LLM may only propose and revise. DETERMINISTIC_POLICY alone assesses completeness and derives the transition signal.
+
+All proposals, revisions, feedback, acceptance records, source hashes, and model provenance are append-only and recovered after restart. Delivery pins the accepted proposal and closes further definition collaboration.
+
+Milestone 6 boundaries:
 
 - Humans currently supply and revise definitions through the desktop or typed API.
 - Orchard validates explicit structure and unresolved questions; it does not claim to infer every latent ambiguity from prose.
 - `NEEDS_SPLIT` records proposed child titles but does not yet materialize child work items.
 - Investigation agents may later gather logs, diagnostics, and reproductions, but their outputs remain observations until accepted through a system workflow.
+
+### Milestone 7: Context-Bounded Model Profiles
+
+The Work Definition workflow now requests `bounded-definition-reasoning-v1` instead of naming a model. Orchard resolves a compatible installed binding and compiles one immutable invocation envelope containing the current workflow step, allowed and forbidden actions, required output schema, and authoritative context.
+
+Delivered and verified:
+
+- Versioned execution profiles separate reasoning requirements from model identity.
+- Model bindings declare context capacity, capabilities, provider, inference configuration, and optional digest.
+- The definition profile uses a conservative 12,000-token input aperture and reserves 2,000 output tokens.
+- Mandatory context overflow fails before inference; Orchard never silently truncates workflow authority.
+- Ollama receives an explicit output-token cap and returns prompt/completion token telemetry when available.
+- Every attempted inference appends checksummed execution evidence with envelope, prompt, and output hashes, token counts, latency, and schema validity.
+- LLM proposal provenance pins the exact execution ID.
+- Human feedback, unchanged acceptance, and edited acceptance become distinct satisfaction observations derived from their authoritative journals.
+- Capability profiles are rebuilt from raw evidence and show sample count, schema validity, human outcomes, edit distance, median latency, and confidence.
+- Sparse routing selects the smallest compatible binding; sufficiently sampled bindings are ordered by schema reliability, human acceptance, unchanged acceptance, and latency.
+- Compose Desktop displays the matching model-memory evidence in the collaborative definition editor.
+- Restart and torn-tail tests prove the profile projection recovers from the valid journal prefix; interior corruption fails closed without deleting later evidence.
+
+Milestone 7 boundaries:
+
+- Profile memory influences executor selection only; it cannot signal `READY`, accept a definition, or complete a workflow.
+- Pre-inference token counting is a conservative estimate until providers expose tokenizer-specific counting.
+- The production installation currently binds the definition profile to local `phi3:mini`; multi-binding routing is implemented and tested through provider contracts.
+- Satisfaction currently derives from feedback and acceptance behavior rather than a general rating control.
+- Generic benchmarks, leaderboards, fine-tuning, and autonomous code execution remain separate work.
+
+### Milestone 7.1: User-Configurable Model Apertures
+
+Model execution defaults remain versioned workflow policy, while local users can now override the operating aperture according to their machine and task needs.
+
+Delivered and verified:
+
+- Checksummed, atomically replaced `model-profile-settings.json` local authority.
+- Separate input aperture and output reasoning reserve controls.
+- Optional preferred binding or evidence-aware automatic routing.
+- Save-time validation that input plus output fits an installed binding's declared context capacity.
+- Ollama explicitly requests the effective input-plus-output aperture rather than its theoretical maximum.
+- Workflow-owned reasoning class and required capabilities cannot be overridden.
+- Typed model-profile GET/PUT APIs with `404`, `422`, and `503` outcomes.
+- Desktop settings dialog showing defaults, effective budgets, installed models, and live draft compatibility.
+- Effective budgets and preferred binding apply to the next definition execution without restarting Orchard.
+- Capability evidence remains separated by effective aperture, model digest, and inference configuration.
+- Restart coverage proves the selected aperture and binding preference recover from disk.
+
+Milestone 7.1 boundaries:
+
+- Declared model context capacity remains the binding compatibility constraint; live admission is governed separately by Milestone 7.2.
+- A smaller aperture never truncates mandatory context. It produces explicit context-budget overflow when the invocation cannot fit.
+- The desktop currently updates overrides but does not delete the override record; using default budgets restores the default aperture behavior.
+
+### Milestone 7.2: Resource-Aware Parallel Admission
+
+Orchard now combines theoretical model demand, actual machine availability, and user-owned capacity policy before every production local-model invocation.
+
+Delivered and verified:
+
+- Checksummed, atomically replaced `machine-usage-policy.json` authority.
+- User-configurable Orchard capacity share from 1% to 100%, minimum free-memory reserve, and maximum concurrent model jobs.
+- Live Linux host memory, JVM CPU-load, processor, and process-relative cgroup v2/v1 memory telemetry.
+- Most-restrictive cgroup ancestor limits and cgroup usage included in available-capacity calculations.
+- Deterministic leases requiring demand to fit both the delegated share of total capacity and live availability after the safety reserve.
+- Overflow-safe cumulative RAM and CPU reservations; unknown telemetry fails closed.
+- Conservative Ollama demand derived from model residency plus KV-cache aperture, with explicit one-thread execution matching the CPU lease.
+- Separate `429` capacity/concurrency outcomes and `503` telemetry/storage outcomes.
+- Resource-admission evidence attached to model execution observations without invalidating pre-7.2 journals.
+- Per-ticket execution locks permit independent tickets to run concurrently while preventing duplicate inference for one ticket.
+- Architect triage and planning use the same Orchard-wide resource policy as Work Definition execution.
+- Typed machine-resource GET/PUT APIs and desktop controls showing observed memory, CPU load, active leases, and the latest admission decision.
+- Desktop requests can overlap; response ordering prevents stale snapshots from replacing newer state.
+
+Milestone 7.2 boundaries:
+
+- GPU/VRAM placement, thermal pressure, and accelerator-specific utilization are not yet admission inputs.
+- The Ollama memory estimate is deliberately conservative and does not yet subtract shared resident-model memory across leases.
+- Capacity denial returns a retryable result; a durable autonomous queue and worktree-aware integration scheduler remain the next delivery layer.
+- CPU enforcement is achieved by explicit Ollama thread limits and admission reservations, not by Orchard-created cgroups.
 
 ## Architecture
 
@@ -152,6 +245,10 @@ flowchart LR
     WS --> WM[Workflow runs and work episodes]
     WS --> WE[Attempts, evidence, and decisions]
     WS --> WD[System workflows and work definitions]
+    WD --> CP[Context-bounded execution profile]
+    CP --> MB[Compatible model binding]
+    MB --> ME[Checksummed execution and satisfaction memory]
+    ME --> CP
     WD -->|READY manifest| WM
     WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI

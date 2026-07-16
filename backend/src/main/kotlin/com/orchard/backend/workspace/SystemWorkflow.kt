@@ -112,6 +112,14 @@ object DefaultSystemWorkflow {
             WorkflowTransitionSignal(DEFINITION_NEEDS_SPLIT, DEFINITION_NEEDS_SPLIT, false),
             WorkflowTransitionSignal(DEFINITION_READY, DEFINITION_READY, true),
         ),
+        interactionContract = WorkflowInteractionContract(
+            actorAuthorities = listOf(
+                WorkflowActorAuthority(COLLABORATOR_HUMAN, listOf(ACTION_PROPOSE, ACTION_REVISE, ACTION_FEEDBACK, ACTION_ACCEPT)),
+                WorkflowActorAuthority(COLLABORATOR_LOCAL_LLM, listOf(ACTION_PROPOSE, ACTION_REVISE)),
+                WorkflowActorAuthority(ACTOR_DETERMINISTIC_POLICY, listOf(ACTION_ASSESS)),
+            )
+        ),
+        modelExecutionProfileId = "bounded-definition-reasoning-v1",
     )
 
     private fun legacy(workItemType: Int): SystemWorkflow {

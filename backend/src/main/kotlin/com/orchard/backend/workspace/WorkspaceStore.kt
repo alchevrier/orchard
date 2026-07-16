@@ -26,6 +26,7 @@ const val MESSAGE_REPOSITORY_BINDING = 11
 const val MESSAGE_WORKFLOW_START = 12
 const val MESSAGE_WORKFLOW_EVENT = 13
 const val MESSAGE_WORK_DEFINITION = 14
+const val MESSAGE_DEFINITION_COLLABORATION = 15
 
 @Serializable
 data class WorkspaceResource(
@@ -40,6 +41,8 @@ data class WorkspaceSnapshot(
     val repositories: Map<Int, RepositoryView> = emptyMap(),
     val workflowRuns: List<WorkflowRunView> = emptyList(),
     val workDefinitions: List<WorkDefinitionManifest> = emptyList(),
+    val definitionProposals: List<DefinitionProposalView> = emptyList(),
+    val modelProfiles: List<ModelCapabilityProfile> = emptyList(),
 )
 
 enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
@@ -97,6 +100,8 @@ class WorkspaceStore(
     private val repositoryBindings: RepositoryBindingStore = TransientRepositoryBindingStore,
     private val workflowMemory: WorkflowMemoryStore = TransientWorkflowMemoryStore(),
     private val definitionStore: WorkDefinitionStore = TransientWorkDefinitionStore(),
+    private val collaborationStore: DefinitionCollaborationStore = TransientDefinitionCollaborationStore(),
+    private val modelExperienceStore: ModelExperienceStore = TransientModelExperienceStore(),
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -131,12 +136,18 @@ class WorkspaceStore(
     private val workflowRuns = mutableListOf<WorkflowRun>()
     private val workflowEvents = mutableListOf<WorkflowEvent>()
     private val workDefinitions = mutableListOf<WorkDefinitionManifest>()
+    private val collaborationEvents = mutableListOf<DefinitionCollaborationEvent>()
+    private val modelExperienceEvents = mutableListOf<ModelExperienceEvent>()
     private var nextRunId = 1L
     private var nextEventId = 1L
     private var nextDefinitionId = 1L
+    private var nextCollaborationEventId = 1L
+    private var nextModelExperienceEventId = 1L
 
     init {
         restore(repository.load())
+        restoreModelExperience(modelExperienceStore.loadEvents())
+        restoreCollaboration(collaborationStore.loadEvents())
         restoreDefinitions(definitionStore.load())
         restoreRuns(workflowMemory.loadRuns())
         restoreEvents(workflowMemory.loadEvents())
@@ -249,6 +260,22 @@ class WorkspaceStore(
 
     @Synchronized
     fun submitWorkDefinition(workItemId: Int, submission: WorkDefinitionSubmission): WorkDefinitionResult {
+        val proposal = recordDefinitionProposal(
+            workItemId,
+            COLLABORATOR_HUMAN,
+            DefinitionProposalContent(submission, emptyList(), emptyList()),
+        )
+        if (proposal.status != DefinitionCollaborationStatus.RECORDED || proposal.proposal == null) {
+            return definitionFailureFromCollaboration(proposal)
+        }
+        return acceptDefinitionProposal(proposal.proposal.proposalId)
+    }
+
+    private fun persistWorkDefinition(
+        workItemId: Int,
+        submission: WorkDefinitionSubmission,
+        sourceProposal: DefinitionProposalReference?,
+    ): WorkDefinitionResult {
         val workItem = committedEntity(workItemId)
             ?: return definitionFailure(WorkDefinitionStatus.WORK_ITEM_NOT_FOUND, "The selected work item does not exist.")
         if (workItem.type != ENTITY_TASK && workItem.type != ENTITY_BUG) return definitionFailure(
@@ -276,6 +303,7 @@ class WorkspaceStore(
             workflow = workflow,
             definition = definition,
             assessment = assessment,
+            sourceProposal = sourceProposal,
         )
         try {
             definitionStore.append(manifest)
@@ -297,6 +325,207 @@ class WorkspaceStore(
     }
 
     @Synchronized
+    fun definitionStepContext(workItemId: Int): DefinitionStepContext? {
+        val workItem = committedEntity(workItemId) ?: return null
+        if (workItem.type != ENTITY_TASK && workItem.type != ENTITY_BUG) return null
+        val story = committedEntity(workItem.parentId, ENTITY_STORY) ?: return null
+        val epic = committedEntity(story.parentId, ENTITY_EPIC) ?: return null
+        val project = committedEntity(epic.parentId, ENTITY_PROJECT) ?: return null
+        return DefinitionStepContext(
+            workItemId = workItem.id,
+            workItemType = workItem.type,
+            projectTitle = project.title,
+            epicTitle = epic.title,
+            storyTitle = story.title,
+            title = workItem.title,
+            content = workItem.content,
+            systemWorkflow = DefaultSystemWorkflow.resolve(workItem.type),
+            currentDefinition = workDefinitions.lastOrNull { it.workItemId == workItemId },
+            proposals = definitionProposalViews().filter { it.proposal.workItemId == workItemId },
+            feedback = collaborationEvents.mapNotNull { it.feedback }
+                .filter { feedback ->
+                    collaborationEvents.mapNotNull { it.proposal }
+                        .any { it.workItemId == workItemId && it.proposalId == feedback.proposalId }
+                }
+        )
+    }
+
+    @Synchronized
+    fun recordDefinitionProposal(
+        workItemId: Int,
+        actor: String,
+        content: DefinitionProposalContent,
+        provenance: DefinitionExecutionProvenance? = null,
+        parentProposalId: Long? = null,
+    ): DefinitionCollaborationResult {
+        val workItem = committedEntity(workItemId)
+            ?: return collaborationFailure(DefinitionCollaborationStatus.WORK_ITEM_NOT_FOUND, "The work item does not exist.")
+        if (workItem.type != ENTITY_TASK && workItem.type != ENTITY_BUG) return collaborationFailure(
+            DefinitionCollaborationStatus.WORK_ITEM_NOT_FOUND,
+            "Only tasks and bugs support definition collaboration.",
+        )
+        if (workflowRuns.any { it.context.workItemId == workItemId }) return collaborationFailure(
+            DefinitionCollaborationStatus.WORKFLOW_ALREADY_STARTED,
+            "Definition collaboration is closed after delivery starts.",
+        )
+        val definition = normalizeDefinition(content.definition)
+        if (
+            actor !in setOf(COLLABORATOR_HUMAN, COLLABORATOR_LOCAL_LLM) ||
+            (actor == COLLABORATOR_LOCAL_LLM && provenance == null) ||
+            !validDefinitionSize(definition) ||
+            content.observations.size > MAX_DEFINITION_ENTRIES ||
+            content.assumptions.size > MAX_DEFINITION_ENTRIES ||
+            (content.observations + content.assumptions).any { it.isBlank() || it.length > MAX_DEFINITION_TEXT }
+        ) return collaborationFailure(
+            DefinitionCollaborationStatus.INVALID_RECORD,
+            "The definition proposal is invalid.",
+        )
+        if (actor == COLLABORATOR_LOCAL_LLM) {
+            val execution = provenance?.executionId?.let { executionId ->
+                modelExperienceEvents.mapNotNull { it.execution }.singleOrNull { it.executionId == executionId }
+            }
+            if (execution == null || !provenanceMatchesExecution(workItemId, requireNotNull(provenance), execution)) {
+                return collaborationFailure(
+                    DefinitionCollaborationStatus.INVALID_RECORD,
+                    "The local model proposal does not reference its exact execution evidence.",
+                )
+            }
+        }
+        val proposals = collaborationEvents.mapNotNull { it.proposal }.filter { it.workItemId == workItemId }
+        val action = if (proposals.isEmpty()) ACTION_PROPOSE else ACTION_REVISE
+        if (!WorkflowStepEngine.canPerform(DefaultSystemWorkflow.resolve(workItem.type).stepDefinitions.single(), actor, action)) {
+            return collaborationFailure(
+                DefinitionCollaborationStatus.INVALID_RECORD,
+                "$actor is not authorized to $action this definition.",
+            )
+        }
+        val proposal = newDefinitionProposal(
+            proposalId = nextCollaborationEventId,
+            workItemId = workItemId,
+            revision = proposals.size + 1,
+            parentProposalId = parentProposalId ?: proposals.lastOrNull()?.proposalId,
+            actor = actor,
+            content = content.copy(
+                definition = definition,
+                observations = content.observations.map(String::trim),
+                assumptions = content.assumptions.map(String::trim),
+            ),
+            provenance = provenance,
+        )
+        val event = DefinitionCollaborationEvent(nextCollaborationEventId, proposal = proposal)
+        if (!appendCollaborationEvent(event)) return collaborationFailure(
+            DefinitionCollaborationStatus.STORAGE_UNAVAILABLE,
+            "The definition proposal could not be saved.",
+        )
+        workflowMessage = "Recorded ${if (actor == COLLABORATOR_HUMAN) "a human" else "a local LLM"} definition proposal."
+        return DefinitionCollaborationResult(
+            DefinitionCollaborationStatus.RECORDED,
+            snapshot(MESSAGE_DEFINITION_COLLABORATION),
+            proposal,
+        )
+    }
+
+    @Synchronized
+    fun recordDefinitionFeedback(proposalId: Long, content: String): DefinitionCollaborationResult {
+        val proposal = collaborationEvents.mapNotNull { it.proposal }.firstOrNull { it.proposalId == proposalId }
+            ?: return collaborationFailure(DefinitionCollaborationStatus.PROPOSAL_NOT_FOUND, "The proposal does not exist.")
+        if (workflowRuns.any { it.context.workItemId == proposal.workItemId }) return collaborationFailure(
+            DefinitionCollaborationStatus.WORKFLOW_ALREADY_STARTED,
+            "Definition collaboration is closed after delivery starts.",
+        )
+        val workItem = requireNotNull(committedEntity(proposal.workItemId))
+        if (!WorkflowStepEngine.canPerform(
+                DefaultSystemWorkflow.resolve(workItem.type).stepDefinitions.single(),
+                COLLABORATOR_HUMAN,
+                ACTION_FEEDBACK,
+            )
+        ) return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "Human feedback is not authorized.")
+        val normalized = content.trim()
+        if (normalized.isEmpty() || normalized.length > MAX_DEFINITION_TEXT) return collaborationFailure(
+            DefinitionCollaborationStatus.INVALID_RECORD,
+            "Feedback must contain bounded text.",
+        )
+        val event = DefinitionCollaborationEvent(
+            eventId = nextCollaborationEventId,
+            feedback = DefinitionFeedback(nextCollaborationEventId, proposalId, COLLABORATOR_HUMAN, normalized),
+        )
+        if (!appendCollaborationEvent(event)) return collaborationFailure(
+            DefinitionCollaborationStatus.STORAGE_UNAVAILABLE,
+            "The feedback could not be saved.",
+        )
+        workflowMessage = "Recorded human feedback for proposal revision ${proposal.revision}."
+        return DefinitionCollaborationResult(
+            DefinitionCollaborationStatus.RECORDED,
+            snapshot(MESSAGE_DEFINITION_COLLABORATION),
+            proposal,
+        )
+    }
+
+    @Synchronized
+    fun acceptDefinitionProposal(
+        proposalId: Long,
+        editedDefinition: WorkDefinitionSubmission? = null,
+    ): WorkDefinitionResult {
+        val proposal = collaborationEvents.mapNotNull { it.proposal }.firstOrNull { it.proposalId == proposalId }
+            ?: return definitionFailure(WorkDefinitionStatus.WORK_ITEM_NOT_FOUND, "The proposal does not exist.")
+        val workItem = committedEntity(proposal.workItemId)
+            ?: return definitionFailure(WorkDefinitionStatus.WORK_ITEM_NOT_FOUND, "The proposal work item does not exist.")
+        if (!WorkflowStepEngine.canPerform(
+                DefaultSystemWorkflow.resolve(workItem.type).stepDefinitions.single(),
+                COLLABORATOR_HUMAN,
+                ACTION_ACCEPT,
+            )
+        ) return definitionFailure(WorkDefinitionStatus.INVALID_DEFINITION, "Human acceptance is not authorized.")
+        var acceptedProposal = proposal
+        val normalizedEdit = editedDefinition?.let(::normalizeDefinition)
+        val humanRevisionFields = normalizedEdit?.let { definitionRevisionFields(proposal.content.definition, it) } ?: 0
+        if (normalizedEdit != null && normalizedEdit != proposal.content.definition) {
+            val revised = recordDefinitionProposal(
+                proposal.workItemId,
+                COLLABORATOR_HUMAN,
+            proposal.content.copy(definition = normalizedEdit),
+                parentProposalId = proposal.proposalId,
+            )
+            if (revised.status != DefinitionCollaborationStatus.RECORDED || revised.proposal == null) {
+                return definitionFailureFromCollaboration(revised)
+            }
+            acceptedProposal = revised.proposal
+        }
+        val result = persistWorkDefinition(
+            acceptedProposal.workItemId,
+            acceptedProposal.content.definition,
+            DefinitionProposalReference(acceptedProposal.proposalId, acceptedProposal.hash),
+        )
+        if (result.status == WorkDefinitionStatus.RECORDED) return result.copy(snapshot = snapshot(MESSAGE_WORK_DEFINITION))
+        return result
+    }
+
+    @Synchronized
+    fun recordModelExecution(draft: ModelExecutionObservationDraft): ModelExecutionObservation? {
+        val observation = ModelExecutionObservation(
+            executionId = nextModelExperienceEventId,
+            profile = draft.profile,
+            binding = draft.binding,
+            workflowStepId = draft.workflowStepId,
+            workItemId = draft.workItemId,
+            envelopeHash = draft.envelopeHash,
+            promptHash = draft.promptHash,
+            outputHash = draft.outputHash,
+            inputTokens = draft.inputTokens,
+            outputTokens = draft.outputTokens,
+            latencyMillis = draft.latencyMillis,
+            schemaValid = draft.schemaValid,
+            resourceAdmission = draft.resourceAdmission,
+        )
+        val event = ModelExperienceEvent(nextModelExperienceEventId, execution = observation)
+        return if (appendModelExperienceEvent(event)) observation else null
+    }
+
+    @Synchronized
+    fun modelProfiles(): List<ModelCapabilityProfile> =
+        modelCapabilityProfiles(modelExperienceEvents, authoritativeModelSatisfaction())
+
+    @Synchronized
     fun startWorkflow(workItemId: Int): WorkflowStartResult {
         val workItem = committedEntity(workItemId)
         if (workItem == null) return workflowFailure(
@@ -315,6 +544,16 @@ class WorkspaceStore(
         if (workDefinition?.assessment?.status != DEFINITION_READY) return workflowFailure(
             WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
             "Complete the system work-definition workflow before starting delivery.",
+        )
+        val source = workDefinition.sourceProposal
+        val acceptedProposal = source?.let { reference ->
+            collaborationEvents.mapNotNull { it.proposal }.singleOrNull {
+                it.proposalId == reference.proposalId && it.hash == reference.proposalHash
+            }
+        }
+        if (acceptedProposal?.workItemId != workItemId) return workflowFailure(
+            WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
+            "Accept a source-pinned definition proposal before starting delivery.",
         )
 
         val story = committedEntity(workItem.parentId, ENTITY_STORY)
@@ -598,6 +837,8 @@ class WorkspaceStore(
             repositoryBindings.views(projectIds),
             workflowRuns.map(::runView),
             latestDefinitions,
+            definitionProposalViews(),
+            modelProfiles(),
         )
     }
 
@@ -695,8 +936,129 @@ class WorkspaceStore(
             require(manifest.assessment == DefaultSystemWorkflow.assess(workItem.type, manifest.definition)) {
                 "Work definition ${manifest.definitionId} has an invalid assessment"
             }
+            manifest.sourceProposal?.let { source ->
+                val proposal = collaborationEvents.mapNotNull { it.proposal }
+                    .singleOrNull { it.proposalId == source.proposalId }
+                require(proposal != null && proposal.workItemId == workItem.id && proposal.hash == source.proposalHash) {
+                    "Work definition ${manifest.definitionId} references an invalid proposal"
+                }
+            }
             workDefinitions += manifest
             nextDefinitionId++
+        }
+    }
+
+    private fun restoreCollaboration(restoredEvents: List<DefinitionCollaborationEvent>) {
+        restoredEvents.forEach { event ->
+            require(event.eventId == nextCollaborationEventId) {
+                "Expected collaboration event ID $nextCollaborationEventId, found ${event.eventId}"
+            }
+            event.proposal?.let { proposal ->
+                val workItem = committedEntity(proposal.workItemId)
+                require(workItem != null && workItem.type in setOf(ENTITY_TASK, ENTITY_BUG)) {
+                    "Proposal ${proposal.proposalId} references an invalid work item"
+                }
+                require(proposal.revision == collaborationEvents.mapNotNull { it.proposal }
+                    .count { it.workItemId == proposal.workItemId } + 1) {
+                    "Proposal ${proposal.proposalId} has an invalid revision"
+                }
+                proposal.provenance?.let { provenance ->
+                    val execution = modelExperienceEvents.mapNotNull { it.execution }
+                        .singleOrNull { it.executionId == provenance.executionId }
+                    require(execution != null && provenanceMatchesExecution(proposal.workItemId, provenance, execution)) {
+                        "Proposal ${proposal.proposalId} references an invalid model execution"
+                    }
+                }
+            }
+            collaborationEvents += event
+            nextCollaborationEventId++
+        }
+    }
+
+    private fun restoreModelExperience(restoredEvents: List<ModelExperienceEvent>) {
+        restoredEvents.forEach { event ->
+            require(event.eventId == nextModelExperienceEventId) {
+                "Expected model experience event ID $nextModelExperienceEventId, found ${event.eventId}"
+            }
+            modelExperienceEvents += event
+            nextModelExperienceEventId++
+        }
+    }
+
+    private fun appendCollaborationEvent(event: DefinitionCollaborationEvent): Boolean = try {
+        collaborationStore.appendEvent(event)
+        collaborationEvents += event
+        nextCollaborationEventId++
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun appendModelExperienceEvent(event: ModelExperienceEvent): Boolean = try {
+        modelExperienceStore.appendEvent(event)
+        modelExperienceEvents += event
+        nextModelExperienceEventId++
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun authoritativeModelSatisfaction(): List<ModelSatisfactionObservation> = buildList {
+        val proposals = collaborationEvents.mapNotNull { it.proposal }.associateBy { it.proposalId }
+        collaborationEvents.mapNotNull { it.feedback }.forEach { feedback ->
+            val proposal = proposals[feedback.proposalId] ?: return@forEach
+            val executionId = proposal.provenance?.executionId ?: return@forEach
+            add(
+                ModelSatisfactionObservation(
+                    satisfactionId = feedback.feedbackId,
+                    executionId = executionId,
+                    workItemId = proposal.workItemId,
+                    proposalId = proposal.proposalId,
+                    signal = MODEL_SATISFACTION_REVISION_REQUESTED,
+                )
+            )
+        }
+        workDefinitions.forEach { manifest ->
+            val accepted = manifest.sourceProposal?.proposalId?.let(proposals::get) ?: return@forEach
+            val modelProposal = if (accepted.provenance != null) accepted else accepted.parentProposalId?.let(proposals::get)
+            val executionId = modelProposal?.provenance?.executionId ?: return@forEach
+            val changedFields = definitionRevisionFields(modelProposal.content.definition, accepted.content.definition)
+            add(
+                ModelSatisfactionObservation(
+                    satisfactionId = manifest.definitionId,
+                    executionId = executionId,
+                    workItemId = accepted.workItemId,
+                    proposalId = modelProposal.proposalId,
+                    signal = if (changedFields == 0) {
+                        MODEL_SATISFACTION_ACCEPTED_UNCHANGED
+                    } else {
+                        MODEL_SATISFACTION_ACCEPTED_AFTER_EDIT
+                    },
+                    humanRevisionFields = changedFields,
+                )
+            )
+        }
+    }
+
+    private fun provenanceMatchesExecution(
+        workItemId: Int,
+        provenance: DefinitionExecutionProvenance,
+        execution: ModelExecutionObservation,
+    ): Boolean = execution.workItemId == workItemId &&
+        execution.binding.model == provenance.model &&
+        execution.profile.id == provenance.executionProfileId &&
+        com.orchard.backend.vector.modelBindingFingerprint(execution.binding) == provenance.bindingFingerprint &&
+        execution.envelopeHash == provenance.contextHash &&
+        execution.promptHash == provenance.promptHash &&
+        execution.outputHash == provenance.outputHash
+
+    private fun definitionProposalViews(): List<DefinitionProposalView> {
+        val feedback = collaborationEvents.mapNotNull { it.feedback }.groupBy { it.proposalId }
+        val accepted = workDefinitions.mapNotNull { definition ->
+            definition.sourceProposal?.proposalId?.let { it to definition.definitionId }
+        }.toMap()
+        return collaborationEvents.mapNotNull { it.proposal }.map { proposal ->
+            DefinitionProposalView(proposal, feedback[proposal.proposalId].orEmpty(), accepted[proposal.proposalId])
         }
     }
 
@@ -804,6 +1166,26 @@ class WorkspaceStore(
         return WorkDefinitionResult(status, snapshot(MESSAGE_WORK_DEFINITION))
     }
 
+    private fun collaborationFailure(
+        status: DefinitionCollaborationStatus,
+        message: String,
+    ): DefinitionCollaborationResult {
+        workflowMessage = message
+        return DefinitionCollaborationResult(status, snapshot(MESSAGE_DEFINITION_COLLABORATION))
+    }
+
+    private fun definitionFailureFromCollaboration(result: DefinitionCollaborationResult): WorkDefinitionResult {
+        val status = when (result.status) {
+            DefinitionCollaborationStatus.WORK_ITEM_NOT_FOUND,
+            DefinitionCollaborationStatus.PROPOSAL_NOT_FOUND -> WorkDefinitionStatus.WORK_ITEM_NOT_FOUND
+            DefinitionCollaborationStatus.WORKFLOW_ALREADY_STARTED -> WorkDefinitionStatus.WORKFLOW_ALREADY_STARTED
+            DefinitionCollaborationStatus.INVALID_RECORD -> WorkDefinitionStatus.INVALID_DEFINITION
+            DefinitionCollaborationStatus.STORAGE_UNAVAILABLE -> WorkDefinitionStatus.STORAGE_UNAVAILABLE
+            DefinitionCollaborationStatus.RECORDED -> WorkDefinitionStatus.STORAGE_UNAVAILABLE
+        }
+        return WorkDefinitionResult(status, result.snapshot)
+    }
+
     private fun normalizeDefinition(submission: WorkDefinitionSubmission): WorkDefinitionSubmission = submission.copy(
         requestedOutcome = submission.requestedOutcome.trim(),
         currentBehavior = submission.currentBehavior.trim(),
@@ -842,6 +1224,21 @@ class WorkspaceStore(
                 it.description.length <= MAX_DEFINITION_TEXT && it.verification.length <= MAX_DEFINITION_TEXT
             }
     }
+
+    private fun definitionRevisionFields(before: WorkDefinitionSubmission, after: WorkDefinitionSubmission): Int =
+        listOf(
+            before.requestedOutcome != after.requestedOutcome,
+            before.currentBehavior != after.currentBehavior,
+            before.requiredBehavior != after.requiredBehavior,
+            before.scope != after.scope,
+            before.nonGoals != after.nonGoals,
+            before.constraints != after.constraints,
+            before.acceptanceCriteria != after.acceptanceCriteria,
+            before.unresolvedQuestions != after.unresolvedQuestions,
+            before.proposedSplitTitles != after.proposedSplitTitles,
+            before.reproduction != after.reproduction,
+            before.regressionCriterion != after.regressionCriterion,
+        ).count { it }
 
     private fun workflowMutationFailure(
         status: WorkflowMutationStatus,
@@ -919,6 +1316,7 @@ class WorkspaceStore(
         MESSAGE_WORKFLOW_START -> workflowMessage
         MESSAGE_WORKFLOW_EVENT -> workflowMessage
         MESSAGE_WORK_DEFINITION -> workflowMessage
+        MESSAGE_DEFINITION_COLLABORATION -> workflowMessage
         else -> "Describe a project, epic, story, task, or bug to the Architect."
     }
 

@@ -2,6 +2,8 @@ package com.orchard.backend.agent
 
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
 import com.orchard.backend.workspace.MESSAGE_BATCH_CREATED
@@ -33,6 +35,7 @@ data class ArchitectResult(val statusCode: Int, val snapshot: WorkspaceSnapshot)
 class ArchitectService(
     private val workspace: WorkspaceStore,
     private val modelProvider: ModelProvider,
+    private val resourceController: MachineResourceController = MachineResourceController.unrestricted(),
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
     private val requestMutex = Mutex()
@@ -52,8 +55,10 @@ class ArchitectService(
     private suspend fun process(prompt: String): ArchitectResult {
         var actionType = classifyAction(prompt)
         var entityType = classifyEntityType(prompt, actionType)
+        val triageAdmission = resourceController.tryAcquire(modelProvider.architectResourceDemand())
+        val triageLease = triageAdmission.lease ?: return admissionFailure(triageAdmission.evidence.decision)
         val triageJson = try {
-            modelProvider.triage(prompt)
+            triageLease.use { modelProvider.triage(prompt) }
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
@@ -80,8 +85,10 @@ class ArchitectService(
             return ArchitectResult(422, workspace.snapshot(MESSAGE_UNSUPPORTED_ACTION))
         }
 
+        val planAdmission = resourceController.tryAcquire(modelProvider.architectResourceDemand())
+        val planLease = planAdmission.lease ?: return admissionFailure(planAdmission.evidence.decision)
         val planJson = try {
-            modelProvider.plan(prompt, actionType, entityType, workspace)
+            planLease.use { modelProvider.plan(prompt, actionType, entityType, workspace) }
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
@@ -225,6 +232,14 @@ class ArchitectService(
             else -> MESSAGE_REJECTED
         }
         return ArchitectResult(422, workspace.snapshot(message))
+    }
+
+    private fun admissionFailure(decision: ResourceAdmissionDecision): ArchitectResult = if (
+        decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE
+    ) {
+        ArchitectResult(503, workspace.snapshot(MESSAGE_OLLAMA_UNAVAILABLE))
+    } else {
+        ArchitectResult(429, workspace.snapshot(MESSAGE_BUSY))
     }
 
     private fun classifyAction(prompt: String): Int = nearestWord(
