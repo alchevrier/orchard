@@ -50,11 +50,13 @@ import com.orchard.backend.workspace.DefinitionExecutionProvenance
 import com.orchard.backend.workspace.DefinitionProposalContent
 import com.orchard.backend.workspace.DefinitionCollaborationStatus
 import com.orchard.backend.workspace.EpisodeQuery
+import com.orchard.backend.workspace.EvidenceSubmission
 import com.orchard.backend.workspace.EpisodeRecall
 import com.orchard.backend.workspace.WorkflowMemoryStore
 import com.orchard.backend.workspace.WorkflowRun
 import com.orchard.backend.workspace.WorkflowEvent
 import com.orchard.backend.workspace.WorkflowStartStatus
+import com.orchard.backend.workspace.WorkflowMutationStatus
 import com.orchard.backend.workspace.WorkEpisode
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
@@ -65,6 +67,14 @@ import com.orchard.backend.workspace.ENTITY_TASK
 import com.orchard.backend.workspace.ENTITY_BUG
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.StagedDeliveryPlanSubmission
+import com.orchard.backend.workspace.StagedPlanArtifact
+import com.orchard.backend.workspace.StagedPlanArtifactRequirement
+import com.orchard.backend.workspace.StagedPlanNodeSubmission
+import com.orchard.backend.workspace.StagedPlanStageSubmission
+import com.orchard.backend.workspace.StagedPlanStatus
+import com.orchard.backend.workspace.PLAN_NODE_BLOCKED_DEPENDENCY
+import com.orchard.backend.workspace.PLAN_NODE_ELIGIBLE
 import io.ktor.client.request.get
 import io.ktor.client.request.put
 import io.ktor.client.request.post
@@ -89,6 +99,198 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class WorkspaceStoreTest {
+    @Test
+    fun stagedCircuitDerivesLabelsAndBlocksDownstreamWorkflow() {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "a".repeat(40), "main", "", clean = true,
+            )
+            override fun validateRevision(projectId: Int, baseRevision: String, targetRevision: String) =
+                RevisionValidation(targetRevision, changedFromBase = true)
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Screen", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Define API", projectId = 1, epicId = 2, storyId = 3)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Build screen", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        workspace.submitWorkDefinition(4, readyDefinition())
+        workspace.submitWorkDefinition(5, readyDefinition())
+
+        val accepted = workspace.acceptStagedPlan(screenCircuit())
+        val view = accepted.snapshot.stagedPlans.single()
+
+        assertEquals(StagedPlanStatus.ACCEPTED, accepted.status)
+        assertEquals(listOf("1a", "2a"), view.nodes.map { it.node.label })
+        assertEquals(listOf(PLAN_NODE_ELIGIBLE, PLAN_NODE_BLOCKED_DEPENDENCY), view.nodes.map { it.state })
+        assertEquals(WorkflowStartStatus.STAGED_PLAN_BLOCKED, workspace.startWorkflow(5).status)
+        val cancelled = workspace.startWorkflow(4)
+        assertEquals(WorkflowStartStatus.CREATED, cancelled.status)
+        assertEquals(
+            WorkflowMutationStatus.RECORDED,
+            workspace.cancelWorkflow(cancelled.snapshot.workflowRuns.single().runId).status,
+        )
+        val started = workspace.startWorkflow(4)
+        assertEquals(WorkflowStartStatus.CREATED, started.status)
+        val run = started.snapshot.workflowRuns.last()
+        workspace.beginBatch()
+        assertTrue(
+            !workspace.applyIntent(intent(ENTITY_TASK, "Late task", projectId = 1, epicId = 2, storyId = 3))
+        )
+        workspace.rollbackBatch()
+        run.workflow.evidenceContract.requirements.forEach { requirement ->
+            workspace.submitEvidence(
+                run.runId,
+                EvidenceSubmission(
+                    kind = requirement.kind,
+                    revision = "b".repeat(40),
+                    command = "verify ${requirement.kind}",
+                    exitCode = 0,
+                    outputHash = "c".repeat(64),
+                    summary = "${requirement.kind} passed",
+                    producer = "test",
+                ),
+            )
+        }
+        val completedView = workspace.snapshot(MESSAGE_READY).stagedPlans.single()
+        assertEquals("API_CONTRACT", completedView.artifacts.single().kind)
+        assertEquals(run.runId, completedView.artifacts.single().workflowRunId)
+        assertEquals("SOURCE_DIFF", completedView.artifacts.single().evidenceKind)
+        assertEquals("c".repeat(64), completedView.artifacts.single().outputHash)
+        assertEquals(64, completedView.artifacts.single().evidenceHash.length)
+        assertEquals(PLAN_NODE_ELIGIBLE, completedView.nodes.last().state)
+        assertTrue(workspace.snapshot(MESSAGE_READY).resources.getValue("entity-4").action.contains("status=3"))
+        assertEquals(WorkflowStartStatus.CREATED, workspace.startWorkflow(5).status)
+        assertEquals(StagedPlanStatus.PLAN_LOCKED, workspace.acceptStagedPlan(screenCircuit("Revised circuit")).status)
+    }
+
+    @Test
+    fun stagedCircuitRejectsUnknownWorkflowAndStaleRevision() {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "First", projectId = 1, epicId = 2, storyId = 3)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Second", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+
+        val unknown = screenCircuit().copy(
+            stages = screenCircuit().stages.mapIndexed { index, stage ->
+                if (index == 0) stage.copy(executionWorkflowId = "unknown-workflow") else stage
+            }
+        )
+        assertEquals(StagedPlanStatus.INVALID_PLAN, workspace.acceptStagedPlan(unknown).status)
+        val unboundArtifact = screenCircuit().copy(
+            stages = screenCircuit().stages.mapIndexed { index, stage ->
+                if (index == 0) stage.copy(
+                    nodes = stage.nodes.map { node ->
+                        node.copy(
+                            produces = node.produces.map { it.copy(evidenceKind = "NOT_A_WORKFLOW_GATE") }
+                        )
+                    }
+                ) else stage
+            }
+        )
+        assertEquals(StagedPlanStatus.INVALID_PLAN, workspace.acceptStagedPlan(unboundArtifact).status)
+
+        val first = workspace.acceptStagedPlan(screenCircuit())
+        val active = first.snapshot.stagedPlans.single().plan
+        val second = workspace.acceptStagedPlan(
+            screenCircuit("Revision 2").copy(baseRevision = active.revision, baseHash = active.hash)
+        )
+        assertEquals(StagedPlanStatus.ACCEPTED, second.status)
+        assertEquals(
+            StagedPlanStatus.STALE_PLAN,
+            workspace.acceptStagedPlan(
+                screenCircuit("Stale edit").copy(baseRevision = active.revision, baseHash = active.hash)
+            ).status,
+        )
+    }
+
+    @Test
+    fun stagedCircuitRejectsForwardDependency() {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "First", projectId = 1, epicId = 2, storyId = 3)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Second", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        val invalid = screenCircuit().copy(
+            stages = screenCircuit().stages.mapIndexed { index, stage ->
+                if (index == 0) stage.copy(nodes = stage.nodes.map { it.copy(dependsOn = listOf("screen")) }) else stage
+            }
+        )
+
+        assertEquals(StagedPlanStatus.INVALID_PLAN, workspace.acceptStagedPlan(invalid).status)
+    }
+
+    @Test
+    fun epicCircuitRejectsArtifactsUntilStoryAggregationExists() {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        workspace.commitBatch()
+
+        val plan = StagedDeliveryPlanSubmission(
+            2,
+            "Epic circuit",
+            listOf(
+                StagedPlanStageSubmission(
+                    "story", "Story", "contract-design-v1",
+                    nodes = listOf(
+                        StagedPlanNodeSubmission(
+                            "story", 3,
+                            produces = listOf(StagedPlanArtifact("API_CONTRACT", "API")),
+                        )
+                    ),
+                )
+            ),
+        )
+
+        assertEquals(StagedPlanStatus.INVALID_PLAN, workspace.acceptStagedPlan(plan).status)
+    }
+
+    private fun screenCircuit(title: String = "Screen delivery circuit") = StagedDeliveryPlanSubmission(
+        scopeId = 3,
+        title = title,
+        stages = listOf(
+            StagedPlanStageSubmission(
+                "contract",
+                "Accept contract",
+                "contract-design-v1",
+                nodes = listOf(
+                    StagedPlanNodeSubmission(
+                        "api",
+                        4,
+                        produces = listOf(StagedPlanArtifact("API_CONTRACT", "Screen API")),
+                    )
+                ),
+            ),
+            StagedPlanStageSubmission(
+                "implementation",
+                "Parallel implementation",
+                "parallel-implementation-v1",
+                nodes = listOf(
+                    StagedPlanNodeSubmission(
+                        "screen",
+                        5,
+                        dependsOn = listOf("api"),
+                        consumes = listOf(StagedPlanArtifactRequirement("api", "API_CONTRACT")),
+                    )
+                ),
+            ),
+        ),
+    )
+
     @Test
     fun humanFeedbackAndEditsRemainDistinctFromLlmProposalAuthority() {
         val workspace = WorkspaceStore()
@@ -1069,6 +1271,52 @@ class DefinitionIntelligenceServiceTest {
 }
 
 class WorkspaceApiTest {
+    @Test
+    fun stagedPlanRouteRejectsOversizedBody() = testApplication {
+        application { workspaceApi(WorkspaceStore()) }
+
+        val response = client.post("/api/staged-plans") {
+            contentType(ContentType.Application.Json)
+            setBody("x".repeat(64 * 1024 + 1))
+        }
+
+        assertEquals(HttpStatusCode.PayloadTooLarge, response.status)
+    }
+
+    @Test
+    fun stagedPlanRouteAcceptsAndProjectsCircuit() = testApplication {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_PROJECT, DEFAULT_DELIVERY_WORKFLOW_ID, title = "Project")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_EPIC, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, title = "Epic")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_STORY, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, title = "Story")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Task")))
+        workspace.commitBatch()
+        application { workspaceApi(workspace) }
+
+        val response = client.post("/api/staged-plans") {
+            contentType(ContentType.Application.Json)
+            setBody(
+                Json.encodeToString(
+                    StagedDeliveryPlanSubmission(
+                        3,
+                        "API circuit",
+                        listOf(
+                            StagedPlanStageSubmission(
+                                "delivery", "Delivery", "sequential-delivery-v1",
+                                nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                            )
+                        ),
+                    )
+                )
+            )
+        }
+
+        assertEquals(HttpStatusCode.Created, response.status)
+        assertTrue(response.bodyAsText().contains("\"label\":\"1a\""))
+        assertTrue(response.bodyAsText().contains("\"executionWorkflowId\":\"sequential-delivery-v1\""))
+    }
+
     @Test
     fun machineResourcePolicyRouteUsesLiveCapacityAndPersistsUserShare() = testApplication {
         val resources = MachineResourceController(

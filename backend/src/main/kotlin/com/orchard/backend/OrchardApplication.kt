@@ -21,6 +21,7 @@ import com.orchard.backend.workspace.FileWorkflowMemoryStore
 import com.orchard.backend.workspace.FileWorkDefinitionStore
 import com.orchard.backend.workspace.FileDefinitionCollaborationStore
 import com.orchard.backend.workspace.FileModelExperienceStore
+import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
@@ -30,6 +31,8 @@ import com.orchard.backend.workspace.WorkDefinitionSubmission
 import com.orchard.backend.workspace.WorkDefinitionStatus
 import com.orchard.backend.workspace.DefinitionCollaborationStatus
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.StagedDeliveryPlanSubmission
+import com.orchard.backend.workspace.StagedPlanStatus
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
@@ -38,6 +41,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.request.receive
+import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -45,6 +49,10 @@ import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.decodeFromString
+import io.ktor.utils.io.readRemaining
+import io.ktor.utils.io.core.readText
+import io.ktor.utils.io.core.remaining
 
 fun main() {
     OrchardPaths.initialize()
@@ -55,6 +63,7 @@ fun main() {
         FileWorkDefinitionStore(OrchardPaths.WORKSPACE_DIR),
         FileDefinitionCollaborationStore(OrchardPaths.WORKSPACE_DIR),
         FileModelExperienceStore(OrchardPaths.WORKSPACE_DIR),
+        FileStagedDeliveryPlanStore(OrchardPaths.WORKSPACE_DIR),
     )
     val modelProvider = OllamaClient()
     val resourceController = MachineResourceController(
@@ -133,6 +142,31 @@ fun Application.workspaceApi(
             }
             result.configuration?.let { call.respond(status, it) } ?: call.respond(status)
         }
+        post("/api/staged-plans") {
+            val body = call.receiveChannel().readRemaining(MAX_STAGED_PLAN_REQUEST_BYTES + 1L)
+            if (body.remaining > MAX_STAGED_PLAN_REQUEST_BYTES) {
+                call.respond(HttpStatusCode.PayloadTooLarge)
+                return@post
+            }
+            val request = runCatching {
+                Json.decodeFromString<StagedDeliveryPlanSubmission>(body.readText())
+            }.getOrNull()
+            if (request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.acceptStagedPlan(request)
+            val status = when (result.status) {
+                StagedPlanStatus.ACCEPTED -> HttpStatusCode.Created
+                StagedPlanStatus.SCOPE_NOT_FOUND -> HttpStatusCode.NotFound
+                StagedPlanStatus.PLAN_LOCKED -> HttpStatusCode.Conflict
+                StagedPlanStatus.STALE_PLAN -> HttpStatusCode.Conflict
+                StagedPlanStatus.INVALID_SCOPE,
+                StagedPlanStatus.INVALID_PLAN -> HttpStatusCode.UnprocessableEntity
+                StagedPlanStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result.snapshot)
+        }
         put("/api/model-profiles/{profileId}") {
             if (definitionIntelligence == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable)
@@ -184,6 +218,7 @@ fun Application.workspaceApi(
                 WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
                 WorkflowStartStatus.REPOSITORY_DIRTY,
                 WorkflowStartStatus.WORK_DEFINITION_NOT_READY -> HttpStatusCode.UnprocessableEntity
+                WorkflowStartStatus.STAGED_PLAN_BLOCKED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.ALREADY_STARTED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
@@ -292,6 +327,8 @@ fun Application.workspaceApi(
         }
     }
 }
+
+private const val MAX_STAGED_PLAN_REQUEST_BYTES = 64 * 1024
 
 private fun workflowMutationStatus(status: WorkflowMutationStatus, success: HttpStatusCode): HttpStatusCode = when (status) {
     WorkflowMutationStatus.RECORDED -> success

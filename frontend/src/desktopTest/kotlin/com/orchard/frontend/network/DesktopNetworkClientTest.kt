@@ -19,6 +19,46 @@ import kotlin.test.assertTrue
 
 class DesktopNetworkClientTest {
     @Test
+    fun acceptsTypedStagedDeliveryCircuit() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/staged-plans", request.url.toString())
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"executionWorkflowId\":\"contract-v1\""))
+            assertTrue(body.contains("\"dependsOn\":[\"api\"]"))
+            respond(
+                content = """{"resources":{},"stagedPlans":[]}""",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+        val request = StagedDeliveryPlanSubmissionRequest(
+            3,
+            "Screen circuit",
+            listOf(
+                StagedPlanStageSubmissionRequest(
+                    "contract", "Contract", "contract-v1",
+                    nodes = listOf(StagedPlanNodeSubmissionRequest("api", 4)),
+                ),
+                StagedPlanStageSubmissionRequest(
+                    "build", "Build", "build-v1",
+                    nodes = listOf(StagedPlanNodeSubmissionRequest("screen", 5, dependsOn = listOf("api"))),
+                ),
+            ),
+        )
+
+        val response = client.acceptStagedPlan(request)
+
+        assertTrue(response.stagedPlans.isEmpty())
+        client.close()
+    }
+
+    @Test
     fun updatesMachineUsagePolicyAndDecodesLiveCapacity() = runBlocking {
         val engine = MockEngine { request ->
             assertEquals(HttpMethod.Put, request.method)

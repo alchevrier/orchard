@@ -27,6 +27,8 @@ import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.AlertDialog
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Divider
+import androidx.compose.material.DropdownMenu
+import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
@@ -82,6 +84,13 @@ import com.orchard.frontend.network.ModelProfileConfigurationResponse
 import com.orchard.frontend.network.ModelProfileOverrideRequest
 import com.orchard.frontend.network.MachineResourceConfigurationResponse
 import com.orchard.frontend.network.MachineUsagePolicyRequest
+import com.orchard.frontend.network.StagedDeliveryPlanSubmissionRequest
+import com.orchard.frontend.network.StagedDeliveryPlanViewResponse
+import com.orchard.frontend.network.StagedPlanArtifactRequest
+import com.orchard.frontend.network.StagedPlanArtifactRequirementRequest
+import com.orchard.frontend.network.StagedPlanNodeSubmissionRequest
+import com.orchard.frontend.network.StagedPlanStageSubmissionRequest
+import com.orchard.frontend.network.StageExecutionWorkflowDefinitionResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
@@ -122,6 +131,8 @@ private data class WorkspaceSnapshot(
     val workflowRuns: List<WorkflowRunResponse>,
     val workDefinitions: List<WorkDefinitionResponse>,
     val definitionProposals: List<DefinitionProposalViewResponse>,
+    val stagedPlans: List<StagedDeliveryPlanViewResponse>,
+    val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse>,
     val modelProfiles: List<ModelCapabilityProfileResponse>,
 )
 
@@ -150,6 +161,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var isSavingMachinePolicy by remember { mutableStateOf(false) }
         var selectedProjectId by remember { mutableStateOf(0) }
         var selectedEpicId by remember { mutableStateOf(0) }
+        var planningScopeId by remember { mutableStateOf(0) }
+        var isSavingStagedPlan by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
 
         LaunchedEffect(Unit) {
@@ -277,6 +290,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             }
                         }
                     },
+                    onPlanScope = { planningScopeId = it },
                 )
                 Divider(modifier = Modifier.fillMaxHeight().width(1.dp), color = OrchardColors.divider)
                 ArchitectPanel(
@@ -340,6 +354,28 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                     },
                 )
             }
+            snapshot.entities.firstOrNull { it.id == planningScopeId }?.let { scopeEntity ->
+                                val memberTypes = if (scopeEntity.type == EPIC) setOf(STORY) else setOf(TASK, BUG)
+                                val members = snapshot.entities.filter { it.parentId == scopeEntity.id && it.type in memberTypes }
+                                StagedPlanDialog(
+                                    scope = scopeEntity,
+                                    members = members,
+                                    current = snapshot.stagedPlans.firstOrNull { it.plan.scopeId == scopeEntity.id },
+                                    workflows = snapshot.stageWorkflows,
+                                    isSaving = isSavingStagedPlan,
+                                    onDismiss = { if (!isSavingStagedPlan) planningScopeId = 0 },
+                                    onSave = { plan ->
+                                        isSavingStagedPlan = true
+                                        requestError = null
+                                        scope.launch {
+                                            executeRequest { networkClient.acceptStagedPlan(plan) }
+                                                .onSuccess { planningScopeId = 0 }
+                                                .onFailure { requestError = it.message ?: "Unable to accept the staged delivery circuit." }
+                                            isSavingStagedPlan = false
+                                        }
+                                    },
+                                )
+                            }
             if (showModelSettings) {
                 val resourceConfiguration = machineResourceConfiguration
                 modelProfileConfigurations.firstOrNull()?.let { configuration ->
@@ -463,6 +499,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             response.workflowRuns,
             response.workDefinitions,
             response.definitionProposals,
+            response.stagedPlans,
+            response.stageWorkflows,
             response.modelProfiles,
         )
     }
@@ -576,6 +614,7 @@ private fun WorkspaceBoard(
     onAnalyzeWork: (Int) -> Unit,
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit,
+    onPlanScope: (Int) -> Unit,
 ) {
     val project = snapshot.entities.firstOrNull { it.id == projectId }
     val stories = snapshot.entities.filter { it.type == STORY && it.parentId == epicId }
@@ -590,6 +629,11 @@ private fun WorkspaceBoard(
                 Text("AI-governed delivery backlog", fontSize = 13.sp, color = OrchardColors.muted)
             }
             Row {
+                TextButton(onClick = { if (epicId != 0) onPlanScope(epicId) }, enabled = epicId != 0) {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Plan epic circuit", color = OrchardColors.moss, fontSize = 11.sp)
+                }
                 IconButton(onClick = onOpenSettings) {
                     Icon(Icons.Default.Settings, contentDescription = "Model profile settings", tint = OrchardColors.muted)
                 }
@@ -626,6 +670,9 @@ private fun WorkspaceBoard(
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(32.dp),
             verticalArrangement = Arrangement.spacedBy(22.dp),
         ) {
+            snapshot.stagedPlans.firstOrNull { it.plan.scopeId == epicId }?.let { plan ->
+                StagedCircuitView(plan, snapshot.entities)
+            }
             when {
                 project == null -> EmptyWorkspace("Create a project from the Architect panel.")
                 epics.isEmpty() -> EmptyWorkspace("Create an epic inside ${project.title}.")
@@ -637,6 +684,7 @@ private fun WorkspaceBoard(
                         workflowRuns = snapshot.workflowRuns,
                         workDefinitions = snapshot.workDefinitions,
                         definitionProposals = snapshot.definitionProposals,
+                        stagedPlan = snapshot.stagedPlans.firstOrNull { it.plan.scopeId == story.id },
                         startingWorkItemId = startingWorkItemId,
                         onStartWorkflow = onStartWorkflow,
                         cancellingRunId = cancellingRunId,
@@ -644,6 +692,7 @@ private fun WorkspaceBoard(
                         onDefineWork = onDefineWork,
                         analyzingWorkItemIds = analyzingWorkItemIds,
                         onAnalyzeWork = onAnalyzeWork,
+                        onPlanScope = onPlanScope,
                     )
                 }
             }
@@ -724,6 +773,298 @@ private fun EmptyWorkspace(message: String) {
     }
 }
 
+private data class PlanNodeDraft(
+    val workItemId: Int,
+    val nodeId: String,
+    val stage: String,
+    val dependsOn: String,
+    val produces: String,
+    val consumes: String,
+)
+
+@Composable
+private fun StagedCircuitView(
+    view: StagedDeliveryPlanViewResponse,
+    entities: List<WorkspaceEntity>,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(view.plan.title, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = OrchardColors.ink)
+            Text(
+                "r${view.plan.revision} · ${view.plan.hash.take(8)}",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+                color = OrchardColors.muted,
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 9.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            view.plan.stages.forEach { stage ->
+                Column(Modifier.width(220.dp)) {
+                    Text(
+                        "STAGE ${stage.ordinal} · ${stage.title.uppercase()}",
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                        color = OrchardColors.moss,
+                    )
+                    Text(
+                        "${stage.executionWorkflowId}@${stage.executionWorkflowVersion}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        color = OrchardColors.muted,
+                    )
+                    stage.nodes.forEach { node ->
+                        val nodeView = view.nodes.first { it.node.nodeId == node.nodeId }
+                        val title = entities.firstOrNull { it.id == node.workItemId }?.title ?: "Item ${node.workItemId}"
+                        val stateColor = when (nodeView.state) {
+                            "ELIGIBLE", "DONE" -> OrchardColors.moss
+                            "RUNNING" -> OrchardColors.ink
+                            else -> OrchardColors.clay
+                        }
+                        Column(
+                            Modifier.fillMaxWidth().padding(top = 7.dp)
+                                .background(OrchardColors.canvas, RoundedCornerShape(6.dp)).padding(9.dp),
+                        ) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(node.label, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = stateColor)
+                                Text(nodeView.state.replace('_', ' '), fontFamily = FontFamily.Monospace, fontSize = 8.sp, color = stateColor)
+                            }
+                            Text(title, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = OrchardColors.ink)
+                            if (nodeView.blockedReason.isNotBlank()) {
+                                Text(nodeView.blockedReason, fontSize = 9.sp, color = OrchardColors.muted)
+                            }
+                            node.produces.forEach { artifact ->
+                                Text("OUT ${artifact.kind} · ${artifact.name}", fontFamily = FontFamily.Monospace, fontSize = 8.sp, color = OrchardColors.moss)
+                            }
+                            node.consumes.forEach { artifact ->
+                                Text("IN ${artifact.producerNodeId}:${artifact.kind}", fontFamily = FontFamily.Monospace, fontSize = 8.sp, color = OrchardColors.muted)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StagedPlanDialog(
+    scope: WorkspaceEntity,
+    members: List<WorkspaceEntity>,
+    current: StagedDeliveryPlanViewResponse?,
+    workflows: List<StageExecutionWorkflowDefinitionResponse>,
+    isSaving: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (StagedDeliveryPlanSubmissionRequest) -> Unit,
+) {
+    var title by remember(scope.id, current?.plan?.hash) {
+        mutableStateOf(current?.plan?.title ?: "${scope.title} delivery circuit")
+    }
+    var drafts by remember(scope.id, current?.plan?.hash, members.map { it.id }) {
+        val currentNodes = current?.plan?.stages.orEmpty().flatMap { stage -> stage.nodes.map { stage.ordinal to it } }
+        mutableStateOf(
+            members.mapIndexed { index, member ->
+                val existing = currentNodes.firstOrNull { it.second.workItemId == member.id }
+                PlanNodeDraft(
+                    workItemId = member.id,
+                    nodeId = existing?.second?.nodeId ?: "item-${member.id}",
+                    stage = existing?.first?.toString() ?: "1",
+                    dependsOn = existing?.second?.dependsOn?.joinToString(",").orEmpty(),
+                    produces = existing?.second?.produces?.joinToString(",") {
+                        "${it.kind}:${it.name}:${it.evidenceKind}"
+                    }.orEmpty(),
+                    consumes = existing?.second?.consumes?.joinToString(",") { "${it.producerNodeId}:${it.kind}" }.orEmpty(),
+                )
+            }
+        )
+    }
+    var workflowByStage by remember(scope.id, current?.plan?.hash) {
+        mutableStateOf(
+            current?.plan?.stages.orEmpty().associate { stage ->
+                stage.ordinal to workflows.firstOrNull {
+                    it.id == stage.executionWorkflowId && it.version == stage.executionWorkflowVersion
+                }
+            }.filterValues { it != null }.mapValues { requireNotNull(it.value) }
+        )
+    }
+    var selectingWorkflowFor by remember { mutableStateOf<Int?>(null) }
+    val parsed = drafts.map { draft -> draft.stage.toIntOrNull() to draft }
+    val stages = parsed.mapNotNull { it.first }.toSortedSet()
+    val nodeIds = drafts.map { it.nodeId.trim() }
+    val stageByNode = parsed.mapNotNull { (stage, draft) -> stage?.let { draft.nodeId.trim() to it } }.toMap()
+    val validStages = stages.isNotEmpty() && stages.toList() == (1..stages.last()).toList()
+    val validNodes = drafts.isNotEmpty() && nodeIds.distinct().size == nodeIds.size && nodeIds.all { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")) }
+    val validDependencies = parsed.all { (stage, draft) ->
+        val dependencies = csv(draft.dependsOn)
+        stage != null && dependencies.distinct().size == dependencies.size && dependencies.all { it in stageByNode } &&
+            (dependencies.mapNotNull(stageByNode::get).maxOrNull()?.plus(1) ?: 1) == stage
+    }
+    val validArtifacts = drafts.all { parseProducedArtifacts(it.produces) != null && parseConsumedArtifacts(it.consumes) != null }
+    val valid = title.isNotBlank() && validStages && validNodes && validDependencies && validArtifacts &&
+        stages.all { workflowByStage[it] != null }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("Staged delivery circuit", fontWeight = FontWeight.Bold)
+                Text(scope.title, fontSize = 11.sp, color = OrchardColors.muted)
+            }
+        },
+        text = {
+            Column(
+                Modifier.width(760.dp).heightIn(max = 680.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Circuit title") },
+                    enabled = !isSaving,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                stages.forEach { ordinal ->
+                    val workflow = workflowByStage[ordinal]
+                    Box {
+                        TextButton(
+                            onClick = { selectingWorkflowFor = ordinal },
+                            enabled = !isSaving && workflows.isNotEmpty(),
+                        ) {
+                            Text("Stage $ordinal workflow: ${workflow?.id ?: "Select"}@${workflow?.version ?: "-"}")
+                        }
+                        DropdownMenu(
+                            expanded = selectingWorkflowFor == ordinal,
+                            onDismissRequest = { selectingWorkflowFor = null },
+                        ) {
+                            workflows.forEach { candidate ->
+                                DropdownMenuItem(onClick = {
+                                    workflowByStage = workflowByStage + (ordinal to candidate)
+                                    selectingWorkflowFor = null
+                                }) {
+                                    Column {
+                                        Text("${candidate.id}@${candidate.version}")
+                                        Text(candidate.description, fontSize = 11.sp, color = OrchardColors.muted)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                members.forEachIndexed { index, member ->
+                    val draft = drafts[index]
+                    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                        Text(member.title, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = OrchardColors.ink)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = draft.stage,
+                                onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(stage = value.filter(Char::isDigit)) } },
+                                label = { Text("Stage") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                enabled = !isSaving,
+                                singleLine = true,
+                                modifier = Modifier.width(90.dp),
+                            )
+                            OutlinedTextField(
+                                value = draft.nodeId,
+                                onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(nodeId = value) } },
+                                label = { Text("Node ID") },
+                                enabled = !isSaving,
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = draft.dependsOn,
+                                onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(dependsOn = value) } },
+                                label = { Text("Dependencies") },
+                                enabled = !isSaving,
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = draft.produces,
+                                onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(produces = value) } },
+                                label = { Text("Outputs") },
+                                enabled = !isSaving,
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = draft.consumes,
+                                onValueChange = { value -> drafts = drafts.toMutableList().also { it[index] = draft.copy(consumes = value) } },
+                                label = { Text("Inputs") },
+                                enabled = !isSaving,
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                    Divider(color = OrchardColors.divider)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = valid && !isSaving,
+                onClick = {
+                    onSave(
+                        StagedDeliveryPlanSubmissionRequest(
+                            scope.id,
+                            title.trim(),
+                            parsed.groupBy { requireNotNull(it.first) }.toSortedMap().map { (ordinal, entries) ->
+                                val existingStage = current?.plan?.stages?.firstOrNull { it.ordinal == ordinal }
+                                val workflow = requireNotNull(workflowByStage[ordinal])
+                                StagedPlanStageSubmissionRequest(
+                                    stageId = existingStage?.stageId ?: "stage-$ordinal",
+                                    title = existingStage?.title ?: "Stage $ordinal",
+                                    executionWorkflowId = workflow.id,
+                                    executionWorkflowVersion = workflow.version,
+                                    nodes = entries.map { (_, draft) ->
+                                        StagedPlanNodeSubmissionRequest(
+                                            draft.nodeId.trim(),
+                                            draft.workItemId,
+                                            csv(draft.dependsOn),
+                                            requireNotNull(parseConsumedArtifacts(draft.consumes)),
+                                            requireNotNull(parseProducedArtifacts(draft.produces)),
+                                        )
+                                    },
+                                )
+                            },
+                            baseRevision = current?.plan?.revision ?: 0,
+                            baseHash = current?.plan?.hash,
+                        )
+                    )
+                },
+            ) {
+                if (isSaving) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                else Text("Accept circuit")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !isSaving) { Text("Cancel") } },
+        shape = RoundedCornerShape(8.dp),
+        backgroundColor = OrchardColors.surface,
+    )
+}
+
+private fun csv(value: String): List<String> = value.split(',').map(String::trim).filter(String::isNotEmpty)
+
+private fun parseProducedArtifacts(value: String): List<StagedPlanArtifactRequest>? = csv(value).map { token ->
+    val parts = token.split(':', limit = 3).map(String::trim)
+    if (parts.size !in 2..3 || parts.any(String::isBlank)) return null
+    StagedPlanArtifactRequest(parts[0], parts[1], parts.getOrElse(2) { "SOURCE_DIFF" })
+}
+
+private fun parseConsumedArtifacts(value: String): List<StagedPlanArtifactRequirementRequest>? = csv(value).map { token ->
+    val parts = token.split(':', limit = 2).map(String::trim)
+    if (parts.size != 2 || parts.any(String::isBlank)) return null
+    StagedPlanArtifactRequirementRequest(parts[0], parts[1])
+}
+
 @Composable
 private fun StoryBoard(
     story: WorkspaceEntity,
@@ -731,6 +1072,7 @@ private fun StoryBoard(
     workflowRuns: List<WorkflowRunResponse>,
     workDefinitions: List<WorkDefinitionResponse>,
     definitionProposals: List<DefinitionProposalViewResponse>,
+    stagedPlan: StagedDeliveryPlanViewResponse?,
     startingWorkItemId: Int,
     onStartWorkflow: (Int) -> Unit,
     cancellingRunId: Long,
@@ -738,11 +1080,23 @@ private fun StoryBoard(
     onDefineWork: (Int) -> Unit,
     analyzingWorkItemIds: Set<Int>,
     onAnalyzeWork: (Int) -> Unit,
+    onPlanScope: (Int) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().background(OrchardColors.storyBand, RoundedCornerShape(8.dp)).padding(18.dp),
     ) {
-        Text(story.title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = OrchardColors.ink)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(story.title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = OrchardColors.ink)
+            TextButton(onClick = { onPlanScope(story.id) }) {
+                Icon(Icons.Default.Edit, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Plan circuit", color = OrchardColors.moss, fontSize = 10.sp)
+            }
+        }
+        stagedPlan?.let { plan ->
+            StagedCircuitView(plan, listOf(story) + tickets)
+            Spacer(Modifier.height(14.dp))
+        }
         Spacer(Modifier.height(16.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             listOf("Todo", "In progress", "In review", "Done").forEachIndexed { status, label ->
@@ -753,13 +1107,13 @@ private fun StoryBoard(
                     statusTickets.forEach { ticket ->
                         TicketCard(
                             ticket = ticket,
-                            workflowRun = workflowRuns.firstOrNull { it.context.workItemId == ticket.id },
+                            workflowRun = workflowRuns.lastOrNull { it.context.workItemId == ticket.id },
                             workDefinition = workDefinitions.firstOrNull { it.workItemId == ticket.id },
                             latestProposal = definitionProposals.filter { it.proposal.workItemId == ticket.id }
                                 .maxByOrNull { it.proposal.revision },
                             isStarting = startingWorkItemId == ticket.id,
                             onStartWorkflow = { onStartWorkflow(ticket.id) },
-                            isCancelling = workflowRuns.firstOrNull { it.context.workItemId == ticket.id }?.runId == cancellingRunId,
+                            isCancelling = workflowRuns.lastOrNull { it.context.workItemId == ticket.id }?.runId == cancellingRunId,
                             onCancelWorkflow = { runId -> onCancelWorkflow(runId) },
                             onDefineWork = { onDefineWork(ticket.id) },
                             isAnalyzing = ticket.id in analyzingWorkItemIds,

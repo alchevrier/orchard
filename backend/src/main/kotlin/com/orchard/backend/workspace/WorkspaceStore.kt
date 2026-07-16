@@ -2,6 +2,8 @@ package com.orchard.backend.workspace
 
 import com.orchard.backend.api.DocumentIntent
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 const val ENTITY_PROJECT = 1
 const val ENTITY_EPIC = 2
@@ -27,6 +29,7 @@ const val MESSAGE_WORKFLOW_START = 12
 const val MESSAGE_WORKFLOW_EVENT = 13
 const val MESSAGE_WORK_DEFINITION = 14
 const val MESSAGE_DEFINITION_COLLABORATION = 15
+const val MESSAGE_STAGED_DELIVERY_PLAN = 16
 
 @Serializable
 data class WorkspaceResource(
@@ -43,6 +46,8 @@ data class WorkspaceSnapshot(
     val workDefinitions: List<WorkDefinitionManifest> = emptyList(),
     val definitionProposals: List<DefinitionProposalView> = emptyList(),
     val modelProfiles: List<ModelCapabilityProfile> = emptyList(),
+    val stagedPlans: List<StagedDeliveryPlanView> = emptyList(),
+    val stageWorkflows: List<StageExecutionWorkflowDefinition> = StageExecutionWorkflowRegistry.all(),
 )
 
 enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
@@ -57,6 +62,7 @@ enum class WorkflowStartStatus {
     REPOSITORY_DIRTY,
     ALREADY_STARTED,
     WORK_DEFINITION_NOT_READY,
+    STAGED_PLAN_BLOCKED,
     STORAGE_UNAVAILABLE,
 }
 
@@ -102,6 +108,7 @@ class WorkspaceStore(
     private val definitionStore: WorkDefinitionStore = TransientWorkDefinitionStore(),
     private val collaborationStore: DefinitionCollaborationStore = TransientDefinitionCollaborationStore(),
     private val modelExperienceStore: ModelExperienceStore = TransientModelExperienceStore(),
+    private val stagedPlanStore: StagedDeliveryPlanStore = TransientStagedDeliveryPlanStore(),
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -138,11 +145,14 @@ class WorkspaceStore(
     private val workDefinitions = mutableListOf<WorkDefinitionManifest>()
     private val collaborationEvents = mutableListOf<DefinitionCollaborationEvent>()
     private val modelExperienceEvents = mutableListOf<ModelExperienceEvent>()
+    private val stagedPlans = mutableListOf<StagedDeliveryPlan>()
     private var nextRunId = 1L
     private var nextEventId = 1L
     private var nextDefinitionId = 1L
     private var nextCollaborationEventId = 1L
     private var nextModelExperienceEventId = 1L
+    private var nextStagedPlanId = 1L
+    private var stagedPlanMessage = ""
 
     init {
         restore(repository.load())
@@ -151,6 +161,8 @@ class WorkspaceStore(
         restoreDefinitions(definitionStore.load())
         restoreRuns(workflowMemory.loadRuns())
         restoreEvents(workflowMemory.loadEvents())
+        validateRunReplacements()
+        restoreStagedPlans(stagedPlanStore.load())
     }
 
     @Synchronized
@@ -226,6 +238,10 @@ class WorkspaceStore(
 
         val parentId = validateWorkflowHierarchy(intent)
         if (lastWorkflowResult != WORKFLOW_ACCEPTED) return false
+        if (
+            intent.entityTypeId in setOf(ENTITY_STORY, ENTITY_TASK, ENTITY_BUG) &&
+            activeStagedPlan(parentId)?.stages?.flatMap { it.nodes }?.any { planNodeStarted(it.workItemId) } == true
+        ) return false
         return appendEntity(
             intent.entityTypeId,
             parentId,
@@ -526,6 +542,70 @@ class WorkspaceStore(
         modelCapabilityProfiles(modelExperienceEvents, authoritativeModelSatisfaction())
 
     @Synchronized
+    fun acceptStagedPlan(submission: StagedDeliveryPlanSubmission): StagedPlanResult {
+        val scope = committedEntity(submission.scopeId)
+            ?: return stagedPlanFailure(StagedPlanStatus.SCOPE_NOT_FOUND, "The staged-plan scope does not exist.")
+        if (scope.type !in setOf(ENTITY_EPIC, ENTITY_STORY)) {
+            return stagedPlanFailure(StagedPlanStatus.INVALID_SCOPE, "Only Epics and Stories can own staged plans.")
+        }
+        val current = stagedPlans.lastOrNull { it.scopeId == scope.id }
+        if (current != null && current.stages.flatMap { it.nodes }.any { planNodeStarted(it.workItemId) }) {
+            return stagedPlanFailure(StagedPlanStatus.PLAN_LOCKED, "The staged plan is pinned because one of its nodes has started.")
+        }
+        if (
+            submission.baseRevision != (current?.revision ?: 0) ||
+            submission.baseHash != current?.hash
+        ) return stagedPlanFailure(
+            StagedPlanStatus.STALE_PLAN,
+            "The staged plan changed after this edit began. Reload the active circuit before revising it.",
+        )
+        val stages = normalizedPlanStages(submission) ?: return stagedPlanFailure(
+            StagedPlanStatus.INVALID_PLAN,
+            "The staged plan hierarchy, dependencies, artifacts, or workflows are invalid.",
+        )
+        val expectedChildren = directPlanChildren(scope).mapTo(linkedSetOf()) { it.id }
+        if (stages.flatMap { it.nodes }.mapTo(linkedSetOf()) { it.workItemId } != expectedChildren) {
+            return stagedPlanFailure(
+                StagedPlanStatus.INVALID_PLAN,
+                "The staged plan must contain every current direct child exactly once.",
+            )
+        }
+        val revision = stagedPlans.count { it.scopeId == scope.id } + 1
+        val acceptedAt = java.time.Instant.now().toString()
+        val hashSource = Json.encodeToString(
+            StagedPlanHashSource(
+                nextStagedPlanId,
+                revision,
+                scope.id,
+                scope.type,
+                submission.title.trim(),
+                stages,
+                COLLABORATOR_HUMAN,
+                acceptedAt,
+            )
+        )
+        val plan = StagedDeliveryPlan(
+            planId = nextStagedPlanId,
+            revision = revision,
+            scopeId = scope.id,
+            scopeType = scope.type,
+            title = submission.title.trim(),
+            stages = stages,
+            acceptedAt = acceptedAt,
+            hash = stagedPlanHash(hashSource),
+        )
+        return try {
+            stagedPlanStore.append(plan)
+            stagedPlans += plan
+            nextStagedPlanId++
+            stagedPlanMessage = "The staged delivery circuit was accepted and is now authoritative."
+            StagedPlanResult(StagedPlanStatus.ACCEPTED, snapshot(MESSAGE_STAGED_DELIVERY_PLAN))
+        } catch (_: Exception) {
+            stagedPlanFailure(StagedPlanStatus.STORAGE_UNAVAILABLE, "The staged delivery circuit could not be saved.")
+        }
+    }
+
+    @Synchronized
     fun startWorkflow(workItemId: Int): WorkflowStartResult {
         val workItem = committedEntity(workItemId)
         if (workItem == null) return workflowFailure(
@@ -536,10 +616,13 @@ class WorkspaceStore(
             WorkflowStartStatus.UNSUPPORTED_ENTITY,
             "Only tasks and bugs can start an execution workflow.",
         )
-        if (workflowRuns.any { it.context.workItemId == workItemId }) return workflowFailure(
+        if (workflowRuns.lastOrNull { it.context.workItemId == workItemId }?.let { runState(it.runId) != RUN_STATE_CANCELLED } == true) return workflowFailure(
             WorkflowStartStatus.ALREADY_STARTED,
             "This work item already has an active workflow run.",
         )
+        stagedPlanBlockReason(workItem)?.let { reason ->
+            return workflowFailure(WorkflowStartStatus.STAGED_PLAN_BLOCKED, reason)
+        }
         val workDefinition = workDefinitions.lastOrNull { it.workItemId == workItemId }
         if (workDefinition?.assessment?.status != DEFINITION_READY) return workflowFailure(
             WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
@@ -813,7 +896,7 @@ class WorkspaceStore(
         )
         resources["message"] = WorkspaceResource("MESSAGE", message(messageCode), "none")
         entities.take(committedEntityCount).forEach { entity ->
-            val run = workflowRuns.firstOrNull { it.context.workItemId == entity.id }
+            val run = workflowRuns.lastOrNull { it.context.workItemId == entity.id }
             val projectedStatus = when (run?.let { runState(it.runId) }) {
                 RUN_STATE_DONE -> 3
                 RUN_STATE_CANCELLED, null -> entity.status
@@ -839,6 +922,8 @@ class WorkspaceStore(
             latestDefinitions,
             definitionProposalViews(),
             modelProfiles(),
+            stagedPlanViews(),
+            StageExecutionWorkflowRegistry.all(),
         )
     }
 
@@ -908,9 +993,6 @@ class WorkspaceStore(
                         definition.workItemId == workItem.id &&
                         workDefinitions.any { it.definitionId == definition.definitionId && it == definition }
                 ) { "Workflow run ${run.runId} references an invalid work definition" }
-            }
-            require(workflowRuns.none { it.context.workItemId == run.context.workItemId }) {
-                "Work item ${run.context.workItemId} has multiple active workflow runs"
             }
             workflowRuns += run
             nextRunId++
@@ -982,6 +1064,53 @@ class WorkspaceStore(
             }
             modelExperienceEvents += event
             nextModelExperienceEventId++
+        }
+    }
+
+    private fun restoreStagedPlans(restoredPlans: List<StagedDeliveryPlan>) {
+        restoredPlans.forEach { plan ->
+            require(plan.planId == nextStagedPlanId) { "Expected staged plan ID $nextStagedPlanId, found ${plan.planId}" }
+            val scope = committedEntity(plan.scopeId)
+            require(scope != null && scope.type == plan.scopeType && scope.type in setOf(ENTITY_EPIC, ENTITY_STORY)) {
+                "Staged plan ${plan.planId} references an invalid scope"
+            }
+            require(plan.revision == stagedPlans.count { it.scopeId == plan.scopeId } + 1) {
+                "Staged plan ${plan.planId} has an invalid revision"
+            }
+            val submission = StagedDeliveryPlanSubmission(
+                plan.scopeId,
+                plan.title,
+                plan.stages.map { stage ->
+                    StagedPlanStageSubmission(
+                        stage.stageId,
+                        stage.title,
+                        stage.executionWorkflowId,
+                        stage.executionWorkflowVersion,
+                        stage.nodes.map { node ->
+                            StagedPlanNodeSubmission(node.nodeId, node.workItemId, node.dependsOn, node.consumes, node.produces)
+                        },
+                    )
+                },
+            )
+            val normalized = requireNotNull(normalizedPlanStages(submission)) { "Staged plan ${plan.planId} is invalid" }
+            require(normalized == plan.stages) { "Staged plan ${plan.planId} is not normalized" }
+            val expectedHash = stagedPlanHash(
+                Json.encodeToString(
+                    StagedPlanHashSource(
+                        plan.planId,
+                        plan.revision,
+                        plan.scopeId,
+                        plan.scopeType,
+                        plan.title,
+                        plan.stages,
+                        plan.acceptedBy,
+                        plan.acceptedAt,
+                    )
+                )
+            )
+            require(plan.hash == expectedHash) { "Staged plan ${plan.planId} hash is invalid" }
+            stagedPlans += plan
+            nextStagedPlanId++
         }
     }
 
@@ -1082,6 +1211,16 @@ class WorkspaceStore(
             }
             workflowEvents += event
             nextEventId++
+        }
+    }
+
+    private fun validateRunReplacements() {
+        workflowRuns.groupBy { it.context.workItemId }.values.forEach { runs ->
+            runs.sortedBy { it.runId }.dropLast(1).forEach { prior ->
+                require(runState(prior.runId) == RUN_STATE_CANCELLED) {
+                    "Work item ${prior.context.workItemId} has overlapping workflow runs"
+                }
+            }
         }
     }
 
@@ -1240,6 +1379,279 @@ class WorkspaceStore(
             before.regressionCriterion != after.regressionCriterion,
         ).count { it }
 
+    private fun normalizedPlanStages(submission: StagedDeliveryPlanSubmission): List<StagedPlanStage>? {
+        val scope = committedEntity(submission.scopeId) ?: return null
+        if (
+            scope.type !in setOf(ENTITY_EPIC, ENTITY_STORY) ||
+            submission.title.isBlank() || submission.title.length > MAX_PLAN_TEXT ||
+            submission.stages.isEmpty() || submission.stages.size > MAX_PLAN_STAGES
+        ) return null
+        val stageIds = submission.stages.map { it.stageId.trim() }
+        if (stageIds.any { !it.matches(PLAN_ID) } || stageIds.distinct().size != stageIds.size) return null
+        val submittedNodes = submission.stages.flatMap { it.nodes }
+        if (
+            submittedNodes.isEmpty() || submittedNodes.size > MAX_PLAN_NODES ||
+            submittedNodes.map { it.nodeId.trim() }.distinct().size != submittedNodes.size ||
+            submittedNodes.map { it.workItemId }.distinct().size != submittedNodes.size ||
+            (scope.type == ENTITY_EPIC && submittedNodes.any { it.consumes.isNotEmpty() || it.produces.isNotEmpty() })
+        ) return null
+        val nodeStage = buildMap {
+            submission.stages.forEachIndexed { index, stage ->
+                if (stage.nodes.isEmpty() || stage.nodes.size > 26) return null
+                stage.nodes.forEach { node ->
+                    val nodeId = node.nodeId.trim()
+                    if (!nodeId.matches(PLAN_ID)) return null
+                    put(nodeId, index + 1)
+                }
+            }
+        }
+        val submittedById = submittedNodes.associateBy { it.nodeId.trim() }
+        return submission.stages.mapIndexed { stageIndex, submittedStage ->
+            val ordinal = stageIndex + 1
+            val stageTitle = submittedStage.title.trim()
+            val workflowId = submittedStage.executionWorkflowId.trim()
+            if (
+                stageTitle.isBlank() || stageTitle.length > MAX_PLAN_TEXT ||
+                StageExecutionWorkflowRegistry.resolve(workflowId, submittedStage.executionWorkflowVersion) == null
+            ) return null
+            val nodes = submittedStage.nodes.mapIndexed { nodeIndex, submittedNode ->
+                val nodeId = submittedNode.nodeId.trim()
+                val workItem = committedEntity(submittedNode.workItemId) ?: return null
+                val validChild = workItem.parentId == scope.id && when (scope.type) {
+                    ENTITY_EPIC -> workItem.type == ENTITY_STORY
+                    ENTITY_STORY -> workItem.type in setOf(ENTITY_TASK, ENTITY_BUG)
+                    else -> false
+                }
+                if (!validChild) return null
+                val dependencies = submittedNode.dependsOn.map(String::trim)
+                if (
+                    dependencies.size > MAX_PLAN_EDGES_PER_NODE ||
+                    dependencies.distinct().size != dependencies.size || dependencies.any { it == nodeId } ||
+                    submittedNode.consumes.size > MAX_PLAN_ARTIFACTS_PER_NODE ||
+                    submittedNode.produces.size > MAX_PLAN_ARTIFACTS_PER_NODE
+                ) return null
+                val dependencyStages = dependencies.map { dependency -> nodeStage[dependency] ?: return null }
+                if (dependencyStages.any { it >= ordinal }) return null
+                if ((dependencyStages.maxOrNull()?.plus(1) ?: 1) != ordinal) return null
+                val produces = submittedNode.produces.map { artifact ->
+                    artifact.copy(
+                        kind = artifact.kind.trim(),
+                        name = artifact.name.trim(),
+                        evidenceKind = artifact.evidenceKind.trim(),
+                    )
+                }
+                val validEvidenceKinds = if (workItem.type in setOf(ENTITY_TASK, ENTITY_BUG)) {
+                    DefaultDeliveryWorkflow.resolve(
+                        workItem.type,
+                        workDefinitions.lastOrNull { it.workItemId == workItem.id },
+                    ).evidenceContract.requirements.mapTo(linkedSetOf()) { it.kind }
+                } else {
+                    emptySet()
+                }
+                if (
+                    produces.any {
+                        it.kind.isBlank() || it.name.isBlank() ||
+                            it.kind.length > MAX_PLAN_TEXT || it.name.length > MAX_PLAN_TEXT ||
+                            it.evidenceKind !in validEvidenceKinds
+                    } ||
+                    produces.map { it.kind }.distinct().size != produces.size
+                ) return null
+                val consumes = submittedNode.consumes.map { requirement ->
+                    requirement.copy(producerNodeId = requirement.producerNodeId.trim(), kind = requirement.kind.trim())
+                }
+                if (consumes.distinct().size != consumes.size || consumes.any { requirement ->
+                        requirement.producerNodeId !in dependencies || requirement.kind.isBlank() ||
+                            submittedById[requirement.producerNodeId]?.produces?.none {
+                                it.kind.trim() == requirement.kind
+                            } != false
+                    }
+                ) return null
+                StagedPlanNode(
+                    nodeId = nodeId,
+                    label = "$ordinal${('a'.code + nodeIndex).toChar()}",
+                    workItemId = workItem.id,
+                    dependsOn = dependencies,
+                    consumes = consumes,
+                    produces = produces,
+                )
+            }
+            StagedPlanStage(
+                stageId = submittedStage.stageId.trim(),
+                ordinal = ordinal,
+                title = stageTitle,
+                executionWorkflowId = workflowId,
+                executionWorkflowVersion = submittedStage.executionWorkflowVersion,
+                nodes = nodes,
+            )
+        }
+    }
+
+    private fun directPlanChildren(scope: WorkspaceEntity): List<WorkspaceEntity> = entities.take(committedEntityCount)
+        .filter { child ->
+            child.parentId == scope.id && when (scope.type) {
+                ENTITY_EPIC -> child.type == ENTITY_STORY
+                ENTITY_STORY -> child.type in setOf(ENTITY_TASK, ENTITY_BUG)
+                else -> false
+            }
+        }
+
+    private fun activeStagedPlan(scopeId: Int): StagedDeliveryPlan? = stagedPlans.lastOrNull { it.scopeId == scopeId }
+
+    private fun planNodeStarted(workItemId: Int): Boolean {
+        val workItem = committedEntity(workItemId) ?: return false
+        return when (workItem.type) {
+            ENTITY_TASK, ENTITY_BUG -> workflowRuns.lastOrNull { it.context.workItemId == workItem.id }
+                ?.let { runState(it.runId) != RUN_STATE_CANCELLED } == true
+            ENTITY_STORY -> directPlanChildren(workItem).any { planNodeStarted(it.id) }
+            else -> false
+        }
+    }
+
+    private fun planNodeComplete(workItemId: Int): Boolean {
+        val workItem = committedEntity(workItemId) ?: return false
+        return when (workItem.type) {
+            ENTITY_TASK, ENTITY_BUG -> workflowRuns.lastOrNull { it.context.workItemId == workItem.id }
+                ?.let { runState(it.runId) == RUN_STATE_DONE } == true
+            ENTITY_STORY -> directPlanChildren(workItem).takeIf { it.isNotEmpty() }
+                ?.all { planNodeComplete(it.id) } == true
+            else -> false
+        }
+    }
+
+    private fun stagedPlanBlockReason(workItem: WorkspaceEntity): String? {
+        val story = committedEntity(workItem.parentId, ENTITY_STORY) ?: return null
+        val epic = committedEntity(story.parentId, ENTITY_EPIC) ?: return null
+        return listOf(epic.id to story.id, story.id to workItem.id).firstNotNullOfOrNull { (scopeId, memberId) ->
+            val plan = activeStagedPlan(scopeId) ?: return@firstNotNullOfOrNull null
+            val nodes = plan.stages.flatMap { it.nodes }
+            val node = nodes.firstOrNull { it.workItemId == memberId }
+                ?: return@firstNotNullOfOrNull "This work item is not included in the active staged delivery circuit."
+            stagedPlanNodeBlockReason(plan, node)
+        }
+    }
+
+    private fun stagedPlanNodeBlockReason(plan: StagedDeliveryPlan, node: StagedPlanNode): String? {
+        val scope = committedEntity(plan.scopeId)
+            ?: return "The staged delivery circuit scope no longer exists."
+        if (!planCoversCurrentHierarchy(plan, scope)) {
+            return "The staged delivery circuit is stale because its hierarchy changed. Accept a covering revision."
+        }
+        val nodes = plan.stages.flatMap { it.nodes }
+        val artifacts = stagedPlanArtifactInstances(plan)
+        val stage = plan.stages.single { candidate -> candidate.nodes.any { it.nodeId == node.nodeId } }
+        val previousStage = plan.stages.getOrNull(stage.ordinal - 2)
+        if (previousStage != null) {
+            val incomplete = previousStage.nodes.filterNot { planNodeComplete(it.workItemId) }
+            if (incomplete.isNotEmpty()) {
+                return "Waiting for stage ${previousStage.ordinal} to satisfy its exit policy."
+            }
+            val previousPolicy = requireNotNull(
+                StageExecutionWorkflowRegistry.resolve(
+                    previousStage.executionWorkflowId,
+                    previousStage.executionWorkflowVersion,
+                )
+            )
+            if (
+                previousPolicy.exitPolicy == "ALL_STAGE_NODES_DONE_AND_OUTPUTS_ACCEPTED" &&
+                previousStage.nodes.any { producer ->
+                    producer.produces.any { output ->
+                        artifacts.none { it.producerNodeId == producer.nodeId && it.kind == output.kind }
+                    }
+                }
+            ) return "Waiting for stage ${previousStage.ordinal} output artifacts."
+        }
+        val policy = requireNotNull(
+            StageExecutionWorkflowRegistry.resolve(stage.executionWorkflowId, stage.executionWorkflowVersion)
+        )
+        val priorNodes = plan.stages.filter { it.ordinal < stage.ordinal }.flatMap { it.nodes }
+        if (
+            policy.entryPolicy in setOf("ALL_PRIOR_STAGE_NODES_DONE", "ALL_PRIOR_STAGE_OUTPUTS_ACCEPTED") &&
+            priorNodes.any { !planNodeComplete(it.workItemId) }
+        ) return "Waiting for all prior circuit stages."
+        if (
+            policy.entryPolicy == "ALL_PRIOR_STAGE_OUTPUTS_ACCEPTED" &&
+            priorNodes.any { producer ->
+                producer.produces.any { output ->
+                    artifacts.none { it.producerNodeId == producer.nodeId && it.kind == output.kind }
+                }
+            }
+        ) return "Waiting for all prior stage output artifacts."
+        val incomplete = node.dependsOn.mapNotNull { dependency -> nodes.firstOrNull { it.nodeId == dependency } }
+            .filterNot { planNodeComplete(it.workItemId) }
+        if (incomplete.isNotEmpty()) return incomplete.joinToString(
+            prefix = "Waiting for circuit nodes ",
+            postfix = ".",
+        ) { it.label }
+        return node.consumes.filterNot { requirement ->
+            artifacts.any { it.producerNodeId == requirement.producerNodeId && it.kind == requirement.kind }
+        }.takeIf { it.isNotEmpty() }?.joinToString(
+            prefix = "Waiting for accepted artifacts ",
+            postfix = ".",
+        ) { "${it.producerNodeId}:${it.kind}" }
+    }
+
+    private fun planCoversCurrentHierarchy(plan: StagedDeliveryPlan, scope: WorkspaceEntity): Boolean =
+        directPlanChildren(scope).mapTo(linkedSetOf()) { it.id } ==
+            plan.stages.flatMap { it.nodes }.mapTo(linkedSetOf()) { it.workItemId }
+
+    private fun stagedPlanArtifactInstances(plan: StagedDeliveryPlan): List<StagedPlanArtifactInstance> =
+        plan.stages.flatMap { it.nodes }.flatMap { node ->
+            val run = workflowRuns.lastOrNull { it.context.workItemId == node.workItemId }
+                ?.takeIf { runState(it.runId) == RUN_STATE_DONE }
+                ?: return@flatMap emptyList()
+            val events = eventsFor(run.runId)
+            val completion = events.mapNotNull { it.decision }
+                .lastOrNull { it.accepted && it.toState == RUN_STATE_DONE }
+                ?: return@flatMap emptyList()
+            val acceptedEvidence = events.mapNotNull { it.evidence }
+                .filter { it.evidenceId in completion.evidenceIds }
+                .associateBy { it.kind }
+            node.produces.mapNotNull { artifact ->
+                val evidence = acceptedEvidence[artifact.evidenceKind] ?: return@mapNotNull null
+                val evidenceHash = stagedPlanHash(
+                    "${evidence.evidenceId}:${evidence.kind}:${evidence.revision}:${evidence.outputHash}:${evidence.passed}"
+                )
+                StagedPlanArtifactInstance(
+                    producerNodeId = node.nodeId,
+                    workItemId = node.workItemId,
+                    kind = artifact.kind,
+                    name = artifact.name,
+                    workflowRunId = run.runId,
+                    evidenceId = evidence.evidenceId,
+                    evidenceKind = evidence.kind,
+                    revision = evidence.revision,
+                    outputHash = evidence.outputHash,
+                    evidenceHash = evidenceHash,
+                )
+            }
+        }
+
+    private fun stagedPlanViews(): List<StagedDeliveryPlanView> = stagedPlans.groupBy { it.scopeId }
+        .values
+        .map { revisions -> revisions.maxBy { it.revision } }
+        .sortedBy { it.scopeId }
+        .map { plan ->
+            val nodes = plan.stages.flatMap { it.nodes }
+            StagedDeliveryPlanView(plan, nodes.map { node ->
+                val workItem = committedEntity(node.workItemId)
+                val blockReason = stagedPlanNodeBlockReason(plan, node)
+                when {
+                    planNodeComplete(node.workItemId) -> StagedPlanNodeView(node, PLAN_NODE_DONE)
+                    planNodeStarted(node.workItemId) -> StagedPlanNodeView(node, PLAN_NODE_RUNNING)
+                    blockReason != null -> StagedPlanNodeView(node, PLAN_NODE_BLOCKED_DEPENDENCY, blockReason)
+                    workItem?.type in setOf(ENTITY_TASK, ENTITY_BUG) &&
+                        workDefinitions.lastOrNull { it.workItemId == node.workItemId }?.assessment?.status != DEFINITION_READY ->
+                        StagedPlanNodeView(node, PLAN_NODE_BLOCKED_DEFINITION, "The Work Definition is not READY.")
+                    else -> StagedPlanNodeView(node, PLAN_NODE_ELIGIBLE)
+                }
+            }, stagedPlanArtifactInstances(plan))
+        }
+
+    private fun stagedPlanFailure(status: StagedPlanStatus, message: String): StagedPlanResult {
+        stagedPlanMessage = message
+        return StagedPlanResult(status, snapshot(MESSAGE_STAGED_DELIVERY_PLAN))
+    }
+
     private fun workflowMutationFailure(
         status: WorkflowMutationStatus,
         message: String,
@@ -1317,6 +1729,7 @@ class WorkspaceStore(
         MESSAGE_WORKFLOW_EVENT -> workflowMessage
         MESSAGE_WORK_DEFINITION -> workflowMessage
         MESSAGE_DEFINITION_COLLABORATION -> workflowMessage
+        MESSAGE_STAGED_DELIVERY_PLAN -> stagedPlanMessage
         else -> "Describe a project, epic, story, task, or bug to the Architect."
     }
 
@@ -1346,8 +1759,26 @@ class WorkspaceStore(
         const val MAX_COMMAND_LENGTH = 2048
         const val MAX_DEFINITION_ENTRIES = 16
         const val MAX_DEFINITION_TEXT = 4096
+        const val MAX_PLAN_TEXT = 256
+        const val MAX_PLAN_STAGES = 16
+        const val MAX_PLAN_NODES = 26
+        const val MAX_PLAN_EDGES_PER_NODE = 26
+        const val MAX_PLAN_ARTIFACTS_PER_NODE = 16
+        val PLAN_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
         val GIT_HASH = Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
         val SHA256 = Regex("[0-9a-fA-F]{64}")
         val TERMINAL_RUN_STATES = setOf(RUN_STATE_DONE, RUN_STATE_CANCELLED)
     }
 }
+
+@Serializable
+private data class StagedPlanHashSource(
+    val planId: Long,
+    val revision: Int,
+    val scopeId: Int,
+    val scopeType: Int,
+    val title: String,
+    val stages: List<StagedPlanStage>,
+    val acceptedBy: String,
+    val acceptedAt: String,
+)

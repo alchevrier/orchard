@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 7.2 complete - Resource-Aware Parallel Admission. Users delegate a configurable share of machine capacity while live host telemetry and deterministic resource leases govern parallel local-model execution.
+> **Project status:** Milestone 8.0 complete - Staged Delivery Circuits. Epic and Story work now has durable dependency graphs, executable registered stage policies, Story-level evidence-backed artifact signals, and stale-editor protection.
 
 ## Milestone 1: Local Architect MVP
 
@@ -229,6 +229,36 @@ Milestone 7.2 boundaries:
 - Capacity denial returns a retryable result; a durable autonomous queue and worktree-aware integration scheduler remain the next delivery layer.
 - CPU enforcement is achieved by explicit Ollama thread limits and admission reservations, not by Orchard-created cgroups.
 
+### Milestone 8.0: Staged Delivery Circuits
+
+Orchard now records logical execution order before admitting parallel ticket work. Epic plans organize Stories; Story plans organize Tasks and Bugs. The graph is durable authority, while labels such as `1a`, `1b`, and `2a` are derived for people.
+
+Delivered and verified:
+
+- Complete direct-child coverage for Epic-to-Story and Story-to-Task/Bug plans.
+- Strict backward dependency wires that reject missing, duplicate, self, same-stage, and forward edges.
+- Versioned stage workflow registry for contract design, parallel implementation, integration, and sequential delivery policies.
+- Runtime resolution of stage workflow pins; unknown IDs and versions are rejected.
+- Story-level typed output declarations and input requirements tied to exact producer nodes and delivery evidence kinds.
+- Evidence-backed artifact instances binding producer, workflow run, accepted evidence ID, repository revision, and output hash.
+- Downstream admission requires both completed dependencies and every declared artifact instance.
+- Append-only checksummed plan authority with monotonic IDs, file locking, forced writes, and restart recovery.
+- Single-backend optimistic concurrency through active revision and hash tokens, with stale editor submissions returning `409 Conflict`.
+- Historical revision recovery across hierarchy growth, with current coverage enforced against the active revision.
+- Explicit cancelled-node retry without permanently locking the circuit.
+- Desktop Epic and Story planning actions, registered workflow selection, circuit lanes, eligibility, and artifact signals.
+- Bounded stages, nodes, dependencies, and artifact collections at the authority boundary.
+
+Milestone 8.0 boundaries:
+
+- Plans are manually constructed and accepted; automatic Architect decomposition and materialization are future work.
+- Eligible nodes are started explicitly; durable automatic dispatch, priorities, and worktree-aware integration queues are future work.
+- Stage workflows orchestrate circuit entry and exit. Task and Bug runs retain their own governed delivery workflows and evidence contracts.
+- Orchard persists evidence-bound artifact identity, not arbitrary artifact payload bytes.
+- Epic circuits currently use completion dependencies only; Epic artifact wires await an explicit Story-output aggregation policy.
+- Built-in stage workflows are versioned policy; installing user-authored workflow implementations is not yet supported.
+- One Orchard backend process owns each workspace authority directory; cross-process stale-conflict classification is outside this milestone.
+
 ## Architecture
 
 ```mermaid
@@ -250,6 +280,8 @@ flowchart LR
     MB --> ME[Checksummed execution and satisfaction memory]
     ME --> CP
     WD -->|READY manifest| WM
+    WS --> SC[Staged delivery circuit]
+    SC -->|dependency and artifact gates| WM
     WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI
 ```

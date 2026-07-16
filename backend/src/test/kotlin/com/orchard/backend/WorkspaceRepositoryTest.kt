@@ -20,6 +20,7 @@ import com.orchard.backend.workspace.AttemptSubmission
 import com.orchard.backend.workspace.EvidenceSubmission
 import com.orchard.backend.workspace.RUN_STATE_DONE
 import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_BLOCKED
+import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceRepository
 import com.orchard.backend.workspace.WorkspaceStore
@@ -43,6 +44,11 @@ import com.orchard.backend.vector.FileModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.resource.FileMachineUsagePolicyStore
 import com.orchard.backend.resource.MachineUsagePolicy
+import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
+import com.orchard.backend.workspace.StagedDeliveryPlanSubmission
+import com.orchard.backend.workspace.StagedPlanNodeSubmission
+import com.orchard.backend.workspace.StagedPlanStageSubmission
+import com.orchard.backend.workspace.StagedPlanStatus
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -57,6 +63,120 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class WorkspaceRepositoryTest {
+    @Test
+    fun stagedDeliveryCircuitRecoversAfterRestart() = withTempDirectory { directory ->
+        val first = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+        )
+        first.beginBatch()
+        assertTrue(first.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(first.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(first.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(first.applyIntent(intent(ENTITY_TASK, "Contract", projectId = 1, epicId = 2, storyId = 3)))
+        assertTrue(first.applyIntent(intent(ENTITY_TASK, "Implementation", projectId = 1, epicId = 2, storyId = 3)))
+        first.commitBatch()
+        val accepted = first.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Recovered circuit",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "design", "Design", "contract-design-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("contract", 4)),
+                    ),
+                    StagedPlanStageSubmission(
+                        "build", "Build", "parallel-implementation-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("implementation", 5, dependsOn = listOf("contract"))),
+                    ),
+                ),
+            )
+        )
+        val original = accepted.snapshot.stagedPlans.single().plan
+
+        val recovered = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+        ).snapshot(MESSAGE_READY).stagedPlans.single().plan
+
+        assertEquals(StagedPlanStatus.ACCEPTED, accepted.status)
+        assertEquals(original.hash, recovered.hash)
+        assertEquals(listOf("1a", "2a"), recovered.stages.flatMap { it.nodes }.map { it.label })
+        assertTrue(Files.readString(directory.resolve("staged-delivery-plans.jsonl")).contains("\"checksum\""))
+    }
+
+    @Test
+    fun stagedDeliveryCircuitRecoversHistoricalRevisionAfterHierarchyGrowth() = withTempDirectory { directory ->
+        val repository = FileWorkspaceRepository(directory)
+        val store = FileStagedDeliveryPlanStore(directory)
+        val first = WorkspaceStore(repository = repository, stagedPlanStore = store)
+        first.beginBatch()
+        assertTrue(first.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(first.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(first.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(first.applyIntent(intent(ENTITY_TASK, "Contract", projectId = 1, epicId = 2, storyId = 3)))
+        assertTrue(first.applyIntent(intent(ENTITY_TASK, "Implementation", projectId = 1, epicId = 2, storyId = 3)))
+        first.commitBatch()
+        val revision1 = first.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Initial circuit",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "design", "Design", "contract-design-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("contract", 4)),
+                    ),
+                    StagedPlanStageSubmission(
+                        "build", "Build", "parallel-implementation-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("implementation", 5, dependsOn = listOf("contract"))),
+                    ),
+                ),
+            )
+        ).snapshot.stagedPlans.single().plan
+
+        first.beginBatch()
+        assertTrue(first.applyIntent(intent(ENTITY_TASK, "Integration", projectId = 1, epicId = 2, storyId = 3)))
+        first.commitBatch()
+        val staleRecovery = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+        ).snapshot(MESSAGE_READY).stagedPlans.single()
+        assertEquals(1, staleRecovery.plan.revision)
+        assertTrue(staleRecovery.nodes.all { it.blockedReason.contains("stale") })
+        val revision2 = first.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Expanded circuit",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "design", "Design", "contract-design-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("contract", 4)),
+                    ),
+                    StagedPlanStageSubmission(
+                        "build", "Build", "parallel-implementation-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("implementation", 5, dependsOn = listOf("contract"))),
+                    ),
+                    StagedPlanStageSubmission(
+                        "join", "Join", "integration-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("integration", 6, dependsOn = listOf("implementation"))),
+                    ),
+                ),
+                baseRevision = revision1.revision,
+                baseHash = revision1.hash,
+            )
+        )
+        assertEquals(StagedPlanStatus.ACCEPTED, revision2.status)
+
+        val recovered = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+        ).snapshot(MESSAGE_READY).stagedPlans
+
+        assertEquals(1, recovered.size)
+        assertEquals(2, recovered.single().plan.revision)
+        assertEquals(listOf(4, 5, 6), recovered.single().plan.stages.flatMap { it.nodes }.map { it.workItemId })
+    }
+
     @Test
     fun legacyModelExperienceWithoutResourceEvidenceKeepsItsChecksum() = withTempDirectory { directory ->
         val execution = ModelExecutionObservation(

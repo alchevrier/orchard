@@ -41,6 +41,12 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
             setBody(policy)
         }.successBody()
 
+    suspend fun acceptStagedPlan(plan: StagedDeliveryPlanSubmissionRequest): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/staged-plans") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(plan)
+        }.successBody()
+
     suspend fun submitArchitectPrompt(prompt: String): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8086/api/architect/chat") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
@@ -129,6 +135,115 @@ data class WorkspaceSnapshotResponse(
     val workDefinitions: List<WorkDefinitionResponse> = emptyList(),
     val definitionProposals: List<DefinitionProposalViewResponse> = emptyList(),
     val modelProfiles: List<ModelCapabilityProfileResponse> = emptyList(),
+    val stagedPlans: List<StagedDeliveryPlanViewResponse> = emptyList(),
+    val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse> = emptyList(),
+)
+
+@Serializable
+data class StageExecutionWorkflowDefinitionResponse(
+    val id: String,
+    val version: Int,
+    val entryPolicy: String,
+    val exitPolicy: String,
+    val description: String,
+)
+
+@Serializable
+data class StagedPlanArtifactRequest(
+    val kind: String,
+    val name: String,
+    val evidenceKind: String = "SOURCE_DIFF",
+)
+
+@Serializable
+data class StagedPlanArtifactRequirementRequest(val producerNodeId: String, val kind: String)
+
+@Serializable
+data class StagedPlanNodeSubmissionRequest(
+    val nodeId: String,
+    val workItemId: Int,
+    val dependsOn: List<String> = emptyList(),
+    val consumes: List<StagedPlanArtifactRequirementRequest> = emptyList(),
+    val produces: List<StagedPlanArtifactRequest> = emptyList(),
+)
+
+@Serializable
+data class StagedPlanStageSubmissionRequest(
+    val stageId: String,
+    val title: String,
+    val executionWorkflowId: String,
+    val executionWorkflowVersion: Int = 1,
+    val nodes: List<StagedPlanNodeSubmissionRequest>,
+)
+
+@Serializable
+data class StagedDeliveryPlanSubmissionRequest(
+    val scopeId: Int,
+    val title: String,
+    val stages: List<StagedPlanStageSubmissionRequest>,
+    val baseRevision: Int = 0,
+    val baseHash: String? = null,
+)
+
+@Serializable
+data class StagedPlanArtifactInstanceResponse(
+    val producerNodeId: String,
+    val workItemId: Int,
+    val kind: String,
+    val name: String,
+    val workflowRunId: Long,
+    val evidenceId: Long,
+    val evidenceKind: String,
+    val revision: String,
+    val outputHash: String,
+    val evidenceHash: String,
+)
+
+@Serializable
+data class StagedPlanNodeResponse(
+    val nodeId: String,
+    val label: String,
+    val workItemId: Int,
+    val dependsOn: List<String>,
+    val consumes: List<StagedPlanArtifactRequirementRequest>,
+    val produces: List<StagedPlanArtifactRequest>,
+)
+
+@Serializable
+data class StagedPlanStageResponse(
+    val stageId: String,
+    val ordinal: Int,
+    val title: String,
+    val executionWorkflowId: String,
+    val executionWorkflowVersion: Int,
+    val nodes: List<StagedPlanNodeResponse>,
+)
+
+@Serializable
+data class StagedDeliveryPlanResponse(
+    val planId: Long,
+    val revision: Int,
+    val scopeId: Int,
+    val scopeType: Int,
+    val title: String,
+    val stages: List<StagedPlanStageResponse>,
+    val acceptedBy: String,
+    val acceptedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class StagedPlanNodeViewResponse(
+    val node: StagedPlanNodeResponse,
+    val state: String,
+    val blockedReason: String = "",
+)
+
+@Serializable
+data class StagedDeliveryPlanViewResponse(
+    val plan: StagedDeliveryPlanResponse,
+    val nodes: List<StagedPlanNodeViewResponse>,
+    val artifacts: List<StagedPlanArtifactInstanceResponse> = emptyList(),
 )
 
 @Serializable
