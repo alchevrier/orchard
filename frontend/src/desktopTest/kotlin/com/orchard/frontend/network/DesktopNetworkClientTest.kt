@@ -149,4 +149,42 @@ class DesktopNetworkClientTest {
 
         client.close()
     }
+
+    @Test
+    fun submitsStructuredWorkDefinition() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/work-items/4/definitions", request.url.toString())
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"requestedOutcome\":\"Open saved orders\""))
+            assertTrue(body.contains("\"verification\":\"Run the regression test\""))
+            respond(
+                content = """{"resources":{},"workDefinitions":[]}""",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        client.submitWorkDefinition(
+            4,
+            WorkDefinitionSubmissionRequest(
+                requestedOutcome = "Open saved orders",
+                currentBehavior = "Opening fails",
+                requiredBehavior = "Opening restores all fields",
+                scope = listOf("Order loader"),
+                nonGoals = listOf("Storage migration"),
+                constraints = emptyList(),
+                acceptanceCriteria = listOf(
+                    AcceptanceCriterionRequest("Saved orders open", "Run the regression test")
+                ),
+            ),
+        )
+
+        client.close()
+    }
 }

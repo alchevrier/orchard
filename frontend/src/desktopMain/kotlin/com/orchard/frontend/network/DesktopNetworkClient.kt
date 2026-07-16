@@ -35,6 +35,14 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun startWorkflow(workItemId: Int): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8085/api/work-items/$workItemId/runs").body()
 
+    suspend fun submitWorkDefinition(
+        workItemId: Int,
+        definition: WorkDefinitionSubmissionRequest,
+    ): WorkspaceSnapshotResponse = client.post("http://127.0.0.1:8085/api/work-items/$workItemId/definitions") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(definition)
+    }.body()
+
     suspend fun submitEvidence(runId: Long, evidence: EvidenceSubmissionRequest): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8085/api/workflow-runs/$runId/evidence") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
@@ -80,6 +88,7 @@ data class WorkspaceSnapshotResponse(
     val resources: Map<String, WorkspaceResourceResponse> = emptyMap(),
     val repositories: Map<Int, RepositoryResponse> = emptyMap(),
     val workflowRuns: List<WorkflowRunResponse> = emptyList(),
+    val workDefinitions: List<WorkDefinitionResponse> = emptyList(),
 )
 
 @Serializable
@@ -107,6 +116,53 @@ data class WorkflowRunResponse(
     val context: ContextManifestResponse,
     val workflow: ResolvedWorkflowResponse,
     val evidence: List<EvidenceRecordResponse> = emptyList(),
+    val workDefinition: WorkDefinitionResponse? = null,
+)
+
+@Serializable
+data class WorkDefinitionSubmissionRequest(
+    val requestedOutcome: String,
+    val currentBehavior: String,
+    val requiredBehavior: String,
+    val scope: List<String>,
+    val nonGoals: List<String>,
+    val constraints: List<String>,
+    val acceptanceCriteria: List<AcceptanceCriterionRequest>,
+    val unresolvedQuestions: List<String> = emptyList(),
+    val proposedSplitTitles: List<String> = emptyList(),
+    val reproduction: String = "",
+    val regressionCriterion: String = "",
+)
+
+@Serializable
+data class AcceptanceCriterionRequest(
+    val description: String,
+    val verification: String,
+)
+
+@Serializable
+data class WorkDefinitionResponse(
+    val definitionId: Long,
+    val revision: Int,
+    val workItemId: Int,
+    val systemWorkflow: SystemWorkflowResponse,
+    val definition: WorkDefinitionSubmissionRequest,
+    val assessment: DefinitionAssessmentResponse,
+    val hash: String,
+)
+
+@Serializable
+data class SystemWorkflowResponse(
+    val id: String,
+    val version: Int,
+    val phases: List<String>,
+)
+
+@Serializable
+data class DefinitionAssessmentResponse(
+    val status: String,
+    val missingFields: List<String> = emptyList(),
+    val ambiguities: List<String> = emptyList(),
 )
 
 @Serializable

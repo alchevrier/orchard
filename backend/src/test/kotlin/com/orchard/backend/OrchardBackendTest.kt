@@ -12,6 +12,16 @@ import com.orchard.backend.workspace.RepositoryBindingStore
 import com.orchard.backend.workspace.RepositoryView
 import com.orchard.backend.workspace.RepositoryHead
 import com.orchard.backend.workspace.RevisionValidation
+import com.orchard.backend.workspace.DefaultSystemWorkflow
+import com.orchard.backend.workspace.WorkDefinitionSubmission
+import com.orchard.backend.workspace.AcceptanceCriterion
+import com.orchard.backend.workspace.DEFINITION_NEEDS_CLARIFICATION
+import com.orchard.backend.workspace.DEFINITION_NEEDS_INVESTIGATION
+import com.orchard.backend.workspace.DEFINITION_NEEDS_SPLIT
+import com.orchard.backend.workspace.DEFINITION_READY
+import com.orchard.backend.workspace.WorkDefinitionStatus
+import com.orchard.backend.workspace.WorkflowStepEngine
+import com.orchard.backend.workspace.FACT_WORK_ITEM_EXISTS
 import com.orchard.backend.workspace.EpisodeQuery
 import com.orchard.backend.workspace.EpisodeRecall
 import com.orchard.backend.workspace.WorkflowMemoryStore
@@ -25,6 +35,7 @@ import com.orchard.backend.workspace.ENTITY_EPIC
 import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.ENTITY_STORY
 import com.orchard.backend.workspace.ENTITY_TASK
+import com.orchard.backend.workspace.ENTITY_BUG
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.WorkspaceStore
 import io.ktor.client.request.get
@@ -47,6 +58,41 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class WorkspaceStoreTest {
+    @Test
+    fun latestDefinitionRevisionControlsDeliveryAdmission() {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "a".repeat(40), "main", "", clean = true,
+            )
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+
+        val ambiguous = workspace.submitWorkDefinition(
+            4,
+            readyDefinition().copy(unresolvedQuestions = listOf("Should archived records be included?")),
+        )
+        assertEquals(DEFINITION_NEEDS_CLARIFICATION, ambiguous.snapshot.workDefinitions.single().assessment.status)
+        assertEquals(WorkflowStartStatus.WORK_DEFINITION_NOT_READY, workspace.startWorkflow(4).status)
+
+        val ready = workspace.submitWorkDefinition(4, readyDefinition())
+        assertEquals(2, ready.snapshot.workDefinitions.single().revision)
+        val started = workspace.startWorkflow(4)
+        assertEquals(WorkflowStartStatus.CREATED, started.status)
+        assertEquals(2L, started.snapshot.workflowRuns.single().workDefinition?.definitionId)
+        assertEquals(
+            WorkDefinitionStatus.WORKFLOW_ALREADY_STARTED,
+            workspace.submitWorkDefinition(4, readyDefinition()).status,
+        )
+    }
+
     @Test
     fun emptySnapshotUsesStableResourceOrder() {
         val resources = WorkspaceStore().snapshot(MESSAGE_READY).resources
@@ -91,6 +137,11 @@ class WorkspaceStoreTest {
         workspace.commitBatch()
 
         assertEquals(WorkflowStartStatus.UNSUPPORTED_ENTITY, workspace.startWorkflow(3).status)
+        assertEquals(WorkflowStartStatus.WORK_DEFINITION_NOT_READY, workspace.startWorkflow(4).status)
+        assertEquals(
+            DEFINITION_READY,
+            workspace.submitWorkDefinition(4, readyDefinition()).snapshot.workDefinitions.single().assessment.status,
+        )
         head = cleanHead.copy(clean = false)
         assertEquals(WorkflowStartStatus.REPOSITORY_DIRTY, workspace.startWorkflow(4).status)
         head = cleanHead
@@ -112,6 +163,16 @@ class WorkspaceStoreTest {
         epicId = epicId,
         storyId = storyId,
         title = title,
+    )
+
+    private fun readyDefinition() = WorkDefinitionSubmission(
+        requestedOutcome = "Complete the bounded task",
+        currentBehavior = "The requested capability is absent",
+        requiredBehavior = "The requested capability is available",
+        scope = listOf("Bounded component"),
+        nonGoals = listOf("Unrelated components"),
+        constraints = emptyList(),
+        acceptanceCriteria = listOf(AcceptanceCriterion("The capability works", "Run its focused test")),
     )
 }
 
@@ -306,6 +367,50 @@ class ArchitectServiceTest {
 
 class WorkspaceApiTest {
     @Test
+    fun definitionRouteRecordsAReadySystemWorkflowRevision() = testApplication {
+        val workspace = WorkspaceStore()
+        createTaskHierarchy(workspace)
+        application { workspaceApi(workspace) }
+
+        val response = client.post("/api/work-items/4/definitions") {
+            contentType(ContentType.Application.Json)
+            setBody(Json.encodeToString(definition()))
+        }
+
+        assertEquals(HttpStatusCode.Created, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("\"id\":\"default-definition-task\""))
+        assertTrue(body.contains("\"status\":\"READY\""))
+        assertTrue(body.contains(Regex("\\\"hash\\\":\\\"[0-9a-f]{64}\\\"")))
+    }
+
+    @Test
+    fun systemWorkflowRequiresAnUnambiguousTestableDefinition() {
+        val incompleteBug = DefaultSystemWorkflow.assess(
+            ENTITY_BUG,
+            definition(reproduction = "", regressionCriterion = ""),
+        )
+        val ambiguousTask = DefaultSystemWorkflow.assess(
+            ENTITY_TASK,
+            definition(unresolvedQuestions = listOf("Should this include archived projects?")),
+        )
+        val oversizedTask = DefaultSystemWorkflow.assess(
+            ENTITY_TASK,
+            definition(proposedSplitTitles = listOf("Add import", "Add export")),
+        )
+        val readyTask = DefaultSystemWorkflow.assess(ENTITY_TASK, definition())
+        val definitionStep = DefaultSystemWorkflow.resolve(ENTITY_TASK).stepDefinitions.single()
+
+        assertEquals(DEFINITION_NEEDS_INVESTIGATION, incompleteBug.status)
+        assertEquals(listOf("reproduction", "regressionCriterion"), incompleteBug.missingFields)
+        assertEquals(DEFINITION_NEEDS_CLARIFICATION, ambiguousTask.status)
+        assertEquals(DEFINITION_NEEDS_SPLIT, oversizedTask.status)
+        assertEquals(DEFINITION_READY, readyTask.status)
+        assertFalse(WorkflowStepEngine.canStart(definitionStep, emptySet()))
+        assertTrue(WorkflowStepEngine.canStart(definitionStep, setOf(FACT_WORK_ITEM_EXISTS)))
+    }
+
+    @Test
     fun workspaceGetReturnsJsonEnvelope() = testApplication {
         application { workspaceApi(WorkspaceStore()) }
 
@@ -386,6 +491,7 @@ class WorkspaceApiTest {
         }
         val workspace = WorkspaceStore(repositoryBindings = bindings)
         createTaskHierarchy(workspace)
+        workspace.submitWorkDefinition(4, definition())
         application { workspaceApi(workspace) }
 
         val response = client.post("/api/work-items/4/runs")
@@ -415,6 +521,7 @@ class WorkspaceApiTest {
         }
         val workspace = WorkspaceStore(repositoryBindings = bindings, workflowMemory = memory)
         createTaskHierarchy(workspace)
+        workspace.submitWorkDefinition(4, definition())
         application { workspaceApi(workspace) }
 
         val response = client.post("/api/work-items/4/runs")
@@ -439,10 +546,12 @@ class WorkspaceApiTest {
         }
         val workspace = WorkspaceStore(repositoryBindings = bindings)
         createTaskHierarchy(workspace)
+        workspace.submitWorkDefinition(4, definition())
         assertEquals(WorkflowStartStatus.CREATED, workspace.startWorkflow(4).status)
         workspace.beginBatch()
         assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Cancelled")))
         workspace.commitBatch()
+        workspace.submitWorkDefinition(5, definition())
         assertEquals(WorkflowStartStatus.CREATED, workspace.startWorkflow(5).status)
         application { workspaceApi(workspace) }
 
@@ -462,17 +571,24 @@ class WorkspaceApiTest {
             contentType(ContentType.Application.Json)
             setBody(evidenceJson("TEST", targetRevision, "./gradlew test", 0, "Tests passed"))
         }
+        val acceptance = client.post("/api/workflow-runs/1/evidence") {
+            contentType(ContentType.Application.Json)
+            setBody(evidenceJson("ACCEPTANCE", targetRevision, "./gradlew focusedTest", 0, "Acceptance criterion passed"))
+        }
         val cancelled = client.post("/api/workflow-runs/2/cancel")
-        val completedBody = test.bodyAsText()
+        val completedBody = acceptance.bodyAsText()
 
         assertEquals(HttpStatusCode.Created, attempt.status)
         assertEquals(HttpStatusCode.Created, source.status)
         assertEquals(HttpStatusCode.Created, build.status)
         assertEquals(HttpStatusCode.Created, test.status)
+        assertEquals(HttpStatusCode.Created, acceptance.status)
         assertTrue(completedBody.contains("\"state\":\"DONE\""))
+        assertTrue(completedBody.contains("\"signal\":\"COMPLETED\""))
         assertTrue(completedBody.contains("status=3"))
         assertEquals(HttpStatusCode.OK, cancelled.status)
         assertTrue(cancelled.bodyAsText().contains("CANCELLED"))
+        assertTrue(cancelled.bodyAsText().contains("\"signal\":\"CANCELLED\""))
     }
 
     private fun createTaskHierarchy(workspace: WorkspaceStore) {
@@ -486,4 +602,28 @@ class WorkspaceApiTest {
 
     private fun evidenceJson(kind: String, revision: String, command: String, exitCode: Int, summary: String): String =
         """{"kind":"$kind","revision":"$revision","command":"$command","exitCode":$exitCode,"outputHash":"${"2".repeat(64)}","summary":"$summary","producer":"api-test"}"""
+
+    private fun definition(
+        unresolvedQuestions: List<String> = emptyList(),
+        proposedSplitTitles: List<String> = emptyList(),
+        reproduction: String = "Open the saved order",
+        regressionCriterion: String = "The saved order opens without an exception",
+    ) = WorkDefinitionSubmission(
+        requestedOutcome = "Open saved orders reliably",
+        currentBehavior = "Opening a saved order throws an exception",
+        requiredBehavior = "Opening a saved order restores its persisted fields",
+        scope = listOf("Order loader"),
+        nonGoals = listOf("Changing the storage format"),
+        constraints = listOf("Existing saved orders remain compatible"),
+        acceptanceCriteria = listOf(
+            AcceptanceCriterion(
+                description = "A saved order opens with all fields restored",
+                verification = "Run the saved-order regression test",
+            )
+        ),
+        unresolvedQuestions = unresolvedQuestions,
+        proposedSplitTitles = proposedSplitTitles,
+        reproduction = reproduction,
+        regressionCriterion = regressionCriterion,
+    )
 }

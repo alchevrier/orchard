@@ -16,8 +16,76 @@ object DefaultDeliveryWorkflow {
         else -> 0
     }
 
-    fun resolve(workItemType: Int): ResolvedWorkflow {
+    fun resolve(workItemType: Int, workDefinition: WorkDefinitionManifest? = null): ResolvedWorkflow {
         require(workItemType == ENTITY_TASK || workItemType == ENTITY_BUG) { "Only tasks and bugs can start a workflow" }
+        val requirements = buildList {
+            add(EvidenceRequirement("SOURCE_DIFF", "A source diff tied to the pinned repository revision."))
+            if (workItemType == ENTITY_BUG) {
+                add(EvidenceRequirement("REGRESSION_TEST", "A regression test that demonstrates the corrected defect."))
+            }
+            add(EvidenceRequirement("BUILD", "A successful build against the resulting revision."))
+            add(EvidenceRequirement("TEST", "A successful relevant test suite against the resulting revision."))
+            workDefinition?.let { manifest ->
+                add(
+                    EvidenceRequirement(
+                        "ACCEPTANCE",
+                        manifest.definition.acceptanceCriteria.joinToString(" ") {
+                            "${it.description} Verification: ${it.verification}"
+                        },
+                    )
+                )
+            }
+        }
+        val evidenceContract = EvidenceContract(
+            id = "${if (workItemType == ENTITY_BUG) "bug" else "task"}-completion",
+            version = if (workDefinition == null) 1 else 2,
+            requirements = requirements,
+        )
+        val step = WorkflowStepDefinition(
+            id = "DELIVER_CHANGE",
+            version = 1,
+            startCondition = WorkflowStartCondition(
+                listOf(FACT_WORK_DEFINITION_READY, FACT_REPOSITORY_AVAILABLE, FACT_REPOSITORY_CLEAN)
+            ),
+            contextContract = WorkflowContextContract(
+                listOf(
+                    CONTEXT_TICKET,
+                    CONTEXT_SYSTEM_POLICY,
+                    CONTEXT_WORK_DEFINITION,
+                    CONTEXT_REPOSITORY_REVISION,
+                    CONTEXT_EPISODIC_MEMORY,
+                )
+            ),
+            executionContract = WorkflowExecutionContract(
+                listOf(EXECUTOR_HUMAN, EXECUTOR_AGENT, EXECUTOR_DETERMINISTIC_TOOL)
+            ),
+            evidenceContract = evidenceContract,
+            transitionSignals = listOf(
+                WorkflowTransitionSignal(SIGNAL_EVIDENCE_ACCEPTED, RUN_STATE_EVIDENCE_PENDING, true),
+                WorkflowTransitionSignal(SIGNAL_EVIDENCE_REJECTED, RUN_STATE_EVIDENCE_BLOCKED, false),
+                WorkflowTransitionSignal(SIGNAL_COMPLETED, RUN_STATE_DONE, true),
+                WorkflowTransitionSignal(SIGNAL_CANCELLED, RUN_STATE_CANCELLED, true),
+            ),
+        )
+        return ResolvedWorkflow(
+            id = "default-delivery-${if (workItemType == ENTITY_BUG) "bug" else "task"}",
+            version = if (workDefinition == null) 1 else 2,
+            workItemType = workItemType,
+            steps = listOf(step.id),
+            evidenceContract = evidenceContract,
+            stepDefinitions = listOf(step),
+        )
+    }
+
+    fun isCompatible(
+        workflow: ResolvedWorkflow,
+        workItemType: Int,
+        workDefinition: WorkDefinitionManifest?,
+    ): Boolean = workflow == resolve(workItemType, workDefinition) ||
+        (workDefinition == null && workflow == legacy(workItemType))
+
+    private fun legacy(workItemType: Int): ResolvedWorkflow {
+        require(workItemType == ENTITY_TASK || workItemType == ENTITY_BUG)
         val requirements = buildList {
             add(EvidenceRequirement("SOURCE_DIFF", "A source diff tied to the pinned repository revision."))
             if (workItemType == ENTITY_BUG) {

@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.ButtonDefaults
+import androidx.compose.material.AlertDialog
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Divider
 import androidx.compose.material.Icon
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -67,6 +69,9 @@ import com.orchard.frontend.network.DesktopNetworkClient
 import com.orchard.frontend.network.RepositoryResponse
 import com.orchard.frontend.network.WorkspaceSnapshotResponse
 import com.orchard.frontend.network.WorkflowRunResponse
+import com.orchard.frontend.network.WorkDefinitionResponse
+import com.orchard.frontend.network.WorkDefinitionSubmissionRequest
+import com.orchard.frontend.network.AcceptanceCriterionRequest
 import java.io.File
 import javax.swing.JFileChooser
 import kotlinx.coroutines.launch
@@ -103,6 +108,7 @@ private data class WorkspaceSnapshot(
     val message: String,
     val repositories: Map<Int, RepositoryResponse>,
     val workflowRuns: List<WorkflowRunResponse>,
+    val workDefinitions: List<WorkDefinitionResponse>,
 )
 
 class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
@@ -116,6 +122,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var isBindingRepository by remember { mutableStateOf(false) }
         var startingWorkItemId by remember { mutableStateOf(0) }
         var cancellingRunId by remember { mutableStateOf(0L) }
+        var definingWorkItemId by remember { mutableStateOf(0) }
+        var isSubmittingDefinition by remember { mutableStateOf(false) }
         var requestError by remember { mutableStateOf<String?>(null) }
         var selectedProjectId by remember { mutableStateOf(0) }
         var selectedEpicId by remember { mutableStateOf(0) }
@@ -207,6 +215,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             }
                         }
                     },
+                    onDefineWork = { workItemId -> definingWorkItemId = workItemId },
                     onRefresh = {
                         scope.launch {
                             requestError = null
@@ -223,6 +232,26 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                     isSubmitting = isSubmitting,
                     onPromptChange = { prompt = it },
                     onSubmit = ::submitPrompt,
+                )
+            }
+            snapshot.entities.firstOrNull { it.id == definingWorkItemId }?.let { workItem ->
+                WorkDefinitionDialog(
+                    workItem = workItem,
+                    current = snapshot.workDefinitions.firstOrNull { it.workItemId == workItem.id },
+                    isSubmitting = isSubmittingDefinition,
+                    onDismiss = { if (!isSubmittingDefinition) definingWorkItemId = 0 },
+                    onSubmit = { definition ->
+                        if (!isSubmittingDefinition) {
+                            isSubmittingDefinition = true
+                            requestError = null
+                            scope.launch {
+                                submitWorkDefinition(workItem.id, definition)
+                                    .onSuccess { definingWorkItemId = 0 }
+                                    .onFailure { requestError = it.message ?: "Unable to assess the work definition." }
+                                isSubmittingDefinition = false
+                            }
+                        }
+                    },
                 )
             }
         }
@@ -242,6 +271,13 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
     private suspend fun startWorkflow(workItemId: Int): Result<Unit> = executeRequest {
         networkClient.startWorkflow(workItemId)
+    }
+
+    private suspend fun submitWorkDefinition(
+        workItemId: Int,
+        definition: WorkDefinitionSubmissionRequest,
+    ): Result<Unit> = executeRequest {
+        networkClient.submitWorkDefinition(workItemId, definition)
     }
 
     private suspend fun cancelWorkflow(runId: Long): Result<Unit> = executeRequest {
@@ -276,7 +312,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 }
             }
         }
-        return WorkspaceSnapshot(entities, focusId, message, response.repositories, response.workflowRuns)
+        return WorkspaceSnapshot(
+            entities,
+            focusId,
+            message,
+            response.repositories,
+            response.workflowRuns,
+            response.workDefinitions,
+        )
     }
 
     private fun actionValue(action: String, key: String): Int {
@@ -383,6 +426,7 @@ private fun WorkspaceBoard(
     onBindRepository: () -> Unit,
     onStartWorkflow: (Int) -> Unit,
     onCancelWorkflow: (Long) -> Unit,
+    onDefineWork: (Int) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val project = snapshot.entities.firstOrNull { it.id == projectId }
@@ -438,10 +482,12 @@ private fun WorkspaceBoard(
                         story = story,
                         tickets = snapshot.entities.filter { it.parentId == story.id && (it.type == TASK || it.type == BUG) },
                         workflowRuns = snapshot.workflowRuns,
+                        workDefinitions = snapshot.workDefinitions,
                         startingWorkItemId = startingWorkItemId,
                         onStartWorkflow = onStartWorkflow,
                         cancellingRunId = cancellingRunId,
                         onCancelWorkflow = onCancelWorkflow,
+                        onDefineWork = onDefineWork,
                     )
                 }
             }
@@ -527,10 +573,12 @@ private fun StoryBoard(
     story: WorkspaceEntity,
     tickets: List<WorkspaceEntity>,
     workflowRuns: List<WorkflowRunResponse>,
+    workDefinitions: List<WorkDefinitionResponse>,
     startingWorkItemId: Int,
     onStartWorkflow: (Int) -> Unit,
     cancellingRunId: Long,
     onCancelWorkflow: (Long) -> Unit,
+    onDefineWork: (Int) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().background(OrchardColors.storyBand, RoundedCornerShape(8.dp)).padding(18.dp),
@@ -547,10 +595,12 @@ private fun StoryBoard(
                         TicketCard(
                             ticket = ticket,
                             workflowRun = workflowRuns.firstOrNull { it.context.workItemId == ticket.id },
+                            workDefinition = workDefinitions.firstOrNull { it.workItemId == ticket.id },
                             isStarting = startingWorkItemId == ticket.id,
                             onStartWorkflow = { onStartWorkflow(ticket.id) },
                             isCancelling = workflowRuns.firstOrNull { it.context.workItemId == ticket.id }?.runId == cancellingRunId,
                             onCancelWorkflow = { runId -> onCancelWorkflow(runId) },
+                            onDefineWork = { onDefineWork(ticket.id) },
                         )
                     }
                     if (statusTickets.isEmpty()) {
@@ -566,10 +616,12 @@ private fun StoryBoard(
 private fun TicketCard(
     ticket: WorkspaceEntity,
     workflowRun: WorkflowRunResponse?,
+    workDefinition: WorkDefinitionResponse?,
     isStarting: Boolean,
     onStartWorkflow: () -> Unit,
     isCancelling: Boolean,
     onCancelWorkflow: (Long) -> Unit,
+    onDefineWork: () -> Unit,
 ) {
     Surface(
         color = OrchardColors.white,
@@ -589,6 +641,39 @@ private fun TicketCard(
                 color = if (ticket.type == BUG) OrchardColors.clay else OrchardColors.moss,
             )
             if (workflowRun == null) {
+                Divider(color = OrchardColors.divider, modifier = Modifier.padding(top = 9.dp, bottom = 7.dp))
+                val definitionState = workDefinition?.assessment?.status ?: "UNDEFINED"
+                val definitionColor = if (definitionState == "READY") OrchardColors.moss else OrchardColors.clay
+                Text(
+                    "$definitionState${workDefinition?.let { "  R${it.revision}" }.orEmpty()}",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    color = definitionColor,
+                )
+                val outstanding = workDefinition?.assessment?.missingFields.orEmpty() +
+                    workDefinition?.assessment?.ambiguities.orEmpty()
+                if (outstanding.isNotEmpty()) {
+                    Text(
+                        outstanding.joinToString(", "),
+                        color = OrchardColors.muted,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                TextButton(
+                    onClick = onDefineWork,
+                    modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 3.dp),
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = definitionColor, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (workDefinition == null) "Define work" else "Revise definition", fontSize = 11.sp, color = definitionColor)
+                }
+                if (definitionState == "READY") {
                 TextButton(
                     onClick = onStartWorkflow,
                     enabled = !isStarting,
@@ -604,6 +689,7 @@ private fun TicketCard(
                         Spacer(Modifier.width(4.dp))
                         Text("Start workflow", fontSize = 11.sp, color = OrchardColors.moss)
                     }
+                }
                 }
             } else {
                 Divider(color = OrchardColors.divider, modifier = Modifier.padding(vertical = 9.dp))
@@ -625,6 +711,14 @@ private fun TicketCard(
                     color = OrchardColors.muted,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+                workflowRun.workDefinition?.let { definition ->
+                    Text(
+                        "Definition R${definition.revision}  ${definition.hash.take(8)}",
+                        fontSize = 10.sp,
+                        color = OrchardColors.muted,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
                 workflowRun.context.recalledEpisodes.firstOrNull()?.let { recall ->
                     Text(
                         "Prior fix: ${recall.resolution}",
@@ -655,6 +749,115 @@ private fun TicketCard(
             }
         }
     }
+}
+
+@Composable
+private fun WorkDefinitionDialog(
+    workItem: WorkspaceEntity,
+    current: WorkDefinitionResponse?,
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onSubmit: (WorkDefinitionSubmissionRequest) -> Unit,
+) {
+    val existing = current?.definition
+    var requestedOutcome by remember(workItem.id, current?.hash) { mutableStateOf(existing?.requestedOutcome.orEmpty()) }
+    var currentBehavior by remember(workItem.id, current?.hash) { mutableStateOf(existing?.currentBehavior.orEmpty()) }
+    var requiredBehavior by remember(workItem.id, current?.hash) { mutableStateOf(existing?.requiredBehavior.orEmpty()) }
+    var scope by remember(workItem.id, current?.hash) { mutableStateOf(existing?.scope.orEmpty().joinToString("\n")) }
+    var nonGoals by remember(workItem.id, current?.hash) { mutableStateOf(existing?.nonGoals.orEmpty().joinToString("\n")) }
+    var constraints by remember(workItem.id, current?.hash) { mutableStateOf(existing?.constraints.orEmpty().joinToString("\n")) }
+    var criteria by remember(workItem.id, current?.hash) {
+        mutableStateOf(existing?.acceptanceCriteria.orEmpty().joinToString("\n") { it.description })
+    }
+    var verification by remember(workItem.id, current?.hash) {
+        mutableStateOf(existing?.acceptanceCriteria.orEmpty().joinToString("\n") { it.verification })
+    }
+    var questions by remember(workItem.id, current?.hash) { mutableStateOf(existing?.unresolvedQuestions.orEmpty().joinToString("\n")) }
+    var splits by remember(workItem.id, current?.hash) { mutableStateOf(existing?.proposedSplitTitles.orEmpty().joinToString("\n")) }
+    var reproduction by remember(workItem.id, current?.hash) { mutableStateOf(existing?.reproduction.orEmpty()) }
+    var regression by remember(workItem.id, current?.hash) { mutableStateOf(existing?.regressionCriterion.orEmpty()) }
+
+    fun lines(value: String): List<String> = value.lines().map(String::trim).filter(String::isNotEmpty)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("Define ${workItem.type.lowercase()}", fontWeight = FontWeight.Bold)
+                Text(workItem.title, fontSize = 12.sp, color = OrchardColors.muted)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.width(620.dp).heightIn(max = 680.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                DefinitionField("Requested outcome", requestedOutcome) { requestedOutcome = it }
+                DefinitionField("Current behavior", currentBehavior) { currentBehavior = it }
+                DefinitionField("Required behavior", requiredBehavior) { requiredBehavior = it }
+                DefinitionField("Scope (one per line)", scope) { scope = it }
+                DefinitionField("Non-goals (one per line)", nonGoals) { nonGoals = it }
+                DefinitionField("Constraints (one per line)", constraints) { constraints = it }
+                DefinitionField("Acceptance criteria (one per line)", criteria) { criteria = it }
+                DefinitionField("Verification for each criterion (one per line)", verification) { verification = it }
+                if (workItem.type == BUG) {
+                    DefinitionField("Reproduction", reproduction) { reproduction = it }
+                    DefinitionField("Regression criterion", regression) { regression = it }
+                }
+                DefinitionField("Unresolved questions (one per line)", questions) { questions = it }
+                DefinitionField("Proposed split titles (one per line)", splits) { splits = it }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isSubmitting,
+                onClick = {
+                    val descriptions = lines(criteria)
+                    val verifications = lines(verification)
+                    onSubmit(
+                        WorkDefinitionSubmissionRequest(
+                            requestedOutcome = requestedOutcome,
+                            currentBehavior = currentBehavior,
+                            requiredBehavior = requiredBehavior,
+                            scope = lines(scope),
+                            nonGoals = lines(nonGoals),
+                            constraints = lines(constraints),
+                            acceptanceCriteria = descriptions.mapIndexed { index, description ->
+                                AcceptanceCriterionRequest(description, verifications.getOrElse(index) { "" })
+                            },
+                            unresolvedQuestions = lines(questions),
+                            proposedSplitTitles = lines(splits),
+                            reproduction = reproduction,
+                            regressionCriterion = regression,
+                        )
+                    )
+                },
+            ) {
+                if (isSubmitting) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                else Text("Assess definition")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !isSubmitting) { Text("Cancel") } },
+        shape = RoundedCornerShape(8.dp),
+        backgroundColor = OrchardColors.surface,
+    )
+}
+
+@Composable
+private fun DefinitionField(label: String, value: String, onValueChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label, fontSize = 11.sp) },
+        modifier = Modifier.fillMaxWidth(),
+        minLines = 2,
+        maxLines = 4,
+        colors = TextFieldDefaults.outlinedTextFieldColors(
+            focusedBorderColor = OrchardColors.moss,
+            unfocusedBorderColor = OrchardColors.divider,
+            backgroundColor = OrchardColors.white,
+        ),
+    )
 }
 
 @Composable

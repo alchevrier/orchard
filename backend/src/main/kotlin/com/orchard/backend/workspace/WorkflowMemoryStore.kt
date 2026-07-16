@@ -8,6 +8,8 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.time.Instant
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -25,12 +27,15 @@ data class EvidenceContract(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class ResolvedWorkflow(
     val id: String,
     val version: Int,
     val workItemType: Int,
     val steps: List<String>,
     val evidenceContract: EvidenceContract,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val stepDefinitions: List<WorkflowStepDefinition> = emptyList(),
 )
 
 @Serializable
@@ -86,12 +91,15 @@ data class ContextManifest(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class WorkflowRun(
     val runId: Long,
     val createdAt: String,
     val state: String,
     val context: ContextManifest,
     val workflow: ResolvedWorkflow,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val workDefinition: WorkDefinitionManifest? = null,
 )
 
 @Serializable
@@ -119,6 +127,7 @@ data class AttemptRecord(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class TransitionDecision(
     val decisionId: Long,
     val fromState: String,
@@ -127,6 +136,8 @@ data class TransitionDecision(
     val reason: String,
     val evidenceIds: List<Long>,
     val decidedAt: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val signal: String = "",
 )
 
 @Serializable
@@ -149,6 +160,7 @@ data class WorkflowRunView(
     val evidence: List<EvidenceRecord>,
     val attempts: List<AttemptRecord>,
     val decisions: List<TransitionDecision>,
+    val workDefinition: WorkDefinitionManifest? = null,
 )
 
 interface WorkflowMemoryStore {

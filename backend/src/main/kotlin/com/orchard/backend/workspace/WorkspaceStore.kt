@@ -25,6 +25,7 @@ const val MESSAGE_STORAGE_UNAVAILABLE = 10
 const val MESSAGE_REPOSITORY_BINDING = 11
 const val MESSAGE_WORKFLOW_START = 12
 const val MESSAGE_WORKFLOW_EVENT = 13
+const val MESSAGE_WORK_DEFINITION = 14
 
 @Serializable
 data class WorkspaceResource(
@@ -38,6 +39,7 @@ data class WorkspaceSnapshot(
     val resources: Map<String, WorkspaceResource>,
     val repositories: Map<Int, RepositoryView> = emptyMap(),
     val workflowRuns: List<WorkflowRunView> = emptyList(),
+    val workDefinitions: List<WorkDefinitionManifest> = emptyList(),
 )
 
 enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
@@ -51,10 +53,22 @@ enum class WorkflowStartStatus {
     REPOSITORY_UNAVAILABLE,
     REPOSITORY_DIRTY,
     ALREADY_STARTED,
+    WORK_DEFINITION_NOT_READY,
     STORAGE_UNAVAILABLE,
 }
 
 data class WorkflowStartResult(val status: WorkflowStartStatus, val snapshot: WorkspaceSnapshot)
+
+enum class WorkDefinitionStatus {
+    RECORDED,
+    WORK_ITEM_NOT_FOUND,
+    UNSUPPORTED_ENTITY,
+    WORKFLOW_ALREADY_STARTED,
+    INVALID_DEFINITION,
+    STORAGE_UNAVAILABLE,
+}
+
+data class WorkDefinitionResult(val status: WorkDefinitionStatus, val snapshot: WorkspaceSnapshot)
 
 enum class WorkflowMutationStatus {
     RECORDED,
@@ -82,6 +96,7 @@ class WorkspaceStore(
     private val repository: WorkspaceRepository = TransientWorkspaceRepository,
     private val repositoryBindings: RepositoryBindingStore = TransientRepositoryBindingStore,
     private val workflowMemory: WorkflowMemoryStore = TransientWorkflowMemoryStore(),
+    private val definitionStore: WorkDefinitionStore = TransientWorkDefinitionStore(),
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -115,11 +130,14 @@ class WorkspaceStore(
     private var workflowMessage = ""
     private val workflowRuns = mutableListOf<WorkflowRun>()
     private val workflowEvents = mutableListOf<WorkflowEvent>()
+    private val workDefinitions = mutableListOf<WorkDefinitionManifest>()
     private var nextRunId = 1L
     private var nextEventId = 1L
+    private var nextDefinitionId = 1L
 
     init {
         restore(repository.load())
+        restoreDefinitions(definitionStore.load())
         restoreRuns(workflowMemory.loadRuns())
         restoreEvents(workflowMemory.loadEvents())
     }
@@ -230,6 +248,55 @@ class WorkspaceStore(
     }
 
     @Synchronized
+    fun submitWorkDefinition(workItemId: Int, submission: WorkDefinitionSubmission): WorkDefinitionResult {
+        val workItem = committedEntity(workItemId)
+            ?: return definitionFailure(WorkDefinitionStatus.WORK_ITEM_NOT_FOUND, "The selected work item does not exist.")
+        if (workItem.type != ENTITY_TASK && workItem.type != ENTITY_BUG) return definitionFailure(
+            WorkDefinitionStatus.UNSUPPORTED_ENTITY,
+            "Only tasks and bugs have a work-definition workflow.",
+        )
+        if (workflowRuns.any { it.context.workItemId == workItemId }) return definitionFailure(
+            WorkDefinitionStatus.WORKFLOW_ALREADY_STARTED,
+            "The work definition cannot change after delivery has started.",
+        )
+        val definition = normalizeDefinition(submission)
+        if (!validDefinitionSize(definition)) return definitionFailure(
+            WorkDefinitionStatus.INVALID_DEFINITION,
+            "The work definition exceeds the supported size or contains an empty entry.",
+        )
+        val workflow = DefaultSystemWorkflow.resolve(workItem.type)
+        check(
+            WorkflowStepEngine.canStart(workflow.stepDefinitions.single(), setOf(FACT_WORK_ITEM_EXISTS))
+        ) { "The work-definition step start condition is inconsistent with workspace admission" }
+        val assessment = DefaultSystemWorkflow.assess(workItem.type, definition)
+        val manifest = newWorkDefinitionManifest(
+            definitionId = nextDefinitionId,
+            revision = workDefinitions.count { it.workItemId == workItemId } + 1,
+            workItemId = workItemId,
+            workflow = workflow,
+            definition = definition,
+            assessment = assessment,
+        )
+        try {
+            definitionStore.append(manifest)
+        } catch (_: Exception) {
+            return definitionFailure(
+                WorkDefinitionStatus.STORAGE_UNAVAILABLE,
+                "The work definition could not be saved.",
+            )
+        }
+        workDefinitions += manifest
+        nextDefinitionId++
+        workflowMessage = when (assessment.status) {
+            DEFINITION_READY -> "The work definition is ready for delivery admission."
+            DEFINITION_NEEDS_CLARIFICATION -> "The work definition has unresolved questions."
+            DEFINITION_NEEDS_SPLIT -> "The requested outcomes should be split into separate work items."
+            else -> "The work definition needs more observable facts before delivery can start."
+        }
+        return WorkDefinitionResult(WorkDefinitionStatus.RECORDED, snapshot(MESSAGE_WORK_DEFINITION))
+    }
+
+    @Synchronized
     fun startWorkflow(workItemId: Int): WorkflowStartResult {
         val workItem = committedEntity(workItemId)
         if (workItem == null) return workflowFailure(
@@ -243,6 +310,11 @@ class WorkspaceStore(
         if (workflowRuns.any { it.context.workItemId == workItemId }) return workflowFailure(
             WorkflowStartStatus.ALREADY_STARTED,
             "This work item already has an active workflow run.",
+        )
+        val workDefinition = workDefinitions.lastOrNull { it.workItemId == workItemId }
+        if (workDefinition?.assessment?.status != DEFINITION_READY) return workflowFailure(
+            WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
+            "Complete the system work-definition workflow before starting delivery.",
         )
 
         val story = committedEntity(workItem.parentId, ENTITY_STORY)
@@ -261,7 +333,14 @@ class WorkspaceStore(
             "Commit or discard existing repository changes before pinning workflow context.",
         )
 
-        val workflow = DefaultDeliveryWorkflow.resolve(workItem.type)
+        val workflow = DefaultDeliveryWorkflow.resolve(workItem.type, workDefinition)
+        val deliveryStep = workflow.stepDefinitions.single()
+        check(
+            WorkflowStepEngine.canStart(
+                deliveryStep,
+                setOf(FACT_WORK_DEFINITION_READY, FACT_REPOSITORY_AVAILABLE, FACT_REPOSITORY_CLEAN),
+            )
+        ) { "The delivery step start condition is inconsistent with workflow admission" }
         val recalls = try {
             workflowMemory.recallEpisodes(
                 EpisodeQuery(project.id, workItem.type, workflow.id, workItem.title, workItem.content)
@@ -286,12 +365,25 @@ class WorkspaceStore(
             recalledEpisodes = recalls,
             hash = "",
         )
+        check(
+            WorkflowStepEngine.hasRequiredContext(
+                deliveryStep,
+                setOf(
+                    CONTEXT_TICKET,
+                    CONTEXT_SYSTEM_POLICY,
+                    CONTEXT_WORK_DEFINITION,
+                    CONTEXT_REPOSITORY_REVISION,
+                    CONTEXT_EPISODIC_MEMORY,
+                ),
+            )
+        ) { "The delivery context does not satisfy its step contract" }
         val run = WorkflowRun(
             runId = nextRunId,
             createdAt = java.time.Instant.now().toString(),
             state = RUN_STATE_CONTEXT_READY,
             context = unsignedManifest.copy(hash = manifestHash(unsignedManifest)),
             workflow = workflow,
+            workDefinition = workDefinition,
         )
         try {
             workflowMemory.appendRun(run)
@@ -355,7 +447,8 @@ class WorkspaceStore(
             "The workflow run is already closed.",
         )
         val kind = submission.kind.trim().uppercase()
-        val requirement = run.workflow.evidenceContract.requirements.firstOrNull { it.kind == kind }
+        val step = deliveryStep(run)
+        val requirement = step.evidenceContract.requirements.firstOrNull { it.kind == kind }
             ?: return workflowMutationFailure(
                 WorkflowMutationStatus.INVALID_RECORD,
                 "Evidence kind $kind is not required by this workflow.",
@@ -400,31 +493,30 @@ class WorkspaceStore(
             .filter { it.revision == revision.commitHash }
             .groupBy { it.kind }
             .mapValues { (_, records) -> records.maxBy { it.evidenceId } }
-        val satisfied = run.workflow.evidenceContract.requirements.mapNotNull { required ->
+        val satisfied = step.evidenceContract.requirements.mapNotNull { required ->
             evidenceForRevision[required.kind]?.takeIf { it.passed }
         }
-        val completed = satisfied.size == run.workflow.evidenceContract.requirements.size
-        val decision = when {
-            completed -> TransitionDecision(
-                decisionId = nextEventId,
-                fromState = currentState,
-                toState = RUN_STATE_DONE,
-                accepted = true,
-                reason = "All ${satisfied.size} evidence gates passed for revision ${revision.commitHash}.",
-                evidenceIds = satisfied.map { it.evidenceId }.sorted(),
-                decidedAt = now,
-            )
-            !passed -> TransitionDecision(
-                decisionId = nextEventId,
-                fromState = currentState,
-                toState = RUN_STATE_DONE,
-                accepted = false,
-                reason = "${requirement.kind} evidence failed deterministic validation.",
-                evidenceIds = listOf(evidence.evidenceId),
-                decidedAt = now,
-            )
-            else -> null
+        val completed = satisfied.size == step.evidenceContract.requirements.size
+        val signalName = when {
+            completed -> SIGNAL_COMPLETED
+            passed -> SIGNAL_EVIDENCE_ACCEPTED
+            else -> SIGNAL_EVIDENCE_REJECTED
         }
+        val signal = WorkflowStepEngine.resolveSignal(step, signalName)
+        val decision = TransitionDecision(
+            decisionId = nextEventId,
+            fromState = currentState,
+            toState = signal.target,
+            accepted = signal.accepted,
+            reason = when (signalName) {
+                SIGNAL_COMPLETED -> "All ${satisfied.size} evidence gates passed for revision ${revision.commitHash}."
+                SIGNAL_EVIDENCE_ACCEPTED -> "${requirement.kind} evidence passed deterministic validation."
+                else -> "${requirement.kind} evidence failed deterministic validation."
+            },
+            evidenceIds = if (completed) satisfied.map { it.evidenceId }.sorted() else listOf(evidence.evidenceId),
+            decidedAt = now,
+            signal = signal.signal,
+        )
         val episode = if (completed) completionEpisode(run, revision.commitHash, satisfied, now) else null
         val event = WorkflowEvent(nextEventId, runId, evidence, decision = decision, producedEpisode = episode)
         if (!appendWorkflowEvent(event)) return workflowMutationFailure(
@@ -433,7 +525,7 @@ class WorkspaceStore(
         )
         workflowMessage = when {
             completed -> "All evidence gates passed. The work item is done and its work episode is available for future recall."
-            passed -> "${requirement.kind} evidence passed. ${run.workflow.evidenceContract.requirements.size - satisfied.size} gate${if (run.workflow.evidenceContract.requirements.size - satisfied.size == 1) "" else "s"} remain."
+            passed -> "${requirement.kind} evidence passed. ${step.evidenceContract.requirements.size - satisfied.size} gate${if (step.evidenceContract.requirements.size - satisfied.size == 1) "" else "s"} remain."
             else -> "${requirement.kind} evidence failed. The workflow remains blocked until passing evidence is submitted."
         }
         return WorkflowMutationResult(WorkflowMutationStatus.RECORDED, snapshot(MESSAGE_WORKFLOW_EVENT))
@@ -449,17 +541,19 @@ class WorkspaceStore(
             "The workflow run is already closed.",
         )
         val now = java.time.Instant.now().toString()
+        val signal = WorkflowStepEngine.resolveSignal(deliveryStep(run), SIGNAL_CANCELLED)
         val event = WorkflowEvent(
             eventId = nextEventId,
             runId = run.runId,
             decision = TransitionDecision(
                 decisionId = nextEventId,
                 fromState = currentState,
-                toState = RUN_STATE_CANCELLED,
-                accepted = true,
+                toState = signal.target,
+                accepted = signal.accepted,
                 reason = "The workflow run was cancelled by an explicit workspace command.",
                 evidenceIds = emptyList(),
                 decidedAt = now,
+                signal = signal.signal,
             ),
         )
         if (!appendWorkflowEvent(event)) return workflowMutationFailure(
@@ -495,7 +589,16 @@ class WorkspaceStore(
         val projectIds = entities.take(committedEntityCount)
             .filter { it.type == ENTITY_PROJECT }
             .mapTo(linkedSetOf()) { it.id }
-        return WorkspaceSnapshot(resources, repositoryBindings.views(projectIds), workflowRuns.map(::runView))
+        val latestDefinitions = workDefinitions.groupBy { it.workItemId }
+            .values
+            .map { revisions -> revisions.maxBy { it.revision } }
+            .sortedBy { it.workItemId }
+        return WorkspaceSnapshot(
+            resources,
+            repositoryBindings.views(projectIds),
+            workflowRuns.map(::runView),
+            latestDefinitions,
+        )
     }
 
     private fun appendEntity(entityType: Int, parentId: Int, title: String, content: String, workflowId: Long): Boolean {
@@ -556,8 +659,15 @@ class WorkspaceStore(
                 run.context.repository.projectId == project.id &&
                     run.context.workflowId == run.workflow.id &&
                     run.context.workflowVersion == run.workflow.version &&
-                    run.workflow == DefaultDeliveryWorkflow.resolve(workItem.type)
+                    DefaultDeliveryWorkflow.isCompatible(run.workflow, workItem.type, run.workDefinition)
             ) { "Workflow run ${run.runId} references an invalid workflow context" }
+            run.workDefinition?.let { definition ->
+                require(
+                    definition.assessment.status == DEFINITION_READY &&
+                        definition.workItemId == workItem.id &&
+                        workDefinitions.any { it.definitionId == definition.definitionId && it == definition }
+                ) { "Workflow run ${run.runId} references an invalid work definition" }
+            }
             require(workflowRuns.none { it.context.workItemId == run.context.workItemId }) {
                 "Work item ${run.context.workItemId} has multiple active workflow runs"
             }
@@ -566,11 +676,41 @@ class WorkspaceStore(
         }
     }
 
+    private fun restoreDefinitions(restoredDefinitions: List<WorkDefinitionManifest>) {
+        restoredDefinitions.forEach { manifest ->
+            require(manifest.definitionId == nextDefinitionId) {
+                "Expected work definition ID $nextDefinitionId, found ${manifest.definitionId}"
+            }
+            val workItem = committedEntity(manifest.workItemId)
+            require(workItem != null && workItem.type == manifest.systemWorkflow.workItemType) {
+                "Work definition ${manifest.definitionId} references an invalid work item"
+            }
+            val expectedRevision = workDefinitions.count { it.workItemId == manifest.workItemId } + 1
+            require(manifest.revision == expectedRevision) {
+                "Expected work definition revision $expectedRevision for item ${manifest.workItemId}"
+            }
+            require(DefaultSystemWorkflow.isCompatible(manifest.systemWorkflow)) {
+                "Work definition ${manifest.definitionId} references an invalid system workflow"
+            }
+            require(manifest.assessment == DefaultSystemWorkflow.assess(workItem.type, manifest.definition)) {
+                "Work definition ${manifest.definitionId} has an invalid assessment"
+            }
+            workDefinitions += manifest
+            nextDefinitionId++
+        }
+    }
+
     private fun restoreEvents(restoredEvents: List<WorkflowEvent>) {
         restoredEvents.forEach { event ->
             require(event.eventId == nextEventId) { "Expected workflow event ID $nextEventId, found ${event.eventId}" }
             val run = workflowRuns.firstOrNull { it.runId == event.runId }
             require(run != null) { "Workflow event ${event.eventId} references an invalid run" }
+            event.decision?.takeIf { it.signal.isNotBlank() }?.let { decision ->
+                val declared = WorkflowStepEngine.resolveSignal(deliveryStep(run), decision.signal)
+                require(declared.target == decision.toState && declared.accepted == decision.accepted) {
+                    "Workflow event ${event.eventId} contains an invalid transition signal"
+                }
+            }
             event.producedEpisode?.let { episode ->
                 require(
                     episode.projectId == run.context.projectId &&
@@ -625,11 +765,19 @@ class WorkspaceStore(
 
     private fun runState(runId: Long): String {
         val events = eventsFor(runId)
-        val accepted = events.mapNotNull { it.decision }.lastOrNull { it.accepted }
-        if (accepted != null) return accepted.toState
-        if (events.mapNotNull { it.decision }.lastOrNull()?.accepted == false) return RUN_STATE_EVIDENCE_BLOCKED
+        val latestDecision = events.mapNotNull { it.decision }.lastOrNull()
+        if (latestDecision != null) {
+            if (!latestDecision.accepted && latestDecision.toState == RUN_STATE_DONE) {
+                return RUN_STATE_EVIDENCE_BLOCKED
+            }
+            return latestDecision.toState
+        }
         return if (events.any { it.evidence != null }) RUN_STATE_EVIDENCE_PENDING else RUN_STATE_CONTEXT_READY
     }
+
+    private fun deliveryStep(run: WorkflowRun): WorkflowStepDefinition =
+        run.workflow.stepDefinitions.singleOrNull()
+            ?: DefaultDeliveryWorkflow.resolve(run.context.workItemType, run.workDefinition).stepDefinitions.single()
 
     private fun runView(run: WorkflowRun): WorkflowRunView {
         val events = eventsFor(run.runId)
@@ -642,12 +790,57 @@ class WorkspaceStore(
             evidence = events.mapNotNull { it.evidence },
             attempts = events.mapNotNull { it.attempt },
             decisions = events.mapNotNull { it.decision },
+            workDefinition = run.workDefinition,
         )
     }
 
     private fun workflowFailure(status: WorkflowStartStatus, message: String): WorkflowStartResult {
         workflowMessage = message
         return WorkflowStartResult(status, snapshot(MESSAGE_WORKFLOW_START))
+    }
+
+    private fun definitionFailure(status: WorkDefinitionStatus, message: String): WorkDefinitionResult {
+        workflowMessage = message
+        return WorkDefinitionResult(status, snapshot(MESSAGE_WORK_DEFINITION))
+    }
+
+    private fun normalizeDefinition(submission: WorkDefinitionSubmission): WorkDefinitionSubmission = submission.copy(
+        requestedOutcome = submission.requestedOutcome.trim(),
+        currentBehavior = submission.currentBehavior.trim(),
+        requiredBehavior = submission.requiredBehavior.trim(),
+        scope = submission.scope.map(String::trim),
+        nonGoals = submission.nonGoals.map(String::trim),
+        constraints = submission.constraints.map(String::trim),
+        acceptanceCriteria = submission.acceptanceCriteria.map {
+            it.copy(description = it.description.trim(), verification = it.verification.trim())
+        },
+        unresolvedQuestions = submission.unresolvedQuestions.map(String::trim),
+        proposedSplitTitles = submission.proposedSplitTitles.map(String::trim),
+        reproduction = submission.reproduction.trim(),
+        regressionCriterion = submission.regressionCriterion.trim(),
+    )
+
+    private fun validDefinitionSize(definition: WorkDefinitionSubmission): Boolean {
+        val collections = listOf(
+            definition.scope,
+            definition.nonGoals,
+            definition.constraints,
+            definition.unresolvedQuestions,
+            definition.proposedSplitTitles,
+        )
+        val scalarValues = listOf(
+            definition.requestedOutcome,
+            definition.currentBehavior,
+            definition.requiredBehavior,
+            definition.reproduction,
+            definition.regressionCriterion,
+        )
+        return collections.all { it.size <= MAX_DEFINITION_ENTRIES && it.all { value -> value.length <= MAX_DEFINITION_TEXT } } &&
+            scalarValues.all { it.length <= MAX_DEFINITION_TEXT } &&
+            definition.acceptanceCriteria.size <= MAX_DEFINITION_ENTRIES &&
+            definition.acceptanceCriteria.all {
+                it.description.length <= MAX_DEFINITION_TEXT && it.verification.length <= MAX_DEFINITION_TEXT
+            }
     }
 
     private fun workflowMutationFailure(
@@ -725,6 +918,7 @@ class WorkspaceStore(
         MESSAGE_REPOSITORY_BINDING -> repositoryMessage
         MESSAGE_WORKFLOW_START -> workflowMessage
         MESSAGE_WORKFLOW_EVENT -> workflowMessage
+        MESSAGE_WORK_DEFINITION -> workflowMessage
         else -> "Describe a project, epic, story, task, or bug to the Architect."
     }
 
@@ -752,6 +946,8 @@ class WorkspaceStore(
         const val MAX_EVIDENCE_SUMMARY = 4096
         const val MAX_PRODUCER_LENGTH = 128
         const val MAX_COMMAND_LENGTH = 2048
+        const val MAX_DEFINITION_ENTRIES = 16
+        const val MAX_DEFINITION_TEXT = 4096
         val GIT_HASH = Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
         val SHA256 = Regex("[0-9a-fA-F]{64}")
         val TERMINAL_RUN_STATES = setOf(RUN_STATE_DONE, RUN_STATE_CANCELLED)

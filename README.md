@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 4 complete - Governed Workflow Memory. Tasks and bugs now move from immutable admission through typed evidence and deterministic gate decisions to durable completion episodes that future work can recall.
+> **Project status:** Milestone 5 complete - System Workflows. Every new Task or Bug must now produce a versioned, unambiguous Work Definition before its delivery workflow can start.
 
 ## Milestone 1: Local Architect MVP
 
@@ -109,6 +109,33 @@ Milestone 4 boundaries:
 - Cancellation closes a run without manufacturing a completion episode.
 - Approved project practices and repository instructions are not yet resolved into context manifests.
 
+## Milestone 5: System Workflows
+
+System workflows govern how Orchard work becomes eligible for delivery. A Task or Bug no longer starts merely because it exists and has a clean repository. Its latest definition revision must be `READY`, and the accepted manifest is embedded in the resulting delivery run.
+
+Delivered and verified:
+
+- Versioned built-in Task and Bug definition workflows with explicit phases.
+- One generic step contract for start conditions, recalled context, allowed executors, evidence, and transition signals.
+- Structured definitions for requested outcome, current and required behavior, bounded scope, non-goals, constraints, and acceptance criteria with verification methods.
+- Bug-specific reproduction and regression obligations.
+- Deterministic `NEEDS_INVESTIGATION`, `NEEDS_CLARIFICATION`, `NEEDS_SPLIT`, and `READY` assessments.
+- Append-only, checksummed `work-definitions.jsonl` authority with monotonic definition IDs and per-item revisions.
+- Latest-revision semantics: a later ambiguous revision blocks delivery even if an earlier revision was ready.
+- Delivery admission rejects missing or non-ready definitions and closes definition revision after delivery starts.
+- New delivery runs embed the exact accepted definition manifest and hash.
+- Definition-derived `ACCEPTANCE` evidence gates augment the source, build, test, and Bug regression obligations.
+- Every evidence result and cancellation emits a typed transition signal selected from the pinned step policy.
+- Desktop definition editor and card-level readiness projection; Start Workflow is offered only at `READY`.
+- Real-Git restart coverage proves definitions, pinned runs, acceptance gates, completion episodes, and recall recover together.
+
+Milestone 5 boundaries:
+
+- Humans currently supply and revise definitions through the desktop or typed API.
+- Orchard validates explicit structure and unresolved questions; it does not claim to infer every latent ambiguity from prose.
+- `NEEDS_SPLIT` records proposed child titles but does not yet materialize child work items.
+- Investigation agents may later gather logs, diagnostics, and reproductions, but their outputs remain observations until accepted through a system workflow.
+
 ## Architecture
 
 ```mermaid
@@ -124,6 +151,8 @@ flowchart LR
     RB -->|Read-only Git inspection| GR[Local Git repository]
     WS --> WM[Workflow runs and work episodes]
     WS --> WE[Attempts, evidence, and decisions]
+    WS --> WD[System workflows and work definitions]
+    WD -->|READY manifest| WM
     WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI
 ```
@@ -138,6 +167,7 @@ The backend exposes:
 - `GET http://127.0.0.1:8085/api/workspace`
 - `POST http://127.0.0.1:8086/api/architect/chat`
 - `POST http://127.0.0.1:8085/api/work-items/{id}/runs`
+- `POST http://127.0.0.1:8085/api/work-items/{id}/definitions`
 - `POST http://127.0.0.1:8085/api/workflow-runs/{id}/attempts`
 - `POST http://127.0.0.1:8085/api/workflow-runs/{id}/evidence`
 - `POST http://127.0.0.1:8085/api/workflow-runs/{id}/cancel`
@@ -156,6 +186,8 @@ The chat request is `{ "prompt": "..." }` with a 4092-byte UTF-8 limit. Both API
 | Storage | Make human-readable filesystem records authoritative; indexes and embeddings are derived. |
 | Repository | Bind canonical local Git roots by Project ID and inspect them without mutation. |
 | Workflow memory | Pin immutable context, derive lifecycle state from events, and recall scoped completed work. |
+| System workflows | Require a versioned Ready Work Definition and derive acceptance evidence before delivery admission. |
+| Workflow runtime | Execute system and delivery policy through the same start, context, executor, evidence, and signal contract. |
 | Prompts | Keep system prompts as versioned resources. |
 
 See [docs/adrs](docs/adrs) for the decision history and proposed filesystem intelligence, workflow, and model-routing architecture.
@@ -225,11 +257,12 @@ Backend startup creates the directory structure:
 `-- rag-shared/
 ```
 
-These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Project bindings are stored in `repository-bindings.json`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt workspace journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
+These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Project bindings are stored in `repository-bindings.json`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt workspace journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
 
 ## Next Milestones
 
-- Derive project observations, candidate practices, and executable workflows from evidence.
-- Add review approval, cross-run supersession, and repository instruction resolution.
-- Add role-based agent runs and evidence-based model routing.
+- Add an Investigation Center whose agents gather provenance-backed logs, diagnostics, reproductions, and requirement proposals for declared system-workflow phases.
+- Add governed implementation agents only after the accepted Work Definition fixes their behavioral target and evidence obligations.
+- Derive project observations, candidate practices, and executable project workflows from evidence.
+- Add review approval, cross-run supersession, repository instruction resolution, and evidence-based model routing.
 - Implement concrete classifier, chunker, embedder, and vector-index adapters.

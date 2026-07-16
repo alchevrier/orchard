@@ -8,11 +8,14 @@ import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
 import com.orchard.backend.workspace.FileWorkflowMemoryStore
+import com.orchard.backend.workspace.FileWorkDefinitionStore
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
 import com.orchard.backend.workspace.EvidenceSubmission
 import com.orchard.backend.workspace.AttemptSubmission
+import com.orchard.backend.workspace.WorkDefinitionSubmission
+import com.orchard.backend.workspace.WorkDefinitionStatus
 import com.orchard.backend.workspace.WorkspaceStore
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -36,6 +39,7 @@ fun main() {
         FileWorkspaceRepository(OrchardPaths.WORKSPACE_DIR),
         FileRepositoryBindingStore(OrchardPaths.WORKSPACE_DIR),
         FileWorkflowMemoryStore(OrchardPaths.WORKSPACE_DIR),
+        FileWorkDefinitionStore(OrchardPaths.WORKSPACE_DIR),
     )
     val modelProvider = OllamaClient()
     val architect = ArchitectService(workspace, modelProvider)
@@ -88,9 +92,28 @@ fun Application.workspaceApi(workspace: WorkspaceStore) {
                 WorkflowStartStatus.WORK_ITEM_NOT_FOUND -> HttpStatusCode.NotFound
                 WorkflowStartStatus.UNSUPPORTED_ENTITY,
                 WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
-                WorkflowStartStatus.REPOSITORY_DIRTY -> HttpStatusCode.UnprocessableEntity
+                WorkflowStartStatus.REPOSITORY_DIRTY,
+                WorkflowStartStatus.WORK_DEFINITION_NOT_READY -> HttpStatusCode.UnprocessableEntity
                 WorkflowStartStatus.ALREADY_STARTED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result.snapshot)
+        }
+        post("/api/work-items/{workItemId}/definitions") {
+            val workItemId = call.parameters["workItemId"]?.toIntOrNull()
+            val request = runCatching { call.receive<WorkDefinitionSubmission>() }.getOrNull()
+            if (workItemId == null || workItemId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.submitWorkDefinition(workItemId, request)
+            val status = when (result.status) {
+                WorkDefinitionStatus.RECORDED -> HttpStatusCode.Created
+                WorkDefinitionStatus.WORK_ITEM_NOT_FOUND -> HttpStatusCode.NotFound
+                WorkDefinitionStatus.WORKFLOW_ALREADY_STARTED -> HttpStatusCode.Conflict
+                WorkDefinitionStatus.UNSUPPORTED_ENTITY,
+                WorkDefinitionStatus.INVALID_DEFINITION -> HttpStatusCode.UnprocessableEntity
+                WorkDefinitionStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
             call.respond(status, result.snapshot)
         }

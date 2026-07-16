@@ -10,6 +10,7 @@ import com.orchard.backend.workspace.ENTITY_TASK
 import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.FileWorkflowMemoryStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
+import com.orchard.backend.workspace.FileWorkDefinitionStore
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkEpisode
@@ -20,6 +21,9 @@ import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_BLOCKED
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceRepository
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.WorkDefinitionSubmission
+import com.orchard.backend.workspace.AcceptanceCriterion
+import com.orchard.backend.workspace.DEFINITION_READY
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -180,6 +184,7 @@ class WorkspaceRepositoryTest {
         val pinnedRevision = commandOutput(repositoryDirectory, "git", "rev-parse", "HEAD")
 
         val workflowMemory = FileWorkflowMemoryStore(workspaceDirectory)
+        val definitionStore = FileWorkDefinitionStore(workspaceDirectory)
         workflowMemory.appendEpisode(
             WorkEpisode(
                 episodeId = 1,
@@ -212,6 +217,7 @@ class WorkspaceRepositoryTest {
             FileWorkspaceRepository(workspaceDirectory),
             FileRepositoryBindingStore(workspaceDirectory),
             workflowMemory,
+            definitionStore,
         )
         store.beginBatch()
         assertTrue(store.applyIntent(intent(ENTITY_PROJECT, "Orchard")))
@@ -220,6 +226,7 @@ class WorkspaceRepositoryTest {
         assertTrue(store.applyIntent(intent(ENTITY_TASK, "Fix Gradle JDK target", projectId = 1, epicId = 2, storyId = 3)))
         store.commitBatch()
         assertEquals(RepositoryBindStatus.BOUND, store.bindRepository(1, repositoryDirectory.toString()).status)
+        assertEquals(DEFINITION_READY, store.submitWorkDefinition(4, readyDefinition()).snapshot.workDefinitions.single().assessment.status)
 
         val started = store.startWorkflow(4)
 
@@ -227,7 +234,11 @@ class WorkspaceRepositoryTest {
         val run = started.snapshot.workflowRuns.single()
         assertEquals(pinnedRevision, run.context.repository.commitHash)
         assertEquals(listOf(1L), run.context.recalledEpisodes.map { it.episodeId })
-        assertEquals(3, run.workflow.evidenceContract.requirements.size)
+        assertEquals(4, run.workflow.evidenceContract.requirements.size)
+        assertTrue(run.workflow.evidenceContract.requirements.any {
+            it.kind == "ACCEPTANCE" && "./gradlew build" in it.description
+        })
+        assertEquals(started.snapshot.workDefinitions.single().hash, run.workDefinition?.hash)
         assertTrue("status=1" in started.snapshot.resources.getValue("entity-4").action)
 
         Files.writeString(repositoryDirectory.resolve("README.md"), "later revision\n")
@@ -284,7 +295,7 @@ class WorkspaceRepositoryTest {
                 producer = "test-fixture",
             ),
         )
-        val completed = store.submitEvidence(
+        store.submitEvidence(
             1,
             EvidenceSubmission(
                 kind = "TEST",
@@ -296,12 +307,25 @@ class WorkspaceRepositoryTest {
                 producer = "test-fixture",
             ),
         )
+        val completed = store.submitEvidence(
+            1,
+            EvidenceSubmission(
+                kind = "ACCEPTANCE",
+                revision = completedRevision,
+                command = "./gradlew build",
+                exitCode = 0,
+                outputHash = "f".repeat(64),
+                summary = "The work-definition acceptance criterion passed.",
+                producer = "test-fixture",
+            ),
+        )
         assertEquals(RUN_STATE_DONE, completed.snapshot.workflowRuns.single().state)
         assertTrue("status=3" in completed.snapshot.resources.getValue("entity-4").action)
 
         store.beginBatch()
         assertTrue(store.applyIntent(intent(ENTITY_TASK, "Fix Gradle JDK target again", projectId = 1, epicId = 2, storyId = 3)))
         store.commitBatch()
+        store.submitWorkDefinition(5, readyDefinition())
         val recalled = store.startWorkflow(5).snapshot.workflowRuns.first { it.context.workItemId == 5 }
         assertTrue(recalled.context.recalledEpisodes.any { recall ->
             recall.failedApproaches.any { "Kotlin still targeted" in it }
@@ -311,14 +335,20 @@ class WorkspaceRepositoryTest {
             FileWorkspaceRepository(workspaceDirectory),
             FileRepositoryBindingStore(workspaceDirectory),
             FileWorkflowMemoryStore(workspaceDirectory),
+            FileWorkDefinitionStore(workspaceDirectory),
         ).snapshot(0)
         assertEquals(2, recovered.workflowRuns.size)
+        assertEquals(2, recovered.workDefinitions.size)
         assertEquals(RUN_STATE_DONE, recovered.workflowRuns.first { it.runId == 1L }.state)
         assertEquals(pinnedRevision, recovered.workflowRuns.first { it.runId == 1L }.context.repository.commitHash)
         assertTrue("status=3" in recovered.resources.getValue("entity-4").action)
         assertTrue(recovered.workflowRuns.first { it.runId == 2L }.context.recalledEpisodes.any { recall ->
             recall.failedApproaches.any { "Kotlin still targeted" in it }
         })
+        assertEquals(
+            recovered.workDefinitions.first { it.workItemId == 5 }.hash,
+            recovered.workflowRuns.first { it.runId == 2L }.workDefinition?.hash,
+        )
     }
 
     private fun intent(
@@ -335,6 +365,18 @@ class WorkspaceRepositoryTest {
         epicId = epicId,
         storyId = storyId,
         title = title,
+    )
+
+    private fun readyDefinition() = WorkDefinitionSubmission(
+        requestedOutcome = "Build succeeds on the supported JDK",
+        currentBehavior = "Gradle targets an unsupported bytecode version",
+        requiredBehavior = "Kotlin and Java compile to the supported target",
+        scope = listOf("Gradle JVM target configuration"),
+        nonGoals = listOf("Changing application behavior"),
+        constraints = listOf("Keep the current JDK toolchain"),
+        acceptanceCriteria = listOf(
+            AcceptanceCriterion("The complete build succeeds", "Run ./gradlew build")
+        ),
     )
 
     private fun withTempDirectory(block: (Path) -> Unit) {
