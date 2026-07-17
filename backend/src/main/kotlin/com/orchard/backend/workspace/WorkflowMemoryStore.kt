@@ -49,6 +49,15 @@ data class RepositoryHead(
 )
 
 @Serializable
+data class DispatchWorkspaceReservation(
+    val mode: String,
+    val owner: String,
+    val path: String,
+    val branch: String,
+    val baseRevision: String,
+)
+
+@Serializable
 data class WorkEpisode(
     val episodeId: Long,
     val projectId: Int,
@@ -75,6 +84,7 @@ data class EpisodeRecall(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class ContextManifest(
     val projectId: Int,
     val epicId: Int,
@@ -88,6 +98,10 @@ data class ContextManifest(
     val repository: RepositoryHead,
     val recalledEpisodes: List<EpisodeRecall>,
     val hash: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val circuitDispatchId: Long? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val workspaceReservation: DispatchWorkspaceReservation? = null,
 )
 
 @Serializable

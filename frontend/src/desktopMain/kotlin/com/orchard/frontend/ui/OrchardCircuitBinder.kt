@@ -93,6 +93,7 @@ import com.orchard.frontend.network.StagedPlanStageSubmissionRequest
 import com.orchard.frontend.network.StageExecutionWorkflowDefinitionResponse
 import com.orchard.frontend.network.CircuitProposalViewResponse
 import com.orchard.frontend.network.CircuitProposalReferenceRequest
+import com.orchard.frontend.network.CircuitDispatchViewResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
@@ -136,6 +137,7 @@ private data class WorkspaceSnapshot(
     val stagedPlans: List<StagedDeliveryPlanViewResponse>,
     val circuitProposals: List<CircuitProposalViewResponse>,
     val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse>,
+    val circuitDispatches: List<CircuitDispatchViewResponse>,
     val modelProfiles: List<ModelCapabilityProfileResponse>,
 )
 
@@ -529,6 +531,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             response.stagedPlans,
             response.circuitProposals,
             response.stageWorkflows,
+            response.circuitDispatches,
             response.modelProfiles,
         )
     }
@@ -699,7 +702,7 @@ private fun WorkspaceBoard(
             verticalArrangement = Arrangement.spacedBy(22.dp),
         ) {
             snapshot.stagedPlans.firstOrNull { it.plan.scopeId == epicId }?.let { plan ->
-                StagedCircuitView(plan, snapshot.entities)
+                StagedCircuitView(plan, snapshot.entities, snapshot.circuitDispatches)
             }
             when {
                 project == null -> EmptyWorkspace("Create a project from the Architect panel.")
@@ -713,6 +716,7 @@ private fun WorkspaceBoard(
                         workDefinitions = snapshot.workDefinitions,
                         definitionProposals = snapshot.definitionProposals,
                         stagedPlan = snapshot.stagedPlans.firstOrNull { it.plan.scopeId == story.id },
+                        circuitDispatches = snapshot.circuitDispatches,
                         startingWorkItemId = startingWorkItemId,
                         onStartWorkflow = onStartWorkflow,
                         cancellingRunId = cancellingRunId,
@@ -814,6 +818,7 @@ private data class PlanNodeDraft(
 private fun StagedCircuitView(
     view: StagedDeliveryPlanViewResponse,
     entities: List<WorkspaceEntity>,
+    dispatches: List<CircuitDispatchViewResponse>,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -846,6 +851,9 @@ private fun StagedCircuitView(
                     )
                     stage.nodes.forEach { node ->
                         val nodeView = view.nodes.first { it.node.nodeId == node.nodeId }
+                        val dispatch = dispatches.lastOrNull {
+                            it.dispatch.planId == view.plan.planId && it.dispatch.nodeId == node.nodeId
+                        }
                         val title = entities.firstOrNull { it.id == node.workItemId }?.title ?: "Item ${node.workItemId}"
                         val stateColor = when (nodeView.state) {
                             "ELIGIBLE", "DONE" -> OrchardColors.moss
@@ -861,6 +869,14 @@ private fun StagedCircuitView(
                                 Text(nodeView.state.replace('_', ' '), fontFamily = FontFamily.Monospace, fontSize = 8.sp, color = stateColor)
                             }
                             Text(title, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = OrchardColors.ink)
+                            dispatch?.let {
+                                Text(
+                                    "Q${it.dispatch.priority} · ${if (it.dispatch.integrationOwner) "INTEGRATION OWNER" else it.state}",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 8.sp,
+                                    color = OrchardColors.muted,
+                                )
+                            }
                             if (nodeView.blockedReason.isNotBlank()) {
                                 Text(nodeView.blockedReason, fontSize = 9.sp, color = OrchardColors.muted)
                             }
@@ -1148,6 +1164,7 @@ private fun StoryBoard(
     workDefinitions: List<WorkDefinitionResponse>,
     definitionProposals: List<DefinitionProposalViewResponse>,
     stagedPlan: StagedDeliveryPlanViewResponse?,
+    circuitDispatches: List<CircuitDispatchViewResponse>,
     startingWorkItemId: Int,
     onStartWorkflow: (Int) -> Unit,
     cancellingRunId: Long,
@@ -1169,7 +1186,7 @@ private fun StoryBoard(
             }
         }
         stagedPlan?.let { plan ->
-            StagedCircuitView(plan, listOf(story) + tickets)
+            StagedCircuitView(plan, listOf(story) + tickets, circuitDispatches)
             Spacer(Modifier.height(14.dp))
         }
         Spacer(Modifier.height(16.dp))
@@ -1193,6 +1210,7 @@ private fun StoryBoard(
                             onDefineWork = { onDefineWork(ticket.id) },
                             isAnalyzing = ticket.id in analyzingWorkItemIds,
                             onAnalyzeWork = { onAnalyzeWork(ticket.id) },
+                            circuitManaged = stagedPlan?.nodes?.any { it.node.workItemId == ticket.id } == true,
                         )
                     }
                     if (statusTickets.isEmpty()) {
@@ -1217,6 +1235,7 @@ private fun TicketCard(
     onDefineWork: () -> Unit,
     isAnalyzing: Boolean,
     onAnalyzeWork: () -> Unit,
+    circuitManaged: Boolean,
 ) {
     Surface(
         color = OrchardColors.white,
@@ -1303,7 +1322,7 @@ private fun TicketCard(
                     Spacer(Modifier.width(4.dp))
                     Text(if (workDefinition == null) "Define work" else "Revise definition", fontSize = 11.sp, color = definitionColor)
                 }
-                if (definitionState == "READY") {
+                if (definitionState == "READY" && !circuitManaged) {
                 TextButton(
                     onClick = onStartWorkflow,
                     enabled = !isStarting,
@@ -1335,6 +1354,16 @@ private fun TicketCard(
                     fontSize = 9.sp,
                     color = stateColor,
                 )
+                workflowRun.context.workspaceReservation?.let { reservation ->
+                    Text(
+                        "${reservation.mode} · ${reservation.branch}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 8.sp,
+                        color = OrchardColors.muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Text(
                     "$passedGates/${workflowRun.workflow.evidenceContract.requirements.size} evidence gates passed",
                     fontSize = 10.sp,
@@ -1374,6 +1403,22 @@ private fun TicketCard(
                         }
                         Spacer(Modifier.width(4.dp))
                         Text(if (isCancelling) "Cancelling" else "Cancel workflow", fontSize = 10.sp, color = OrchardColors.clay)
+                    }
+                }
+                if (workflowRun.state == "CANCELLED" && circuitManaged) {
+                    TextButton(
+                        onClick = onStartWorkflow,
+                        enabled = !isStarting,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 3.dp),
+                    ) {
+                        if (isStarting) {
+                            CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp, color = OrchardColors.moss)
+                        } else {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(15.dp))
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (isStarting) "Allocating replacement" else "Retry workflow", fontSize = 10.sp, color = OrchardColors.moss)
                     }
                 }
             }

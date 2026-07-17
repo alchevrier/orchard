@@ -25,6 +25,7 @@ import com.orchard.backend.workspace.FileDefinitionCollaborationStore
 import com.orchard.backend.workspace.FileModelExperienceStore
 import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
 import com.orchard.backend.workspace.FileCircuitProposalStore
+import com.orchard.backend.workspace.FileCircuitDispatchStore
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
@@ -53,6 +54,15 @@ import io.ktor.server.routing.routing
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.util.logging.Level
+import java.util.logging.Logger
 import io.ktor.utils.io.readRemaining
 import io.ktor.utils.io.core.readText
 import io.ktor.utils.io.core.remaining
@@ -68,6 +78,7 @@ fun main() {
         FileModelExperienceStore(OrchardPaths.WORKSPACE_DIR),
         FileStagedDeliveryPlanStore(OrchardPaths.WORKSPACE_DIR),
         FileCircuitProposalStore(OrchardPaths.WORKSPACE_DIR),
+        FileCircuitDispatchStore(OrchardPaths.WORKSPACE_DIR),
     )
     val modelProvider = OllamaClient()
     val resourceController = MachineResourceController(
@@ -87,6 +98,15 @@ fun main() {
         FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
         resourceController,
     )
+    val dispatchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    dispatchScope.launch {
+        while (isActive) {
+            delay(DISPATCH_INTERVAL_MILLIS)
+            runCatching { workspace.dispatchEligible() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Durable circuit dispatch tick failed", error)
+            }
+        }
+    }
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
         workspaceApi(workspace, definitionIntelligence, circuitIntelligence)
     }
@@ -94,6 +114,7 @@ fun main() {
         architectApi(architect)
     }
     Runtime.getRuntime().addShutdownHook(Thread {
+        dispatchScope.cancel()
         workspaceServer.stop()
         architectServer.stop()
         modelProvider.close()
@@ -388,6 +409,8 @@ fun Application.workspaceApi(
 }
 
 private const val MAX_STAGED_PLAN_REQUEST_BYTES = 64 * 1024
+private const val DISPATCH_INTERVAL_MILLIS = 1_000L
+private val DISPATCH_LOGGER: Logger = Logger.getLogger("com.orchard.backend.dispatch")
 
 private fun workflowMutationStatus(status: WorkflowMutationStatus, success: HttpStatusCode): HttpStatusCode = when (status) {
     WorkflowMutationStatus.RECORDED -> success

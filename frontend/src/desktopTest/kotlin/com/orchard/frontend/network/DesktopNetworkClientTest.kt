@@ -28,7 +28,29 @@ class DesktopNetworkClientTest {
             assertTrue(body.contains("\"dependsOn\":[\"api\"]"))
             assertTrue(body.contains("\"sourceProposal\":{\"proposalId\":7"))
             respond(
-                content = """{"resources":{},"stagedPlans":[]}""",
+                content = """{
+                    "resources":{},
+                    "stagedPlans":[],
+                    "circuitDispatches":[{
+                        "dispatch":{
+                            "dispatchId":1,
+                            "planId":3,
+                            "planRevision":1,
+                            "planHash":"${"a".repeat(64)}",
+                            "scopeId":3,
+                            "stageId":"build",
+                            "nodeId":"screen",
+                            "workItemId":5,
+                            "priority":2001,
+                            "integrationOwner":false,
+                            "state":"PENDING",
+                            "createdAt":"2026-07-17T00:00:00Z",
+                            "hash":"${"b".repeat(64)}"
+                        },
+                        "state":"RUNNING",
+                        "workflowRunId":9
+                    }]
+                }""",
                 status = HttpStatusCode.Created,
                 headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
             )
@@ -57,6 +79,9 @@ class DesktopNetworkClientTest {
         val response = client.acceptStagedPlan(request)
 
         assertTrue(response.stagedPlans.isEmpty())
+        assertEquals(2001, response.circuitDispatches.single().dispatch.priority)
+        assertEquals("RUNNING", response.circuitDispatches.single().state)
+        assertEquals(9L, response.circuitDispatches.single().workflowRunId)
         client.close()
     }
 

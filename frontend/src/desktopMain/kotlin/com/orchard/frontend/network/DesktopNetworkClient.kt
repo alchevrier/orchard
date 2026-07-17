@@ -144,6 +144,30 @@ data class WorkspaceSnapshotResponse(
     val stagedPlans: List<StagedDeliveryPlanViewResponse> = emptyList(),
     val circuitProposals: List<CircuitProposalViewResponse> = emptyList(),
     val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse> = emptyList(),
+    val circuitDispatches: List<CircuitDispatchViewResponse> = emptyList(),
+)
+
+@Serializable
+data class CircuitDispatchResponse(
+    val dispatchId: Long,
+    val planId: Long,
+    val planRevision: Int,
+    val planHash: String,
+    val scopeId: Int,
+    val stageId: String,
+    val nodeId: String,
+    val workItemId: Int,
+    val priority: Int,
+    val integrationOwner: Boolean,
+    val createdAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class CircuitDispatchViewResponse(
+    val dispatch: CircuitDispatchResponse,
+    val state: String,
+    val workflowRunId: Long? = null,
 )
 
 @Serializable
@@ -548,11 +572,24 @@ data class ContextManifestResponse(
     val workItemId: Int,
     val repository: RepositoryHeadResponse,
     val recalledEpisodes: List<EpisodeRecallResponse> = emptyList(),
+    val circuitDispatchId: Long? = null,
+    val workspaceReservation: DispatchWorkspaceReservationResponse? = null,
+)
+
+@Serializable
+data class DispatchWorkspaceReservationResponse(
+    val mode: String,
+    val owner: String,
+    val path: String,
+    val branch: String,
+    val baseRevision: String,
 )
 
 @Serializable
 data class RepositoryHeadResponse(
     val commitHash: String,
+    val path: String = "",
+    val branch: String = "",
 )
 
 @Serializable

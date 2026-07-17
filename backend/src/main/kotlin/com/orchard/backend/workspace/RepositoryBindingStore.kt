@@ -34,6 +34,18 @@ interface RepositoryBindingStore {
     fun views(projectIds: Set<Int>): Map<Int, RepositoryView>
     fun resolveHead(projectId: Int): RepositoryHead?
     fun validateRevision(projectId: Int, baseRevision: String, targetRevision: String): RevisionValidation? = null
+    fun reserveWorkspace(
+        projectId: Int,
+        dispatchId: Long,
+        base: RepositoryHead,
+        integrationOwner: Boolean,
+    ): Pair<RepositoryHead, DispatchWorkspaceReservation> = base to DispatchWorkspaceReservation(
+        mode = if (integrationOwner) "INTEGRATION" else "ISOLATED",
+        owner = "circuit-dispatch-$dispatchId",
+        path = base.path,
+        branch = base.branch,
+        baseRevision = base.commitHash,
+    )
 }
 
 object TransientRepositoryBindingStore : RepositoryBindingStore {
@@ -97,6 +109,49 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
         val diff = runGit(root, "diff", "--quiet", baseRevision, canonicalTarget.output)
         if (diff.exitCode !in 0..1) return null
         return RevisionValidation(canonicalTarget.output, changedFromBase = diff.exitCode == 1)
+    }
+
+    @Synchronized
+    override fun reserveWorkspace(
+        projectId: Int,
+        dispatchId: Long,
+        base: RepositoryHead,
+        integrationOwner: Boolean,
+    ): Pair<RepositoryHead, DispatchWorkspaceReservation> {
+        val binding = bindings[projectId] ?: throw IllegalStateException("Project $projectId has no repository binding")
+        val root = Path.of(binding.path).toRealPath()
+        require(root.toString() == base.path) { "Repository binding changed before dispatch admission" }
+        val owner = "circuit-dispatch-$dispatchId"
+        val mode = if (integrationOwner) "INTEGRATION" else "ISOLATED"
+        val branch = "orchard/$owner"
+        val worktree = directory.resolve("worktrees").resolve(owner).toAbsolutePath().normalize()
+        Files.createDirectories(worktree.parent)
+        if (!Files.exists(worktree.resolve(".git"))) {
+            require(!Files.exists(worktree) || Files.list(worktree).use { !it.findAny().isPresent }) {
+                "Dispatch worktree path is not empty: $worktree"
+            }
+            val branchExists = runGit(root, "show-ref", "--verify", "--quiet", "refs/heads/$branch").exitCode == 0
+            val result = if (branchExists) {
+                runGit(root, "worktree", "add", worktree.toString(), branch)
+            } else {
+                runGit(root, "worktree", "add", "-b", branch, worktree.toString(), base.commitHash)
+            }
+            require(result.exitCode == 0) { "Unable to create dispatch worktree: ${result.output}" }
+        }
+        val revision = runGit(worktree, "rev-parse", "--verify", "HEAD")
+        val status = runGit(worktree, "status", "--porcelain")
+        require(revision.exitCode == 0 && revision.output == base.commitHash) {
+            "Dispatch worktree does not match its pinned base revision"
+        }
+        require(status.exitCode == 0 && status.output.isBlank()) { "Dispatch worktree is not clean" }
+        val repository = base.copy(path = worktree.toString(), branch = branch, clean = true)
+        return repository to DispatchWorkspaceReservation(
+            mode = mode,
+            owner = owner,
+            path = worktree.toString(),
+            branch = branch,
+            baseRevision = base.commitHash,
+        )
     }
 
     private fun load(): Map<Int, RepositoryBinding> {

@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 8.1 complete - Architect Circuit Synthesis. The local Architect can propose validated Epic and Story circuits, while humans retain edit and acceptance authority and stale proposals cannot overwrite newer plans.
+> **Project status:** Milestone 8.2 complete - Durable Circuit Dispatch. Accepted Story circuits now materialize durable pending work, automatically start eligible nodes in isolated Git worktrees, fan out on accepted evidence, and assign one integration owner.
 
 ## Milestone 1: Local Architect MVP
 
@@ -286,6 +286,36 @@ Milestone 8.1 boundaries:
 - The existing profile API can configure synthesis apertures, while the desktop settings dialog currently focuses on the primary Work Definition profile.
 - Generation does not start eligible nodes. Durable queues, automatic dispatch, worktree isolation, and integration ownership belong to Milestone 8.2.
 
+### Milestone 8.2: Durable Circuit Dispatch
+
+Orchard now turns accepted circuit eligibility into durable execution authority. A node is recorded before its workflow starts, survives restart or temporary repository denial, and remains traceable to the exact plan revision that authorized it.
+
+Delivered and verified:
+
+- Append-only checksummed `circuit-dispatches.jsonl` authority with monotonic IDs, forced writes, and structural restart recovery.
+- Idempotent reconciliation from accepted plan, hierarchy, READY Work Definition, dependency, artifact, and stage-policy authority.
+- Deterministic dispatch priorities derived from stage and node order.
+- Automatic initial workflow starts and evidence-driven downstream fan-out without model judgment.
+- A one-second production scheduler that retries pending nodes after transient repository admission failure.
+- Immutable workflow context binding to the exact dispatch ID.
+- Real Git worktrees and `orchard/circuit-dispatch-*` branches pinned to the admitted clean base revision.
+- Distinct isolated workspaces for parallel nodes.
+- Exactly one owner node for every `integration-v1` stage and a pinned integration-mode workspace reservation.
+- Derived pending, running, done, and cancelled views without mutating dispatch authority.
+- Explicit cancelled-node replacement with a new dispatch, workflow run, branch, and worktree.
+- Typed desktop projection of queue priority, runtime state, integration ownership, and workspace reservation.
+- Filesystem-level worktree tests, restart idempotency tests, scheduler retry tests, cancellation tests, and dependency fan-out tests.
+
+Milestone 8.2 boundaries:
+
+- Dispatch creates a governed workflow run; it does not yet launch a coding-agent process or grant one write authority.
+- The integration owner receives an isolated workspace but Orchard does not yet merge, rebase, resolve conflicts, or publish branches.
+- Dispatch worktrees and branches are retained; governed archival and cleanup are future work.
+- Priority is deterministic circuit order rather than a configurable deadline or scheduling class.
+- Local-model resource leases do not yet reserve capacity for future coding-agent processes.
+- Epic circuits gate Story completion; Task and Bug dispatch comes from Story circuits until Story-output aggregation is defined.
+- The scheduler is single-backend authority, not a distributed multi-process queue.
+
 ## Architecture
 
 ```mermaid
@@ -310,7 +340,9 @@ flowchart LR
     WS --> SC[Staged delivery circuit]
     AS -->|Proposal only| CSP[Circuit synthesis proposal]
     CSP -->|Human review and acceptance| SC
-    SC -->|dependency and artifact gates| WM
+    SC -->|dependency and artifact gates| DQ[Durable dispatch queue]
+    DQ -->|priority and admission| WM
+    DQ --> WT[Isolated Git worktrees]
     WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI
 ```

@@ -46,6 +46,7 @@ import com.orchard.backend.resource.FileMachineUsagePolicyStore
 import com.orchard.backend.resource.MachineUsagePolicy
 import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
 import com.orchard.backend.workspace.FileCircuitProposalStore
+import com.orchard.backend.workspace.FileCircuitDispatchStore
 import com.orchard.backend.workspace.CircuitProposalContent
 import com.orchard.backend.workspace.CircuitExecutionProvenance
 import com.orchard.backend.workspace.StagedDeliveryPlanSubmission
@@ -66,6 +67,51 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class WorkspaceRepositoryTest {
+    @Test
+    fun eligibleCircuitNodeDispatchRecoversExactlyOnceAfterRestart() = withTempDirectory { directory ->
+        val dispatchStore = FileCircuitDispatchStore(directory)
+        val first = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+            circuitDispatchStore = dispatchStore,
+        )
+        first.beginBatch()
+        assertTrue(first.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(first.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(first.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(first.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        first.commitBatch()
+        first.submitWorkDefinition(4, readyDefinition())
+
+        assertEquals(
+            StagedPlanStatus.ACCEPTED,
+            first.acceptStagedPlan(
+                StagedDeliveryPlanSubmission(
+                    3,
+                    "Durable dispatch circuit",
+                    listOf(
+                        StagedPlanStageSubmission(
+                            "delivery", "Delivery", "sequential-delivery-v1",
+                            nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                        )
+                    ),
+                )
+            ).status,
+        )
+        val pending = first.snapshot(MESSAGE_READY).circuitDispatches.single()
+
+        val recovered = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+            circuitDispatchStore = FileCircuitDispatchStore(directory),
+        ).snapshot(MESSAGE_READY)
+
+        assertEquals("PENDING", pending.state)
+        assertEquals(pending, recovered.circuitDispatches.single())
+        assertEquals(1, FileCircuitDispatchStore(directory).load().size)
+        assertTrue(Files.readString(directory.resolve("circuit-dispatches.jsonl")).contains("\"checksum\""))
+    }
+
     @Test
     fun circuitProposalAndSourcePinnedAcceptanceRecoverAfterRestart() = withTempDirectory { directory ->
         val first = WorkspaceStore(
@@ -777,6 +823,58 @@ class WorkspaceRepositoryTest {
         val unavailable = recoveredStore.snapshot(0).repositories.getValue(1)
         assertEquals(repository.path, unavailable.path)
         assertTrue(!unavailable.available)
+    }
+
+    @Test
+    fun automaticCircuitDispatchCreatesPinnedIsolatedGitWorktree() = withTempDirectory { directory ->
+        val workspaceDirectory = directory.resolve("workspace")
+        val repositoryDirectory = directory.resolve("bound-repository")
+        Files.createDirectories(repositoryDirectory)
+        Files.writeString(repositoryDirectory.resolve("README.md"), "# Bound\n")
+        runCommand(repositoryDirectory, "git", "init", "--initial-branch=main")
+        runCommand(repositoryDirectory, "git", "config", "user.email", "orchard@example.test")
+        runCommand(repositoryDirectory, "git", "config", "user.name", "Orchard Test")
+        runCommand(repositoryDirectory, "git", "add", "README.md")
+        runCommand(repositoryDirectory, "git", "commit", "-m", "initial")
+        val baseRevision = commandOutput(repositoryDirectory, "git", "rev-parse", "HEAD")
+        val workspace = WorkspaceStore(
+            repository = FileWorkspaceRepository(workspaceDirectory),
+            repositoryBindings = FileRepositoryBindingStore(workspaceDirectory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(workspaceDirectory),
+            circuitDispatchStore = FileCircuitDispatchStore(workspaceDirectory),
+        )
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        assertEquals(RepositoryBindStatus.BOUND, workspace.bindRepository(1, repositoryDirectory.toString()).status)
+        workspace.submitWorkDefinition(4, readyDefinition())
+
+        val accepted = workspace.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Isolated delivery",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "delivery", "Delivery", "sequential-delivery-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                    )
+                ),
+            )
+        )
+        val run = accepted.snapshot.workflowRuns.single()
+        val reservation = requireNotNull(run.context.workspaceReservation)
+
+        assertEquals(StagedPlanStatus.ACCEPTED, accepted.status)
+        assertEquals("ISOLATED", reservation.mode)
+        assertEquals("orchard/circuit-dispatch-1", reservation.branch)
+        assertEquals(baseRevision, reservation.baseRevision)
+        assertEquals(reservation.path, run.context.repository.path)
+        assertEquals(baseRevision, commandOutput(Path.of(reservation.path), "git", "rev-parse", "HEAD"))
+        assertTrue(Files.exists(Path.of(reservation.path).resolve(".git")))
+        assertTrue(commandOutput(repositoryDirectory, "git", "status", "--porcelain").isBlank())
     }
 
     @Test

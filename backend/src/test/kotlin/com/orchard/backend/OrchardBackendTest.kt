@@ -77,6 +77,12 @@ import com.orchard.backend.workspace.StagedPlanStageSubmission
 import com.orchard.backend.workspace.StagedPlanStatus
 import com.orchard.backend.workspace.PLAN_NODE_BLOCKED_DEPENDENCY
 import com.orchard.backend.workspace.PLAN_NODE_ELIGIBLE
+import com.orchard.backend.workspace.PLAN_NODE_RUNNING
+import com.orchard.backend.workspace.PLAN_NODE_DONE
+import com.orchard.backend.workspace.RUN_STATE_CANCELLED
+import com.orchard.backend.workspace.CIRCUIT_DISPATCH_PENDING
+import com.orchard.backend.workspace.CircuitDispatch
+import com.orchard.backend.workspace.CircuitDispatchStore
 import io.ktor.client.request.get
 import io.ktor.client.request.put
 import io.ktor.client.request.post
@@ -94,6 +100,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -128,17 +135,13 @@ class WorkspaceStoreTest {
 
         assertEquals(StagedPlanStatus.ACCEPTED, accepted.status)
         assertEquals(listOf("1a", "2a"), view.nodes.map { it.node.label })
-        assertEquals(listOf(PLAN_NODE_ELIGIBLE, PLAN_NODE_BLOCKED_DEPENDENCY), view.nodes.map { it.state })
+        assertEquals(listOf(PLAN_NODE_RUNNING, PLAN_NODE_BLOCKED_DEPENDENCY), view.nodes.map { it.state })
+        val run = accepted.snapshot.workflowRuns.single()
+        val firstDispatch = accepted.snapshot.circuitDispatches.single()
+        assertEquals(firstDispatch.dispatch.dispatchId, run.context.circuitDispatchId)
+        assertEquals(PLAN_NODE_RUNNING, firstDispatch.state)
         assertEquals(WorkflowStartStatus.STAGED_PLAN_BLOCKED, workspace.startWorkflow(5).status)
-        val cancelled = workspace.startWorkflow(4)
-        assertEquals(WorkflowStartStatus.CREATED, cancelled.status)
-        assertEquals(
-            WorkflowMutationStatus.RECORDED,
-            workspace.cancelWorkflow(cancelled.snapshot.workflowRuns.single().runId).status,
-        )
-        val started = workspace.startWorkflow(4)
-        assertEquals(WorkflowStartStatus.CREATED, started.status)
-        val run = started.snapshot.workflowRuns.last()
+        assertEquals(WorkflowStartStatus.ALREADY_STARTED, workspace.startWorkflow(4).status)
         workspace.beginBatch()
         assertTrue(
             !workspace.applyIntent(intent(ENTITY_TASK, "Late task", projectId = 1, epicId = 2, storyId = 3))
@@ -164,9 +167,15 @@ class WorkspaceStoreTest {
         assertEquals("SOURCE_DIFF", completedView.artifacts.single().evidenceKind)
         assertEquals("c".repeat(64), completedView.artifacts.single().outputHash)
         assertEquals(64, completedView.artifacts.single().evidenceHash.length)
-        assertEquals(PLAN_NODE_ELIGIBLE, completedView.nodes.last().state)
+        assertEquals(PLAN_NODE_RUNNING, completedView.nodes.last().state)
+        val dispatches = workspace.snapshot(MESSAGE_READY).circuitDispatches
+        assertEquals(listOf(PLAN_NODE_DONE, PLAN_NODE_RUNNING), dispatches.map { it.state })
+        assertEquals(
+            dispatches.last().dispatch.dispatchId,
+            workspace.snapshot(MESSAGE_READY).workflowRuns.last().context.circuitDispatchId,
+        )
         assertTrue(workspace.snapshot(MESSAGE_READY).resources.getValue("entity-4").action.contains("status=3"))
-        assertEquals(WorkflowStartStatus.CREATED, workspace.startWorkflow(5).status)
+        assertEquals(WorkflowStartStatus.ALREADY_STARTED, workspace.startWorkflow(5).status)
         assertEquals(StagedPlanStatus.PLAN_LOCKED, workspace.acceptStagedPlan(screenCircuit("Revised circuit")).status)
     }
 
@@ -212,6 +221,153 @@ class WorkspaceStoreTest {
                 screenCircuit("Stale edit").copy(baseRevision = active.revision, baseHash = active.hash)
             ).status,
         )
+    }
+
+    @Test
+    fun stagedCircuitRequiresOneIntegrationOwner() {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "First", projectId = 1, epicId = 2, storyId = 3)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Second", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+
+        val plan = StagedDeliveryPlanSubmission(
+            3,
+            "Invalid integration ownership",
+            listOf(
+                StagedPlanStageSubmission(
+                    "join", "Join", "integration-v1",
+                    nodes = listOf(
+                        StagedPlanNodeSubmission("first", 4),
+                        StagedPlanNodeSubmission("second", 5),
+                    ),
+                )
+            ),
+        )
+
+        assertEquals(StagedPlanStatus.INVALID_PLAN, workspace.acceptStagedPlan(plan).status)
+    }
+
+    @Test
+    fun cancelledCircuitDispatchRequiresExplicitReplacement() {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "a".repeat(40), "main", "", clean = true,
+            )
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        workspace.submitWorkDefinition(4, readyDefinition())
+        val accepted = workspace.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Retry circuit",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "delivery", "Delivery", "sequential-delivery-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                    )
+                ),
+            )
+        )
+        val firstRun = accepted.snapshot.workflowRuns.single()
+
+        val cancelled = workspace.cancelWorkflow(firstRun.runId).snapshot
+        val afterTick = workspace.dispatchEligible()
+
+        assertEquals(1, cancelled.workflowRuns.size)
+        assertEquals(listOf(RUN_STATE_CANCELLED), cancelled.circuitDispatches.map { it.state })
+        assertEquals(1, afterTick.workflowRuns.size)
+        assertEquals(listOf(RUN_STATE_CANCELLED), afterTick.circuitDispatches.map { it.state })
+        val replacement = workspace.startWorkflow(4)
+        assertEquals(WorkflowStartStatus.CREATED, replacement.status)
+        assertEquals(2, replacement.snapshot.workflowRuns.size)
+        assertEquals(listOf(RUN_STATE_CANCELLED, PLAN_NODE_RUNNING), replacement.snapshot.circuitDispatches.map { it.state })
+        assertEquals(listOf(1L, 2L), replacement.snapshot.circuitDispatches.map { it.dispatch.dispatchId })
+    }
+
+    @Test
+    fun dispatchTickStartsPendingNodeAfterRepositoryBecomesClean() {
+        val clean = AtomicBoolean(false)
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "a".repeat(40), "main", "", clean = clean.get(),
+            )
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        workspace.submitWorkDefinition(4, readyDefinition())
+        val accepted = workspace.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Pending circuit",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "delivery", "Delivery", "sequential-delivery-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                    )
+                ),
+            )
+        ).snapshot
+
+        assertTrue(accepted.workflowRuns.isEmpty())
+        assertEquals(CIRCUIT_DISPATCH_PENDING, accepted.circuitDispatches.single().state)
+        clean.set(true)
+
+        val dispatched = workspace.dispatchEligible()
+
+        assertEquals(1, dispatched.workflowRuns.size)
+        assertEquals(PLAN_NODE_RUNNING, dispatched.circuitDispatches.single().state)
+    }
+
+    @Test
+    fun dispatchStorageFailureDoesNotRewriteAcceptedPlanResult() {
+        val failingDispatchStore = object : CircuitDispatchStore {
+            override fun load(): List<CircuitDispatch> = emptyList()
+            override fun append(dispatch: CircuitDispatch) = error("disk full")
+        }
+        val workspace = WorkspaceStore(circuitDispatchStore = failingDispatchStore)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        workspace.submitWorkDefinition(4, readyDefinition())
+
+        val result = workspace.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Accepted before dispatch",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "delivery", "Delivery", "sequential-delivery-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                    )
+                ),
+            )
+        )
+
+        assertEquals(StagedPlanStatus.ACCEPTED, result.status)
+        assertEquals(1, result.snapshot.stagedPlans.single().plan.revision)
+        assertTrue(result.snapshot.circuitDispatches.isEmpty())
     }
 
     @Test

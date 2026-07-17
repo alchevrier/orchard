@@ -51,6 +51,7 @@ data class WorkspaceSnapshot(
     val stagedPlans: List<StagedDeliveryPlanView> = emptyList(),
     val circuitProposals: List<CircuitProposalView> = emptyList(),
     val stageWorkflows: List<StageExecutionWorkflowDefinition> = StageExecutionWorkflowRegistry.all(),
+    val circuitDispatches: List<CircuitDispatchView> = emptyList(),
 )
 
 enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
@@ -113,6 +114,7 @@ class WorkspaceStore(
     private val modelExperienceStore: ModelExperienceStore = TransientModelExperienceStore(),
     private val stagedPlanStore: StagedDeliveryPlanStore = TransientStagedDeliveryPlanStore(),
     private val circuitProposalStore: CircuitProposalStore = TransientCircuitProposalStore(),
+    private val circuitDispatchStore: CircuitDispatchStore = TransientCircuitDispatchStore(),
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -151,6 +153,7 @@ class WorkspaceStore(
     private val modelExperienceEvents = mutableListOf<ModelExperienceEvent>()
     private val stagedPlans = mutableListOf<StagedDeliveryPlan>()
     private val circuitProposals = mutableListOf<CircuitProposal>()
+    private val circuitDispatches = mutableListOf<CircuitDispatch>()
     private var nextRunId = 1L
     private var nextEventId = 1L
     private var nextDefinitionId = 1L
@@ -158,6 +161,7 @@ class WorkspaceStore(
     private var nextModelExperienceEventId = 1L
     private var nextStagedPlanId = 1L
     private var nextCircuitProposalId = 1L
+    private var nextCircuitDispatchId = 1L
     private var stagedPlanMessage = ""
 
     init {
@@ -170,6 +174,9 @@ class WorkspaceStore(
         validateRunReplacements()
         restoreStagedPlans(stagedPlanStore.load())
         restoreCircuitProposals(circuitProposalStore.load())
+        restoreCircuitDispatches(circuitDispatchStore.load())
+        reconcileCircuitDispatches()
+        advanceCircuitDispatches()
     }
 
     @Synchronized
@@ -278,6 +285,7 @@ class WorkspaceStore(
             repositoryMessage = "The repository binding could not be saved."
             RepositoryBindStatus.STORAGE_UNAVAILABLE
         }
+        if (status == RepositoryBindStatus.BOUND) tryAdvanceCircuitDispatches()
         return RepositoryBindResult(status, snapshot(MESSAGE_REPOSITORY_BINDING))
     }
 
@@ -338,6 +346,7 @@ class WorkspaceStore(
         }
         workDefinitions += manifest
         nextDefinitionId++
+        tryAdvanceCircuitDispatches()
         workflowMessage = when (assessment.status) {
             DEFINITION_READY -> "The work definition is ready for delivery admission."
             DEFINITION_NEEDS_CLARIFICATION -> "The work definition has unresolved questions."
@@ -717,19 +726,46 @@ class WorkspaceStore(
             sourceProposal = submission.sourceProposal,
             acceptedProposalUnchanged = acceptedProposalUnchanged,
         )
-        return try {
+        try {
             stagedPlanStore.append(plan)
-            stagedPlans += plan
-            nextStagedPlanId++
-            stagedPlanMessage = "The staged delivery circuit was accepted and is now authoritative."
-            StagedPlanResult(StagedPlanStatus.ACCEPTED, snapshot(MESSAGE_STAGED_DELIVERY_PLAN))
         } catch (_: Exception) {
-            stagedPlanFailure(StagedPlanStatus.STORAGE_UNAVAILABLE, "The staged delivery circuit could not be saved.")
+            return stagedPlanFailure(StagedPlanStatus.STORAGE_UNAVAILABLE, "The staged delivery circuit could not be saved.")
         }
+        stagedPlans += plan
+        nextStagedPlanId++
+        tryAdvanceCircuitDispatches()
+        stagedPlanMessage = "The staged delivery circuit was accepted and is now authoritative."
+        return StagedPlanResult(StagedPlanStatus.ACCEPTED, snapshot(MESSAGE_STAGED_DELIVERY_PLAN))
     }
 
     @Synchronized
     fun startWorkflow(workItemId: Int): WorkflowStartResult {
+        reconcileCircuitDispatches()
+        val latest = circuitDispatches.lastOrNull { dispatch ->
+            dispatch.workItemId == workItemId &&
+                activeStagedPlan(dispatch.scopeId)?.planId == dispatch.planId
+        }
+        if (latest?.let(::dispatchRun)?.let { runState(it.runId) == RUN_STATE_CANCELLED } == true) {
+            val plan = requireNotNull(activeStagedPlan(latest.scopeId))
+            val stage = requireNotNull(plan.stages.singleOrNull { it.stageId == latest.stageId })
+            val node = requireNotNull(stage.nodes.singleOrNull { it.nodeId == latest.nodeId })
+            try {
+                appendCircuitDispatch(plan, stage, node)
+            } catch (_: Exception) {
+                return workflowFailure(
+                    WorkflowStartStatus.STORAGE_UNAVAILABLE,
+                    "The replacement circuit dispatch could not be saved.",
+                )
+            }
+        }
+        val pending = circuitDispatches.lastOrNull { dispatch ->
+            dispatch.workItemId == workItemId && dispatchRun(dispatch) == null &&
+                activeStagedPlan(dispatch.scopeId)?.planId == dispatch.planId
+        }
+        return startWorkflow(workItemId, pending?.dispatchId)
+    }
+
+    private fun startWorkflow(workItemId: Int, circuitDispatchId: Long?): WorkflowStartResult {
         val workItem = committedEntity(workItemId)
         if (workItem == null) return workflowFailure(
             WorkflowStartStatus.WORK_ITEM_NOT_FOUND,
@@ -777,6 +813,21 @@ class WorkspaceStore(
             WorkflowStartStatus.REPOSITORY_DIRTY,
             "Commit or discard existing repository changes before pinning workflow context.",
         )
+        val dispatch = circuitDispatchId?.let { id -> circuitDispatches.singleOrNull { it.dispatchId == id } }
+        if (circuitDispatchId != null && dispatch == null) return workflowFailure(
+            WorkflowStartStatus.STORAGE_UNAVAILABLE,
+            "The circuit dispatch authority is unavailable.",
+        )
+        val (executionRepository, workspaceReservation) = try {
+            if (dispatch == null) head to null else {
+                repositoryBindings.reserveWorkspace(project.id, dispatch.dispatchId, head, dispatch.integrationOwner)
+            }
+        } catch (_: Exception) {
+            return workflowFailure(
+                WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
+                "The isolated dispatch workspace could not be reserved.",
+            )
+        }
 
         val workflow = DefaultDeliveryWorkflow.resolve(workItem.type, workDefinition)
         val deliveryStep = workflow.stepDefinitions.single()
@@ -806,9 +857,11 @@ class WorkspaceStore(
             content = workItem.content,
             workflowId = workflow.id,
             workflowVersion = workflow.version,
-            repository = head,
+            repository = executionRepository,
             recalledEpisodes = recalls,
             hash = "",
+            circuitDispatchId = circuitDispatchId,
+            workspaceReservation = workspaceReservation,
         )
         check(
             WorkflowStepEngine.hasRequiredContext(
@@ -973,6 +1026,9 @@ class WorkspaceStore(
             passed -> "${requirement.kind} evidence passed. ${step.evidenceContract.requirements.size - satisfied.size} gate${if (step.evidenceContract.requirements.size - satisfied.size == 1) "" else "s"} remain."
             else -> "${requirement.kind} evidence failed. The workflow remains blocked until passing evidence is submitted."
         }
+        if (completed) {
+            tryAdvanceCircuitDispatches()
+        }
         return WorkflowMutationResult(WorkflowMutationStatus.RECORDED, snapshot(MESSAGE_WORKFLOW_EVENT))
     }
 
@@ -1048,8 +1104,21 @@ class WorkspaceStore(
             stagedPlanViews(),
             circuitProposalViews(),
             StageExecutionWorkflowRegistry.all(),
+            circuitDispatchViews(),
         )
     }
+
+    @Synchronized
+    fun dispatchEligible(): WorkspaceSnapshot {
+        reconcileCircuitDispatches()
+        advanceCircuitDispatches()
+        return snapshot(MESSAGE_READY)
+    }
+
+    private fun tryAdvanceCircuitDispatches(): Boolean = runCatching {
+        reconcileCircuitDispatches()
+        advanceCircuitDispatches()
+    }.isSuccess
 
     private fun appendEntity(entityType: Int, parentId: Int, title: String, content: String, workflowId: Long): Boolean {
         val entity = WorkspaceEntity(
@@ -1606,7 +1675,8 @@ class WorkspaceStore(
             val workflowId = submittedStage.executionWorkflowId.trim()
             if (
                 stageTitle.isBlank() || stageTitle.length > MAX_PLAN_TEXT ||
-                StageExecutionWorkflowRegistry.resolve(workflowId, submittedStage.executionWorkflowVersion) == null
+                StageExecutionWorkflowRegistry.resolve(workflowId, submittedStage.executionWorkflowVersion) == null ||
+                (workflowId == "integration-v1" && submittedStage.nodes.size != 1)
             ) return null
             val nodes = submittedStage.nodes.mapIndexed { nodeIndex, submittedNode ->
                 val nodeId = submittedNode.nodeId.trim()
@@ -1856,6 +1926,127 @@ class WorkspaceStore(
                 }
             }, stagedPlanArtifactInstances(plan))
         }
+
+    private fun restoreCircuitDispatches(restored: List<CircuitDispatch>) {
+        restored.forEachIndexed { index, dispatch ->
+            require(dispatch.dispatchId == index + 1L) { "Circuit dispatch IDs must be contiguous" }
+            require(dispatch.state == CIRCUIT_DISPATCH_PENDING) { "Unknown circuit dispatch state ${dispatch.state}" }
+            require(dispatch.priority > 0) { "Circuit dispatch priority must be positive" }
+            val plan = stagedPlans.singleOrNull { it.planId == dispatch.planId }
+            require(plan?.revision == dispatch.planRevision && plan.hash == dispatch.planHash) {
+                "Circuit dispatch references unknown plan authority"
+            }
+            val stage = plan.stages.singleOrNull { it.stageId == dispatch.stageId }
+            val node = stage?.nodes?.singleOrNull { it.nodeId == dispatch.nodeId }
+            require(node?.workItemId == dispatch.workItemId) { "Circuit dispatch references unknown node authority" }
+            require(
+                dispatch.hash == circuitDispatchHash(
+                    dispatch.dispatchId,
+                    plan,
+                    requireNotNull(stage),
+                    requireNotNull(node),
+                    dispatch.state,
+                    dispatch.createdAt,
+                    dispatch.priority,
+                    dispatch.integrationOwner,
+                )
+            ) { "Circuit dispatch hash mismatch" }
+            circuitDispatches += dispatch
+        }
+        nextCircuitDispatchId = (circuitDispatches.maxOfOrNull { it.dispatchId } ?: 0L) + 1L
+    }
+
+    private fun reconcileCircuitDispatches() {
+        stagedPlans.groupBy { it.scopeId }.values.map { revisions -> revisions.maxBy { it.revision } }
+            .flatMap { plan -> plan.stages.map { stage -> plan to stage } }
+            .flatMap { (plan, stage) -> stage.nodes.map { node -> Triple(plan, stage, node) } }
+            .filter { (plan, _, node) ->
+                val workItem = committedEntity(node.workItemId)
+                workItem?.type in setOf(ENTITY_TASK, ENTITY_BUG) &&
+                    stagedPlanNodeBlockReason(plan, node) == null &&
+                    !planNodeStarted(node.workItemId) &&
+                    workDefinitions.lastOrNull { it.workItemId == node.workItemId }?.assessment?.status == DEFINITION_READY &&
+                    circuitDispatches.none { it.planId == plan.planId && it.nodeId == node.nodeId }
+            }
+            .forEach { (plan, stage, node) ->
+                appendCircuitDispatch(plan, stage, node)
+            }
+    }
+
+    private fun appendCircuitDispatch(
+        plan: StagedDeliveryPlan,
+        stage: StagedPlanStage,
+        node: StagedPlanNode,
+    ): CircuitDispatch {
+        val createdAt = java.time.Instant.now().toString()
+        val priority = stage.ordinal * 1_000 + stage.nodes.indexOf(node) + 1
+        val integrationOwner = stage.executionWorkflowId == "integration-v1"
+        val dispatch = CircuitDispatch(
+            dispatchId = nextCircuitDispatchId,
+            planId = plan.planId,
+            planRevision = plan.revision,
+            planHash = plan.hash,
+            scopeId = plan.scopeId,
+            stageId = stage.stageId,
+            nodeId = node.nodeId,
+            workItemId = node.workItemId,
+            priority = priority,
+            integrationOwner = integrationOwner,
+            createdAt = createdAt,
+            hash = circuitDispatchHash(
+                nextCircuitDispatchId,
+                plan,
+                stage,
+                node,
+                CIRCUIT_DISPATCH_PENDING,
+                createdAt,
+                priority,
+                integrationOwner,
+            ),
+        )
+        circuitDispatchStore.append(dispatch)
+        circuitDispatches += dispatch
+        nextCircuitDispatchId++
+        return dispatch
+    }
+
+    private fun advanceCircuitDispatches() {
+        circuitDispatches.filter { dispatch ->
+            dispatch.state == CIRCUIT_DISPATCH_PENDING && dispatchRun(dispatch) == null &&
+                activeStagedPlan(dispatch.scopeId)?.let { it.planId == dispatch.planId && it.hash == dispatch.planHash } == true
+        }.sortedWith(compareBy<CircuitDispatch> { it.priority }.thenBy { it.dispatchId }).forEach { dispatch ->
+            startWorkflow(dispatch.workItemId, dispatch.dispatchId)
+        }
+    }
+
+    private fun dispatchRun(dispatch: CircuitDispatch): WorkflowRun? = workflowRuns.lastOrNull {
+        it.context.circuitDispatchId == dispatch.dispatchId
+    }
+
+    private fun circuitDispatchViews(): List<CircuitDispatchView> = circuitDispatches.map { dispatch ->
+        val run = dispatchRun(dispatch)
+        val state = run?.let {
+            when (runState(it.runId)) {
+                RUN_STATE_DONE -> PLAN_NODE_DONE
+                RUN_STATE_CANCELLED -> RUN_STATE_CANCELLED
+                else -> PLAN_NODE_RUNNING
+            }
+        } ?: CIRCUIT_DISPATCH_PENDING
+        CircuitDispatchView(dispatch, state, run?.runId)
+    }
+
+    private fun circuitDispatchHash(
+        dispatchId: Long,
+        plan: StagedDeliveryPlan,
+        stage: StagedPlanStage,
+        node: StagedPlanNode,
+        state: String,
+        createdAt: String,
+        priority: Int,
+        integrationOwner: Boolean,
+    ): String = stagedPlanHash(
+        "$dispatchId:${plan.planId}:${plan.revision}:${plan.hash}:${plan.scopeId}:${stage.stageId}:${node.nodeId}:${node.workItemId}:$priority:$integrationOwner:$state:$createdAt"
+    )
 
     private fun circuitProposalViews(): List<CircuitProposalView> = circuitProposals.map { proposal ->
         val accepted = stagedPlans.lastOrNull {
