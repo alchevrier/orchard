@@ -105,6 +105,14 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
             setBody(attempt)
         }.body()
 
+    suspend fun recordCriterionJudgment(
+        runId: Long,
+        judgment: CriterionJudgmentSubmissionRequest,
+    ): WorkspaceSnapshotResponse = client.post("http://127.0.0.1:8085/api/workflow-runs/$runId/criterion-judgments") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(judgment)
+    }.successBody()
+
     suspend fun cancelWorkflow(runId: Long): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8085/api/workflow-runs/$runId/cancel").body()
 
@@ -445,6 +453,8 @@ data class WorkflowRunResponse(
     val workflow: ResolvedWorkflowResponse,
     val evidence: List<EvidenceRecordResponse> = emptyList(),
     val workDefinition: WorkDefinitionResponse? = null,
+    val judgments: List<CriterionJudgmentResponse> = emptyList(),
+    val criterionGates: List<CriterionGateViewResponse> = emptyList(),
 )
 
 @Serializable
@@ -560,6 +570,41 @@ data class AttemptSubmissionRequest(
 )
 
 @Serializable
+data class CriterionJudgmentSubmissionRequest(
+    val criterionId: String,
+    val revision: String,
+    val approver: String,
+    val rationale: String,
+    val approved: Boolean,
+)
+
+@Serializable
+data class CriterionJudgmentResponse(
+    val judgmentId: Long,
+    val criterionId: String,
+    val requirementId: String,
+    val revision: String,
+    val contractHash: String,
+    val approver: String,
+    val rationale: String,
+    val approved: Boolean,
+    val recordedAt: String,
+)
+
+@Serializable
+data class CriterionGateViewResponse(
+    val criterionId: String,
+    val requirementId: String,
+    val kind: String,
+    val gate: String,
+    val description: String,
+    val verification: String,
+    val status: String,
+    val revision: String? = null,
+    val authorityEventId: Long? = null,
+)
+
+@Serializable
 data class EvidenceRecordResponse(
     val evidenceId: Long,
     val kind: String,
@@ -621,6 +666,10 @@ data class EvidenceContractResponse(
 data class EvidenceRequirementResponse(
     val kind: String,
     val description: String,
+    val criterionId: String? = null,
+    val requirementId: String? = null,
+    val gate: String? = null,
+    val verification: String? = null,
 )
 
 private suspend inline fun <reified T> HttpResponse.successBody(): T {

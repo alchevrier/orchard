@@ -87,7 +87,7 @@ Workspace snapshots expose immutable design revision views, decisions, contracts
 
 - The current inspector enforces deterministic structural and traceability rules. Independent semantic design inspection, organization policy resolution, risk profiles, waivers, and named approval roles remain subsequent governance work.
 - The external organizational Git policy source described by ADR 004 is not yet resolved or synchronized by this milestone.
-- Criterion verification is pinned into the acceptance contract but is not yet compiled into the existing workflow evidence-gate engine. Workflow completion still follows the current Work Definition evidence contract.
+- Criterion verification is pinned into the acceptance contract. ADR 035 compiles those criteria into the workflow evidence-gate engine.
 - Governance transitions are available through the typed backend API and workspace projection. A dedicated Compose design editor and admission screen remain future UX work.
 - Project activation has no deactivation path. Migration is an authority decision and applies prospectively.
 - A parent revision reports stale descendants but does not automatically author replacement child designs.

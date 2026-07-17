@@ -14,9 +14,18 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class EvidenceRequirement(
     val kind: String,
     val description: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val criterionId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val requirementId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val gate: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val verification: String? = null,
 )
 
 @Serializable
@@ -119,6 +128,7 @@ data class WorkflowRun(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class EvidenceRecord(
     val evidenceId: Long,
     val kind: String,
@@ -129,6 +139,21 @@ data class EvidenceRecord(
     val summary: String,
     val producer: String,
     val passed: Boolean,
+    val recordedAt: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val canonicalOutput: Boolean = false,
+)
+
+@Serializable
+data class CriterionJudgment(
+    val judgmentId: Long,
+    val criterionId: String,
+    val requirementId: String,
+    val revision: String,
+    val contractHash: String,
+    val approver: String,
+    val rationale: String,
+    val approved: Boolean,
     val recordedAt: String,
 )
 
@@ -154,6 +179,8 @@ data class TransitionDecision(
     val decidedAt: String,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val signal: String = "",
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val judgmentIds: List<Long> = emptyList(),
 )
 
 @Serializable
@@ -164,6 +191,20 @@ data class WorkflowEvent(
     val attempt: AttemptRecord? = null,
     val decision: TransitionDecision? = null,
     val producedEpisode: WorkEpisode? = null,
+    val judgment: CriterionJudgment? = null,
+)
+
+@Serializable
+data class CriterionGateView(
+    val criterionId: String,
+    val requirementId: String,
+    val kind: String,
+    val gate: String,
+    val description: String,
+    val verification: String,
+    val status: String,
+    val revision: String? = null,
+    val authorityEventId: Long? = null,
 )
 
 @Serializable
@@ -177,6 +218,8 @@ data class WorkflowRunView(
     val attempts: List<AttemptRecord>,
     val decisions: List<TransitionDecision>,
     val workDefinition: WorkDefinitionManifest? = null,
+    val judgments: List<CriterionJudgment> = emptyList(),
+    val criterionGates: List<CriterionGateView> = emptyList(),
 )
 
 interface WorkflowMemoryStore {
@@ -206,6 +249,15 @@ data class EvidenceSubmission(
     val outputHash: String,
     val summary: String,
     val producer: String,
+)
+
+@Serializable
+data class CriterionJudgmentSubmission(
+    val criterionId: String,
+    val revision: String,
+    val approver: String,
+    val rationale: String,
+    val approved: Boolean,
 )
 
 @Serializable
@@ -286,6 +338,7 @@ class FileWorkflowMemoryStore(private val directory: Path) : WorkflowMemoryStore
             }
             event.evidence?.let { validateEvidence(it, event.eventId) }
             event.attempt?.let { validateAttempt(it, event.eventId) }
+            event.judgment?.let { validateJudgment(it, event.eventId) }
             event.decision?.let { validateDecision(it, event.eventId) }
             event.producedEpisode?.let(::validateEpisode)
         }
@@ -297,6 +350,7 @@ class FileWorkflowMemoryStore(private val directory: Path) : WorkflowMemoryStore
         require(event.eventId == existing.size + 1L) { "Workflow event IDs must be monotonic" }
         event.evidence?.let { validateEvidence(it, event.eventId) }
         event.attempt?.let { validateAttempt(it, event.eventId) }
+        event.judgment?.let { validateJudgment(it, event.eventId) }
         event.decision?.let { validateDecision(it, event.eventId) }
         event.producedEpisode?.let(::validateEpisode)
         append(eventsPath, event)
@@ -352,6 +406,18 @@ class FileWorkflowMemoryStore(private val directory: Path) : WorkflowMemoryStore
         require(attempt.diagnosticHash.matches(SHA256)) { "Attempt diagnostic hash is invalid" }
     }
 
+    private fun validateJudgment(judgment: CriterionJudgment, eventId: Long) {
+        require(judgment.judgmentId == eventId) { "Criterion judgment ID must match its event ID" }
+        require(judgment.criterionId.isNotBlank() && judgment.requirementId.isNotBlank()) {
+            "Criterion judgment authority IDs are required"
+        }
+        require(judgment.revision.matches(GIT_HASH)) { "Criterion judgment revision is invalid" }
+        require(judgment.contractHash.matches(SHA256)) { "Criterion judgment contract hash is invalid" }
+        require(judgment.approver.isNotBlank() && judgment.rationale.isNotBlank()) {
+            "Criterion judgment attribution and rationale are required"
+        }
+    }
+
     private fun validateDecision(decision: TransitionDecision, eventId: Long) {
         require(decision.decisionId == eventId) { "Decision ID must match its event ID" }
         require(decision.fromState.isNotBlank() && decision.toState.isNotBlank()) { "Decision states are required" }
@@ -359,17 +425,15 @@ class FileWorkflowMemoryStore(private val directory: Path) : WorkflowMemoryStore
     }
 
     private inline fun <reified T> readRecords(path: Path): List<T> {
-        if (!Files.exists(path)) return emptyList()
-        return Files.readAllLines(path, Charsets.UTF_8)
-            .filter { it.isNotBlank() }
-            .mapIndexed { index, line ->
-                val envelope = runCatching { json.decodeFromString<RecordEnvelope<T>>(line) }
-                    .getOrElse { throw IllegalStateException("Cannot decode ${path.fileName} record ${index + 1}", it) }
-                require(envelope.version == FORMAT_VERSION) { "Unsupported ${path.fileName} version ${envelope.version}" }
-                val payload = json.encodeToString(envelope.value)
-                require(envelope.checksum == sha256(payload)) { "Checksum mismatch in ${path.fileName} record ${index + 1}" }
-                envelope.value
-            }
+        val quarantineName = path.fileName.toString().removeSuffix(".jsonl")
+        return loadRecoverableJsonl(path, quarantineName) { line, recordNumber ->
+            val envelope = runCatching { json.decodeFromString<RecordEnvelope<T>>(line) }
+                .getOrElse { throw IllegalStateException("Cannot decode ${path.fileName} record $recordNumber", it) }
+            require(envelope.version == FORMAT_VERSION) { "Unsupported ${path.fileName} version ${envelope.version}" }
+            val payload = json.encodeToString(envelope.value)
+            require(envelope.checksum == sha256(payload)) { "Checksum mismatch in ${path.fileName} record $recordNumber" }
+            envelope.value
+        }
     }
 
     private inline fun <reified T> append(path: Path, value: T) {

@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "packId": "orchard.default-toolchains",
+  "packVersion": 1,
+  "profiles": [
+    {
+      "id": "gradle-wrapper",
+      "priority": 100,
+      "allFiles": ["gradlew"],
+      "commands": {
+        "BUILD": { "executable": "./gradlew", "arguments": ["assemble", "--no-daemon"] },
+        "TEST": { "executable": "./gradlew", "arguments": ["test", "--no-daemon"] }
+      }
+    },
+    {
+      "id": "maven-wrapper",
+      "priority": 100,
+      "allFiles": ["mvnw"],
+      "commands": {
+        "BUILD": { "executable": "./mvnw", "arguments": ["package", "-DskipTests"] },
+        "TEST": { "executable": "./mvnw", "arguments": ["test"] }
+      }
+    },
+    {
+      "id": "cargo",
+      "priority": 100,
+      "allFiles": ["Cargo.toml"],
+      "commands": {
+        "BUILD": { "executable": "cargo", "arguments": ["build"] },
+        "TEST": { "executable": "cargo", "arguments": ["test"] }
+      }
+    },
+    {
+      "id": "meson",
+      "priority": 100,
+      "allFiles": ["meson.build"],
+      "commands": {
+        "BUILD": { "executable": "meson", "arguments": ["compile", "-C", "build"] },
+        "TEST": { "executable": "meson", "arguments": ["test", "-C", "build"] }
+      }
+    },
+    {
+      "id": "cmake",
+      "priority": 100,
+      "allFiles": ["CMakeLists.txt"],
+      "commands": {
+        "BUILD": { "executable": "cmake", "arguments": ["--build", "build"] },
+        "TEST": { "executable": "ctest", "arguments": ["--test-dir", "build"] }
+      }
+    },
+    {
+      "id": "node",
+      "priority": 100,
+      "allFiles": ["package.json"],
+      "commands": {
+        "BUILD": { "executable": "npm", "arguments": ["run", "build"] },
+        "TEST": { "executable": "npm", "arguments": ["test"] }
+      }
+    }
+  ]
+}

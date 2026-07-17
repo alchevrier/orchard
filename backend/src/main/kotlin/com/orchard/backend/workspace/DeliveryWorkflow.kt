@@ -16,7 +16,11 @@ object DefaultDeliveryWorkflow {
         else -> 0
     }
 
-    fun resolve(workItemType: Int, workDefinition: WorkDefinitionManifest? = null): ResolvedWorkflow {
+    fun resolve(
+        workItemType: Int,
+        workDefinition: WorkDefinitionManifest? = null,
+        acceptanceContract: AcceptanceContract? = null,
+    ): ResolvedWorkflow {
         require(workItemType == ENTITY_TASK || workItemType == ENTITY_BUG) { "Only tasks and bugs can start a workflow" }
         val requirements = buildList {
             add(EvidenceRequirement("SOURCE_DIFF", "A source diff tied to the pinned repository revision."))
@@ -35,10 +39,26 @@ object DefaultDeliveryWorkflow {
                     )
                 )
             }
+            acceptanceContract?.criteria?.forEach { criterion ->
+                add(
+                    EvidenceRequirement(
+                        kind = criterionEvidenceKind(criterion.criterionId),
+                        description = criterion.description,
+                        criterionId = criterion.criterionId,
+                        requirementId = criterion.requirementId,
+                        gate = criterion.gate,
+                        verification = criterion.verification,
+                    )
+                )
+            }
         }
         val evidenceContract = EvidenceContract(
             id = "${if (workItemType == ENTITY_BUG) "bug" else "task"}-completion",
-            version = if (workDefinition == null) 1 else 2,
+            version = when {
+                acceptanceContract != null -> 3
+                workDefinition != null -> 2
+                else -> 1
+            },
             requirements = requirements,
         )
         val step = WorkflowStepDefinition(
@@ -77,7 +97,7 @@ object DefaultDeliveryWorkflow {
         )
         return ResolvedWorkflow(
             id = "default-delivery-${if (workItemType == ENTITY_BUG) "bug" else "task"}",
-            version = if (workDefinition == null) 1 else 2,
+            version = evidenceContract.version,
             workItemType = workItemType,
             steps = listOf(step.id),
             evidenceContract = evidenceContract,
@@ -89,8 +109,11 @@ object DefaultDeliveryWorkflow {
         workflow: ResolvedWorkflow,
         workItemType: Int,
         workDefinition: WorkDefinitionManifest?,
-    ): Boolean = workflow == resolve(workItemType, workDefinition) ||
+        acceptanceContract: AcceptanceContract? = null,
+    ): Boolean = workflow == resolve(workItemType, workDefinition, acceptanceContract) ||
         (workDefinition == null && workflow == legacy(workItemType))
+
+    fun criterionEvidenceKind(criterionId: String): String = "CRITERION:$criterionId"
 
     private fun legacy(workItemType: Int): ResolvedWorkflow {
         require(workItemType == ENTITY_TASK || workItemType == ENTITY_BUG)

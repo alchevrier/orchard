@@ -6,6 +6,11 @@ import com.orchard.backend.agent.DefinitionIntelligenceService
 import com.orchard.backend.agent.ProposalGenerationStatus
 import com.orchard.backend.agent.CircuitIntelligenceService
 import com.orchard.backend.agent.CircuitGenerationStatus
+import com.orchard.backend.agent.CodingWorkerService
+import com.orchard.backend.agent.CodingWorkerTickStatus
+import com.orchard.backend.agent.FileCodingWorkerStore
+import com.orchard.backend.agent.FileToolchainPolicyCatalog
+import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.vector.OllamaClient
 import com.orchard.backend.vector.FileModelProfileSettingsStore
@@ -34,6 +39,7 @@ import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
 import com.orchard.backend.workspace.EvidenceSubmission
 import com.orchard.backend.workspace.AttemptSubmission
+import com.orchard.backend.workspace.CriterionJudgmentSubmission
 import com.orchard.backend.workspace.WorkDefinitionSubmission
 import com.orchard.backend.workspace.WorkDefinitionStatus
 import com.orchard.backend.workspace.DefinitionCollaborationStatus
@@ -102,6 +108,13 @@ fun main() {
         FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
         resourceController,
     )
+    val codingWorker = CodingWorkerService(
+        workspace,
+        listOf(modelProvider),
+        FileCodingWorkerStore(OrchardPaths.WORKSPACE_DIR),
+        LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR)),
+        resourceController,
+    )
     val dispatchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     dispatchScope.launch {
         while (isActive) {
@@ -111,14 +124,24 @@ fun main() {
             }
         }
     }
+    val codingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    codingScope.launch {
+        while (isActive) {
+            delay(CODING_INTERVAL_MILLIS)
+            runCatching { codingWorker.tick() }.onFailure { error ->
+                CODING_LOGGER.log(Level.WARNING, "Governed coding worker tick failed", error)
+            }
+        }
+    }
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
-        workspaceApi(workspace, definitionIntelligence, circuitIntelligence)
+        workspaceApi(workspace, definitionIntelligence, circuitIntelligence, codingWorker)
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
         architectApi(architect)
     }
     Runtime.getRuntime().addShutdownHook(Thread {
         dispatchScope.cancel()
+        codingScope.cancel()
         workspaceServer.stop()
         architectServer.stop()
         modelProvider.close()
@@ -131,6 +154,7 @@ fun Application.workspaceApi(
     workspace: WorkspaceStore,
     definitionIntelligence: DefinitionIntelligenceService? = null,
     circuitIntelligence: CircuitIntelligenceService? = null,
+    codingWorker: CodingWorkerService? = null,
 ) {
     configureJson()
     routing {
@@ -428,6 +452,16 @@ fun Application.workspaceApi(
             val result = workspace.recordAttempt(runId, request)
             call.respond(workflowMutationStatus(result.status, HttpStatusCode.Created), result.snapshot)
         }
+        post("/api/workflow-runs/{runId}/criterion-judgments") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            val request = runCatching { call.receive<CriterionJudgmentSubmission>() }.getOrNull()
+            if (runId == null || runId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.recordCriterionJudgment(runId, request)
+            call.respond(workflowMutationStatus(result.status, HttpStatusCode.Created), result.snapshot)
+        }
         post("/api/workflow-runs/{runId}/cancel") {
             val runId = call.parameters["runId"]?.toLongOrNull()
             if (runId == null || runId <= 0) {
@@ -437,12 +471,48 @@ fun Application.workspaceApi(
             val result = workspace.cancelWorkflow(runId)
             call.respond(workflowMutationStatus(result.status, HttpStatusCode.OK), result.snapshot)
         }
+        get("/api/coding-worker/executions") {
+            if (codingWorker == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val executions = runCatching { codingWorker.executions() }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(executions)
+        }
+        post("/api/coding-worker/tick") {
+            if (codingWorker == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = runCatching { codingWorker.tick() }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val status = when (result.status) {
+                CodingWorkerTickStatus.CANDIDATE_COMPLETED -> HttpStatusCode.Created
+                CodingWorkerTickStatus.IDLE,
+                CodingWorkerTickStatus.INTERRUPTED_RECOVERED -> HttpStatusCode.OK
+                CodingWorkerTickStatus.BUSY -> HttpStatusCode.Conflict
+                CodingWorkerTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
+                CodingWorkerTickStatus.INVALID_PROPOSAL -> HttpStatusCode.UnprocessableEntity
+                CodingWorkerTickStatus.MODEL_FAILED,
+                CodingWorkerTickStatus.APPLICATION_FAILED,
+                CodingWorkerTickStatus.VERIFICATION_FAILED,
+                CodingWorkerTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
     }
 }
 
 private const val MAX_STAGED_PLAN_REQUEST_BYTES = 64 * 1024
 private const val DISPATCH_INTERVAL_MILLIS = 1_000L
+private const val CODING_INTERVAL_MILLIS = 1_000L
 private val DISPATCH_LOGGER: Logger = Logger.getLogger("com.orchard.backend.dispatch")
+private val CODING_LOGGER: Logger = Logger.getLogger("com.orchard.backend.coding")
 
 private fun workflowMutationStatus(status: WorkflowMutationStatus, success: HttpStatusCode): HttpStatusCode = when (status) {
     WorkflowMutationStatus.RECORDED -> success

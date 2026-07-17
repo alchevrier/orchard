@@ -40,6 +40,11 @@ interface ModelProvider : AutoCloseable {
         maxOutputTokens: Int,
         contextWindowTokens: Int,
     ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
+    suspend fun executeCodingPatch(
+        prompt: String,
+        maxOutputTokens: Int,
+        contextWindowTokens: Int,
+    ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
     fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand = ModelResourceDemand(0, 1)
     fun architectResourceDemand(): ModelResourceDemand = ModelResourceDemand(0, 1)
     override fun close() = Unit
@@ -87,6 +92,12 @@ class OllamaClient(
     ): ModelGeneration = generate(prompt, maxOutputTokens, contextWindowTokens)
 
     override suspend fun executeCircuitSynthesis(
+        prompt: String,
+        maxOutputTokens: Int,
+        contextWindowTokens: Int,
+    ): ModelGeneration = generate(prompt, maxOutputTokens, contextWindowTokens)
+
+    override suspend fun executeCodingPatch(
         prompt: String,
         maxOutputTokens: Int,
         contextWindowTokens: Int,

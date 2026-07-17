@@ -973,7 +973,7 @@ class WorkspaceStore(
             )
         }
 
-        val workflow = DefaultDeliveryWorkflow.resolve(workItem.type, workDefinition)
+        val workflow = DefaultDeliveryWorkflow.resolve(workItem.type, workDefinition, acceptanceContract)
         val deliveryStep = workflow.stepDefinitions.single()
         check(
             WorkflowStepEngine.canStart(
@@ -1096,6 +1096,17 @@ class WorkspaceStore(
                 WorkflowMutationStatus.INVALID_RECORD,
                 "Evidence kind $kind is not required by this workflow.",
             )
+        if (requirement.gate == CRITERION_HUMAN) return workflowMutationFailure(
+            WorkflowMutationStatus.INVALID_RECORD,
+            "Criterion ${requirement.criterionId} requires an explicit human approval record.",
+        )
+        if (
+            requirement.gate == CRITERION_AUTOMATED &&
+            submission.command.trim() != requirement.verification
+        ) return workflowMutationFailure(
+            WorkflowMutationStatus.INVALID_RECORD,
+            "Criterion ${requirement.criterionId} requires its admitted verification command.",
+        )
         if (
             !submission.revision.matches(GIT_HASH) || !submission.outputHash.matches(SHA256) ||
             submission.summary.isBlank() || submission.summary.length > MAX_EVIDENCE_SUMMARY ||
@@ -1126,20 +1137,16 @@ class WorkspaceStore(
                 submission.command.trim()
             },
             exitCode = submission.exitCode,
-            outputHash = submission.outputHash.lowercase(),
+            outputHash = if (kind == "SOURCE_DIFF") revision.diffHash ?: submission.outputHash.lowercase()
+                else submission.outputHash.lowercase(),
             summary = submission.summary.trim(),
             producer = submission.producer.trim(),
             passed = passed,
             recordedAt = now,
+            canonicalOutput = kind == "SOURCE_DIFF" && revision.diffHash != null,
         )
-        val evidenceForRevision = (eventsFor(runId).mapNotNull { it.evidence } + evidence)
-            .filter { it.revision == revision.commitHash }
-            .groupBy { it.kind }
-            .mapValues { (_, records) -> records.maxBy { it.evidenceId } }
-        val satisfied = step.evidenceContract.requirements.mapNotNull { required ->
-            evidenceForRevision[required.kind]?.takeIf { it.passed }
-        }
-        val completed = satisfied.size == step.evidenceContract.requirements.size
+        val satisfaction = gateSatisfaction(run, revision.commitHash, pendingEvidence = evidence)
+        val completed = satisfaction.satisfiedCount == step.evidenceContract.requirements.size
         val signalName = when {
             completed -> SIGNAL_COMPLETED
             passed -> SIGNAL_EVIDENCE_ACCEPTED
@@ -1152,15 +1159,18 @@ class WorkspaceStore(
             toState = signal.target,
             accepted = signal.accepted,
             reason = when (signalName) {
-                SIGNAL_COMPLETED -> "All ${satisfied.size} evidence gates passed for revision ${revision.commitHash}."
+                SIGNAL_COMPLETED -> "All ${satisfaction.satisfiedCount} evidence gates passed for revision ${revision.commitHash}."
                 SIGNAL_EVIDENCE_ACCEPTED -> "${requirement.kind} evidence passed deterministic validation."
                 else -> "${requirement.kind} evidence failed deterministic validation."
             },
-            evidenceIds = if (completed) satisfied.map { it.evidenceId }.sorted() else listOf(evidence.evidenceId),
+            evidenceIds = if (completed) satisfaction.evidence.map { it.evidenceId }.sorted() else listOf(evidence.evidenceId),
             decidedAt = now,
             signal = signal.signal,
+            judgmentIds = if (completed) satisfaction.judgments.map { it.judgmentId }.sorted() else emptyList(),
         )
-        val episode = if (completed) completionEpisode(run, revision.commitHash, satisfied, now) else null
+        val episode = if (completed) {
+            completionEpisode(run, revision.commitHash, satisfaction.evidence, satisfaction.judgments, now)
+        } else null
         val event = WorkflowEvent(nextEventId, runId, evidence, decision = decision, producedEpisode = episode)
         if (!appendWorkflowEvent(event)) return workflowMutationFailure(
             WorkflowMutationStatus.STORAGE_UNAVAILABLE,
@@ -1168,12 +1178,112 @@ class WorkspaceStore(
         )
         workflowMessage = when {
             completed -> "All evidence gates passed. The work item is done and its work episode is available for future recall."
-            passed -> "${requirement.kind} evidence passed. ${step.evidenceContract.requirements.size - satisfied.size} gate${if (step.evidenceContract.requirements.size - satisfied.size == 1) "" else "s"} remain."
+            passed -> "${requirement.kind} evidence passed. ${step.evidenceContract.requirements.size - satisfaction.satisfiedCount} gate${if (step.evidenceContract.requirements.size - satisfaction.satisfiedCount == 1) "" else "s"} remain."
             else -> "${requirement.kind} evidence failed. The workflow remains blocked until passing evidence is submitted."
         }
         if (completed) {
             tryAdvanceCircuitDispatches()
         }
+        return WorkflowMutationResult(WorkflowMutationStatus.RECORDED, snapshot(MESSAGE_WORKFLOW_EVENT))
+    }
+
+    @Synchronized
+    fun recordCriterionJudgment(
+        runId: Long,
+        submission: CriterionJudgmentSubmission,
+    ): WorkflowMutationResult {
+        val run = workflowRuns.firstOrNull { it.runId == runId }
+            ?: return workflowMutationFailure(WorkflowMutationStatus.RUN_NOT_FOUND, "The workflow run does not exist.")
+        val currentState = runState(runId)
+        if (currentState in TERMINAL_RUN_STATES) return workflowMutationFailure(
+            WorkflowMutationStatus.RUN_CLOSED,
+            "The workflow run is already closed.",
+        )
+        val criterionId = submission.criterionId.trim().uppercase()
+        val requirement = deliveryStep(run).evidenceContract.requirements.singleOrNull {
+            it.criterionId == criterionId
+        } ?: return workflowMutationFailure(
+            WorkflowMutationStatus.INVALID_RECORD,
+            "Criterion $criterionId is not required by this workflow.",
+        )
+        if (requirement.gate != CRITERION_HUMAN) return workflowMutationFailure(
+            WorkflowMutationStatus.INVALID_RECORD,
+            "Criterion $criterionId is not a human judgment gate.",
+        )
+        val contract = run.context.acceptanceContract
+            ?: return workflowMutationFailure(WorkflowMutationStatus.INVALID_RECORD, "The run has no acceptance contract.")
+        if (
+            !submission.revision.matches(GIT_HASH) ||
+            submission.approver.isBlank() || submission.approver.length > MAX_PRODUCER_LENGTH ||
+            submission.rationale.isBlank() || submission.rationale.length > MAX_EVIDENCE_SUMMARY
+        ) return workflowMutationFailure(WorkflowMutationStatus.INVALID_RECORD, "The criterion judgment is invalid.")
+        val revision = runCatching {
+            repositoryBindings.validateRevision(
+                run.context.projectId,
+                run.context.repository.commitHash,
+                submission.revision,
+            )
+        }.getOrNull() ?: return workflowMutationFailure(
+            WorkflowMutationStatus.REVISION_INVALID,
+            "The judgment revision is not a descendant of the pinned repository context.",
+        )
+        val now = java.time.Instant.now().toString()
+        val judgment = CriterionJudgment(
+            judgmentId = nextEventId,
+            criterionId = criterionId,
+            requirementId = requireNotNull(requirement.requirementId),
+            revision = revision.commitHash,
+            contractHash = contract.hash,
+            approver = submission.approver.trim(),
+            rationale = submission.rationale.trim(),
+            approved = submission.approved,
+            recordedAt = now,
+        )
+        val satisfaction = gateSatisfaction(run, revision.commitHash, pendingJudgment = judgment)
+        val completed = satisfaction.satisfiedCount == deliveryStep(run).evidenceContract.requirements.size
+        val signalName = when {
+            completed -> SIGNAL_COMPLETED
+            judgment.approved -> SIGNAL_EVIDENCE_ACCEPTED
+            else -> SIGNAL_EVIDENCE_REJECTED
+        }
+        val signal = WorkflowStepEngine.resolveSignal(deliveryStep(run), signalName)
+        val decision = TransitionDecision(
+            decisionId = nextEventId,
+            fromState = currentState,
+            toState = signal.target,
+            accepted = signal.accepted,
+            reason = when (signalName) {
+                SIGNAL_COMPLETED -> "All ${satisfaction.satisfiedCount} evidence and judgment gates passed for revision ${revision.commitHash}."
+                SIGNAL_EVIDENCE_ACCEPTED -> "Human criterion $criterionId was approved by ${judgment.approver}."
+                else -> "Human criterion $criterionId was rejected by ${judgment.approver}."
+            },
+            evidenceIds = if (completed) satisfaction.evidence.map { it.evidenceId }.sorted() else emptyList(),
+            decidedAt = now,
+            signal = signal.signal,
+            judgmentIds = if (completed) {
+                satisfaction.judgments.map { it.judgmentId }.sorted()
+            } else listOf(judgment.judgmentId),
+        )
+        val episode = if (completed) {
+            completionEpisode(run, revision.commitHash, satisfaction.evidence, satisfaction.judgments, now)
+        } else null
+        val event = WorkflowEvent(
+            nextEventId,
+            runId,
+            decision = decision,
+            producedEpisode = episode,
+            judgment = judgment,
+        )
+        if (!appendWorkflowEvent(event)) return workflowMutationFailure(
+            WorkflowMutationStatus.STORAGE_UNAVAILABLE,
+            "The judgment and transition decision could not be saved.",
+        )
+        workflowMessage = when {
+            completed -> "All evidence and judgment gates passed. The work item is done."
+            judgment.approved -> "Human criterion $criterionId was approved."
+            else -> "Human criterion $criterionId was rejected and the workflow remains blocked."
+        }
+        if (completed) tryAdvanceCircuitDispatches()
         return WorkflowMutationResult(WorkflowMutationStatus.RECORDED, snapshot(MESSAGE_WORKFLOW_EVENT))
     }
 
@@ -1325,7 +1435,12 @@ class WorkspaceStore(
                 run.context.repository.projectId == project.id &&
                     run.context.workflowId == run.workflow.id &&
                     run.context.workflowVersion == run.workflow.version &&
-                    DefaultDeliveryWorkflow.isCompatible(run.workflow, workItem.type, run.workDefinition)
+                    DefaultDeliveryWorkflow.isCompatible(
+                        run.workflow,
+                        workItem.type,
+                        run.workDefinition,
+                        run.context.acceptanceContract,
+                    )
             ) { "Workflow run ${run.runId} references an invalid workflow context" }
             run.workDefinition?.let { definition ->
                 require(
@@ -1596,10 +1711,114 @@ class WorkspaceStore(
             require(event.eventId == nextEventId) { "Expected workflow event ID $nextEventId, found ${event.eventId}" }
             val run = workflowRuns.firstOrNull { it.runId == event.runId }
             require(run != null) { "Workflow event ${event.eventId} references an invalid run" }
-            event.decision?.takeIf { it.signal.isNotBlank() }?.let { decision ->
-                val declared = WorkflowStepEngine.resolveSignal(deliveryStep(run), decision.signal)
+            require(listOfNotNull(event.evidence, event.attempt, event.judgment).size <= 1) {
+                "Workflow event ${event.eventId} contains conflicting artifacts"
+            }
+            event.evidence?.let { evidence ->
+                val requirement = deliveryStep(run).evidenceContract.requirements.singleOrNull {
+                    it.kind == evidence.kind
+                }
+                require(requirement != null && requirement.gate != CRITERION_HUMAN) {
+                    "Workflow event ${event.eventId} contains evidence outside its contract"
+                }
+                if (requirement.gate == CRITERION_AUTOMATED) {
+                    require(evidence.command == requirement.verification) {
+                        "Workflow event ${event.eventId} does not use its admitted verification"
+                    }
+                }
+                val revision = requireNotNull(
+                    repositoryBindings.validateRevision(
+                        run.context.projectId,
+                        run.context.repository.commitHash,
+                        evidence.revision,
+                    )
+                ) { "Workflow event ${event.eventId} references an invalid repository revision" }
+                require(revision.commitHash == evidence.revision) {
+                    "Workflow event ${event.eventId} does not use the canonical repository revision"
+                }
+                if (evidence.kind == "SOURCE_DIFF" && evidence.canonicalOutput) {
+                    require(revision.diffHash == evidence.outputHash) {
+                        "Workflow event ${event.eventId} does not use the canonical source diff hash"
+                    }
+                }
+                val expectedPassed = if (evidence.kind == "SOURCE_DIFF") {
+                    revision.changedFromBase
+                } else {
+                    evidence.exitCode == 0
+                }
+                require(evidence.passed == expectedPassed) {
+                    "Workflow event ${event.eventId} contains an invalid evidence outcome"
+                }
+            }
+            event.judgment?.let { judgment ->
+                val requirement = deliveryStep(run).evidenceContract.requirements.singleOrNull {
+                    it.criterionId == judgment.criterionId
+                }
+                require(
+                    judgment.judgmentId == event.eventId &&
+                        requirement?.gate == CRITERION_HUMAN &&
+                        requirement.requirementId == judgment.requirementId &&
+                        judgment.contractHash == run.context.acceptanceContract?.hash &&
+                        judgment.revision.matches(GIT_HASH) &&
+                        judgment.approver.isNotBlank() && judgment.approver.length <= MAX_PRODUCER_LENGTH &&
+                        judgment.rationale.isNotBlank() && judgment.rationale.length <= MAX_EVIDENCE_SUMMARY
+                ) { "Workflow event ${event.eventId} contains an invalid criterion judgment" }
+                val revision = requireNotNull(
+                    repositoryBindings.validateRevision(
+                        run.context.projectId,
+                        run.context.repository.commitHash,
+                        judgment.revision,
+                    )
+                ) { "Workflow event ${event.eventId} references an invalid judgment revision" }
+                require(revision.commitHash == judgment.revision) {
+                    "Workflow event ${event.eventId} does not use the canonical judgment revision"
+                }
+            }
+            event.decision?.let { decision ->
+                require(decision.fromState == runState(run.runId)) {
+                    "Workflow event ${event.eventId} starts from an invalid derived state"
+                }
+                val effectiveSignal = decision.signal.ifBlank { legacyDecisionSignal(decision) }
+                val declared = WorkflowStepEngine.resolveSignal(deliveryStep(run), effectiveSignal)
                 require(declared.target == decision.toState && declared.accepted == decision.accepted) {
                     "Workflow event ${event.eventId} contains an invalid transition signal"
+                }
+                val availableEvidence = workflowEvents.filter { it.runId == run.runId }.mapNotNull { it.evidence } +
+                    listOfNotNull(event.evidence)
+                val availableJudgments = workflowEvents.filter { it.runId == run.runId }.mapNotNull { it.judgment } +
+                    listOfNotNull(event.judgment)
+                require(decision.evidenceIds.all { id -> availableEvidence.any { it.evidenceId == id } }) {
+                    "Workflow event ${event.eventId} references invalid evidence"
+                }
+                require(decision.judgmentIds.all { id -> availableJudgments.any { it.judgmentId == id } }) {
+                    "Workflow event ${event.eventId} references invalid judgments"
+                }
+                when (effectiveSignal) {
+                    SIGNAL_EVIDENCE_ACCEPTED -> require(
+                        event.evidence?.passed == true || event.judgment?.approved == true
+                    ) { "Workflow event ${event.eventId} accepts a rejected artifact" }
+                    SIGNAL_EVIDENCE_REJECTED -> require(
+                        event.evidence?.passed == false || event.judgment?.approved == false
+                    ) { "Workflow event ${event.eventId} rejects no failed artifact" }
+                    SIGNAL_CANCELLED -> require(event.evidence == null && event.judgment == null) {
+                        "Workflow event ${event.eventId} combines cancellation with an artifact"
+                    }
+                }
+                if (effectiveSignal == SIGNAL_COMPLETED) {
+                    val revision = event.evidence?.revision ?: event.judgment?.revision
+                        ?: availableEvidence.firstOrNull { it.evidenceId in decision.evidenceIds }?.revision
+                    require(revision != null)
+                    val satisfaction = gateSatisfaction(
+                        run,
+                        revision,
+                        pendingEvidence = event.evidence,
+                        pendingJudgment = event.judgment,
+                    )
+                    require(
+                        satisfaction.satisfiedCount == deliveryStep(run).evidenceContract.requirements.size &&
+                            decision.evidenceIds.toSet() == satisfaction.evidence.map { it.evidenceId }.toSet() &&
+                            decision.judgmentIds.toSet() == satisfaction.judgments.map { it.judgmentId }.toSet()
+                    ) { "Workflow event ${event.eventId} claims completion without satisfying its contract" }
                 }
             }
             event.producedEpisode?.let { episode ->
@@ -1612,6 +1831,14 @@ class WorkspaceStore(
             workflowEvents += event
             nextEventId++
         }
+    }
+
+    private fun legacyDecisionSignal(decision: TransitionDecision): String = when {
+        decision.toState == RUN_STATE_EVIDENCE_PENDING && decision.accepted -> SIGNAL_EVIDENCE_ACCEPTED
+        decision.toState == RUN_STATE_EVIDENCE_BLOCKED && !decision.accepted -> SIGNAL_EVIDENCE_REJECTED
+        decision.toState == RUN_STATE_DONE && decision.accepted -> SIGNAL_COMPLETED
+        decision.toState == RUN_STATE_CANCELLED && decision.accepted -> SIGNAL_CANCELLED
+        else -> throw IllegalArgumentException("Legacy workflow decision has no valid transition signal")
     }
 
     private fun restoreDesignGovernance(restoredEvents: List<DesignGovernanceEvent>) {
@@ -1979,6 +2206,7 @@ class WorkspaceStore(
         run: WorkflowRun,
         revision: String,
         evidence: List<EvidenceRecord>,
+        judgments: List<CriterionJudgment>,
         recordedAt: String,
     ): WorkEpisode {
         val attempts = eventsFor(run.runId).mapNotNull { it.attempt }
@@ -1998,7 +2226,12 @@ class WorkspaceStore(
             problem = run.context.content.ifBlank { run.context.title },
             failedApproaches = failedApproaches,
             resolution = resolution,
-            evidenceSummary = evidence.sortedBy { it.kind }.joinToString(" | ") { "${it.kind}: ${it.summary}" },
+            evidenceSummary = buildList {
+                evidence.sortedBy { it.kind }.forEach { add("${it.kind}: ${it.summary}") }
+                judgments.sortedBy { it.criterionId }.forEach {
+                    add("${it.criterionId}: approved by ${it.approver} - ${it.rationale}")
+                }
+            }.joinToString(" | "),
             sourceRevision = revision,
             recordedAt = recordedAt,
         )
@@ -2015,6 +2248,43 @@ class WorkspaceStore(
 
     private fun eventsFor(runId: Long): List<WorkflowEvent> = workflowEvents.filter { it.runId == runId }
 
+    private data class GateSatisfaction(
+        val satisfiedCount: Int,
+        val evidence: List<EvidenceRecord>,
+        val judgments: List<CriterionJudgment>,
+    )
+
+    private fun gateSatisfaction(
+        run: WorkflowRun,
+        revision: String,
+        pendingEvidence: EvidenceRecord? = null,
+        pendingJudgment: CriterionJudgment? = null,
+    ): GateSatisfaction {
+        val events = eventsFor(run.runId)
+        val evidence = (events.mapNotNull { it.evidence } + listOfNotNull(pendingEvidence))
+            .filter { it.revision == revision }
+            .groupBy { it.kind }
+            .mapValues { (_, records) -> records.maxBy { it.evidenceId } }
+        val judgments = (events.mapNotNull { it.judgment } + listOfNotNull(pendingJudgment))
+            .filter { it.revision == revision }
+            .groupBy { it.criterionId }
+            .mapValues { (_, records) -> records.maxBy { it.judgmentId } }
+        val satisfiedEvidence = mutableListOf<EvidenceRecord>()
+        val satisfiedJudgments = mutableListOf<CriterionJudgment>()
+        deliveryStep(run).evidenceContract.requirements.forEach { requirement ->
+            if (requirement.gate == CRITERION_HUMAN) {
+                judgments[requirement.criterionId]?.takeIf { it.approved }?.let(satisfiedJudgments::add)
+            } else {
+                evidence[requirement.kind]?.takeIf { it.passed }?.let(satisfiedEvidence::add)
+            }
+        }
+        return GateSatisfaction(
+            satisfiedEvidence.size + satisfiedJudgments.size,
+            satisfiedEvidence,
+            satisfiedJudgments,
+        )
+    }
+
     private fun runState(runId: Long): String {
         val events = eventsFor(runId)
         val latestDecision = events.mapNotNull { it.decision }.lastOrNull()
@@ -2029,7 +2299,11 @@ class WorkspaceStore(
 
     private fun deliveryStep(run: WorkflowRun): WorkflowStepDefinition =
         run.workflow.stepDefinitions.singleOrNull()
-            ?: DefaultDeliveryWorkflow.resolve(run.context.workItemType, run.workDefinition).stepDefinitions.single()
+            ?: DefaultDeliveryWorkflow.resolve(
+                run.context.workItemType,
+                run.workDefinition,
+                run.context.acceptanceContract,
+            ).stepDefinitions.single()
 
     private fun runView(run: WorkflowRun): WorkflowRunView {
         val events = eventsFor(run.runId)
@@ -2043,7 +2317,58 @@ class WorkspaceStore(
             attempts = events.mapNotNull { it.attempt },
             decisions = events.mapNotNull { it.decision },
             workDefinition = run.workDefinition,
+            judgments = events.mapNotNull { it.judgment },
+            criterionGates = criterionGateViews(run),
         )
+    }
+
+    private fun criterionGateViews(run: WorkflowRun): List<CriterionGateView> {
+        val events = eventsFor(run.runId)
+        val completion = events.mapNotNull { it.decision }.lastOrNull { it.signal == SIGNAL_COMPLETED }
+        val completionEvidenceIds = completion?.evidenceIds?.toSet().orEmpty()
+        val completionJudgmentIds = completion?.judgmentIds?.toSet().orEmpty()
+        val completionEvidence = events.mapNotNull { it.evidence }.filter { it.evidenceId in completionEvidenceIds }
+        val completionJudgments = events.mapNotNull { it.judgment }.filter { it.judgmentId in completionJudgmentIds }
+        val latestAuthority = events.mapNotNull { event ->
+            event.evidence?.let { event.eventId to it.revision }
+                ?: event.judgment?.let { event.eventId to it.revision }
+        }.maxByOrNull { it.first }
+        val revision = completionEvidence.firstOrNull()?.revision
+            ?: completionJudgments.firstOrNull()?.revision
+            ?: latestAuthority?.second
+        val evidence = if (completion != null) {
+            completionEvidence.associateBy { it.kind }
+        } else {
+            events.mapNotNull { it.evidence }.filter { it.revision == revision }.associateBy { it.kind }
+        }
+        val judgments = if (completion != null) {
+            completionJudgments.associateBy { it.criterionId }
+        } else {
+            events.mapNotNull { it.judgment }.filter { it.revision == revision }.associateBy { it.criterionId }
+        }
+        return deliveryStep(run).evidenceContract.requirements.mapNotNull { requirement ->
+            val criterionId = requirement.criterionId ?: return@mapNotNull null
+            val judgment = judgments[criterionId]
+            val record = evidence[requirement.kind]
+            val status = when {
+                requirement.gate == CRITERION_HUMAN && judgment?.approved == true -> "PASSED"
+                requirement.gate == CRITERION_HUMAN && judgment != null -> "REJECTED"
+                requirement.gate != CRITERION_HUMAN && record?.passed == true -> "PASSED"
+                requirement.gate != CRITERION_HUMAN && record != null -> "REJECTED"
+                else -> "PENDING"
+            }
+            CriterionGateView(
+                criterionId = criterionId,
+                requirementId = requireNotNull(requirement.requirementId),
+                kind = requirement.kind,
+                gate = requireNotNull(requirement.gate),
+                description = requirement.description,
+                verification = requirement.verification.orEmpty(),
+                status = status,
+                revision = revision,
+                authorityEventId = judgment?.judgmentId ?: record?.evidenceId,
+            )
+        }
     }
 
     private fun workflowFailure(status: WorkflowStartStatus, message: String): WorkflowStartResult {

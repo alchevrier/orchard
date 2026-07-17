@@ -1,5 +1,9 @@
 # ADR 016: Coding Center Agent Architecture
 
+## Status
+
+Superseded by ADR 036.
+
 ## Context
 Orchard requires an execution engine to translate validated `DocumentIntent` JSON structures (Projects, Workflows, Tickets) created by the Architect Agent into actual source code changes on the user's filesystem.
 

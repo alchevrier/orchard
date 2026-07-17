@@ -1,0 +1,557 @@
+package com.orchard.backend.agent
+
+import com.orchard.backend.api.DocumentIntent
+import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
+import com.orchard.backend.vector.ModelBindingProfile
+import com.orchard.backend.vector.ModelGeneration
+import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.workspace.ACTION_CREATE
+import com.orchard.backend.workspace.AcceptanceCriterion
+import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
+import com.orchard.backend.workspace.ENTITY_EPIC
+import com.orchard.backend.workspace.ENTITY_PROJECT
+import com.orchard.backend.workspace.ENTITY_STORY
+import com.orchard.backend.workspace.ENTITY_TASK
+import com.orchard.backend.workspace.FileCircuitDispatchStore
+import com.orchard.backend.workspace.FileModelExperienceStore
+import com.orchard.backend.workspace.FileRepositoryBindingStore
+import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
+import com.orchard.backend.workspace.FileWorkflowMemoryStore
+import com.orchard.backend.workspace.FileWorkDefinitionStore
+import com.orchard.backend.workspace.FileWorkspaceRepository
+import com.orchard.backend.workspace.MESSAGE_READY
+import com.orchard.backend.workspace.RUN_STATE_DONE
+import com.orchard.backend.workspace.StagedDeliveryPlanSubmission
+import com.orchard.backend.workspace.StagedPlanNodeSubmission
+import com.orchard.backend.workspace.StagedPlanStageSubmission
+import com.orchard.backend.workspace.stagedPlanHash
+import com.orchard.backend.workspace.WorkDefinitionSubmission
+import com.orchard.backend.workspace.WorkspaceStore
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.createTempDirectory
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+class CodingWorkerTest {
+    @Test
+    fun `governed worker commits and completes only through workflow evidence`() = runTest {
+        val directory = createTempDirectory("orchard-coding-worker-e2e-")
+        val repository = initializedRepository()
+        val gradle = repository.resolve("gradlew")
+        Files.writeString(gradle, "#!/bin/sh\nprintf 'verified %s\\n' \"$1\"\n")
+        gradle.toFile().setExecutable(true)
+        Files.writeString(repository.resolve("settings.gradle.kts"), "rootProject.name = \"worker-test\"\n")
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add verifier")
+        val workspace = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            repositoryBindings = FileRepositoryBindingStore(directory),
+            workflowMemory = FileWorkflowMemoryStore(directory),
+            definitionStore = FileWorkDefinitionStore(directory),
+            modelExperienceStore = FileModelExperienceStore(directory),
+            stagedPlanStore = FileStagedDeliveryPlanStore(directory),
+            circuitDispatchStore = FileCircuitDispatchStore(directory),
+        )
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Implement answer", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        workspace.bindRepository(1, repository.toString())
+        workspace.submitWorkDefinition(
+            4,
+            WorkDefinitionSubmission(
+                requestedOutcome = "Return the required answer",
+                currentBehavior = "The application returns one",
+                requiredBehavior = "The application returns forty two",
+                scope = listOf("src/Main.kt"),
+                nonGoals = listOf("Changing build tooling"),
+                constraints = listOf("Keep the function signature"),
+                acceptanceCriteria = listOf(AcceptanceCriterion("The answer is forty two", "Run ./gradlew test")),
+            ),
+        )
+        workspace.acceptStagedPlan(
+            StagedDeliveryPlanSubmission(
+                3,
+                "Autonomous delivery",
+                listOf(
+                    StagedPlanStageSubmission(
+                        "delivery",
+                        "Delivery",
+                        "sequential-delivery-v1",
+                        nodes = listOf(StagedPlanNodeSubmission("task", 4)),
+                    )
+                ),
+            )
+        )
+        val proposal = CodingPatchProposal(
+            "Return the required answer.",
+            listOf(CodingFileOperation(CODING_FILE_WRITE, "src/Main.kt", "fun answer() = 42\n")),
+        )
+        val worker = CodingWorkerService(
+            workspace,
+            listOf(FixedCodingModel(Json.encodeToString(proposal))),
+            TransientCodingWorkerStore(),
+            LocalCodingWorkspaceGateway(),
+        )
+
+        val result = worker.tick()
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+
+        assertEquals(CodingWorkerTickStatus.CANDIDATE_COMPLETED, result.status)
+        assertEquals(CODING_EXECUTION_COMPLETED, requireNotNull(result.execution?.result).status)
+        assertEquals("orchard.default-toolchains", result.execution?.claim?.toolchainPackId)
+        assertEquals("gradle-wrapper", result.execution?.claim?.toolchainProfileId)
+        assertTrue(requireNotNull(result.execution?.claim?.toolchainPolicyHash).matches(Regex("[0-9a-f]{64}")))
+        assertEquals(RUN_STATE_DONE, run.state)
+        assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST", "ACCEPTANCE"), run.evidence.mapTo(hashSetOf()) { it.kind })
+        assertTrue(run.evidence.all { it.passed })
+        assertEquals("fun answer() = 42\n", Files.readString(Path.of(run.context.repository.path).resolve("src/Main.kt")))
+    }
+
+    @Test
+    fun `worker journal restores completed execution and rejects a second active claim`() {
+        val directory = createTempDirectory("orchard-coding-worker-store-")
+        val store = FileCodingWorkerStore(directory)
+        val claim = claim(executionId = 1, runId = 17, attempt = 1)
+        store.append(CodingWorkerEvent(eventId = 1, claim = claim))
+
+        val competing = claim(executionId = 2, runId = 18, attempt = 1)
+        assertFailsWith<IllegalArgumentException> {
+            store.append(CodingWorkerEvent(eventId = 2, claim = competing))
+        }
+
+        val resultDraft = CodingWorkerResult(
+            executionId = 1,
+            status = CODING_EXECUTION_COMPLETED,
+            modelExecutionId = 4,
+            proposalHash = "c".repeat(64),
+            changedPaths = listOf("src/Main.kt"),
+            revision = "d".repeat(40),
+            diagnostic = "Candidate committed.",
+            completedAt = "2026-06-21T00:01:00Z",
+            hash = "",
+        )
+        val result = resultDraft.copy(hash = codingWorkerResultHash(resultDraft))
+        store.append(CodingWorkerEvent(eventId = 2, result = result))
+
+        val restored = codingWorkerExecutions(FileCodingWorkerStore(directory).loadEvents())
+        assertEquals(1, restored.size)
+        assertEquals(claim, restored.single().claim)
+        assertEquals(result, restored.single().result)
+    }
+
+    @Test
+    fun `worker journal preserves deferred retry timing without breaking attempt sequence`() {
+        val store = TransientCodingWorkerStore()
+        val firstClaim = claim(executionId = 1, runId = 21, attempt = 1)
+        store.append(CodingWorkerEvent(eventId = 1, claim = firstClaim))
+        val deferredDraft = CodingWorkerResult(
+            executionId = 1,
+            status = CODING_EXECUTION_DEFERRED,
+            diagnostic = "Capacity is temporarily unavailable.",
+            retryAfter = "2026-06-21T00:01:00Z",
+            completedAt = "2026-06-21T00:00:00Z",
+            hash = "",
+        )
+        store.append(
+            CodingWorkerEvent(
+                eventId = 2,
+                result = deferredDraft.copy(hash = codingWorkerResultHash(deferredDraft)),
+            )
+        )
+
+        val secondClaim = claim(executionId = 3, runId = 21, attempt = 2)
+        store.append(CodingWorkerEvent(eventId = 3, claim = secondClaim))
+
+        assertEquals(2, codingWorkerExecutions(store.loadEvents()).size)
+        assertEquals(CODING_EXECUTION_DEFERRED, codingWorkerExecutions(store.loadEvents()).first().result?.status)
+    }
+
+    @Test
+    fun `worker journal replays completed claims written before toolchain policy pinning`() {
+        val store = TransientCodingWorkerStore()
+        val draft = CodingWorkerClaim(
+            executionId = 1,
+            runId = 30,
+            attempt = 1,
+            contextHash = "a".repeat(64),
+            workspacePath = "/tmp/legacy-worktree",
+            bindingFingerprint = "b".repeat(64),
+            claimedAt = "2026-06-20T00:00:00Z",
+            hash = "",
+        )
+        val legacyHash = stagedPlanHash(
+            "${draft.executionId}:${draft.runId}:${draft.attempt}:${draft.contextHash}:${draft.workspacePath}:" +
+                "${draft.bindingFingerprint}:${draft.claimedAt}"
+        )
+        store.append(CodingWorkerEvent(eventId = 1, claim = draft.copy(hash = legacyHash)))
+        val resultDraft = CodingWorkerResult(
+            executionId = 1,
+            status = CODING_EXECUTION_COMPLETED,
+            modelExecutionId = 2,
+            proposalHash = "c".repeat(64),
+            changedPaths = listOf("src/Main.kt"),
+            revision = "d".repeat(40),
+            diagnostic = "Legacy candidate completed.",
+            completedAt = "2026-06-20T00:01:00Z",
+            hash = "",
+        )
+
+        store.append(CodingWorkerEvent(eventId = 2, result = resultDraft.copy(hash = codingWorkerResultHash(resultDraft))))
+
+        assertEquals(CODING_EXECUTION_COMPLETED, codingWorkerExecutions(store.loadEvents()).single().result?.status)
+    }
+
+    @Test
+    fun `workspace gateway commits typed operations inside reserved worktree`() {
+        val repository = initializedRepository()
+        val gateway = LocalCodingWorkspaceGateway()
+
+        val candidate = gateway.applyAndCommit(
+            repository.toString(),
+            CodingPatchProposal(
+                summary = "Update the application and add its test.",
+                operations = listOf(
+                    CodingFileOperation(CODING_FILE_WRITE, "src/Main.kt", "fun answer() = 42\n"),
+                    CodingFileOperation(CODING_FILE_WRITE, "src/MainTest.kt", "fun expected() = 42\n"),
+                ),
+            ),
+            executionId = 9,
+        )
+
+        assertEquals(listOf("src/Main.kt", "src/MainTest.kt"), candidate.changedPaths)
+        assertTrue(candidate.revision.matches(Regex("[0-9a-f]{40}")))
+        assertNotEquals(run(repository, "git", "rev-parse", "HEAD~1"), candidate.revision)
+        assertEquals("fun answer() = 42\n", Files.readString(repository.resolve("src/Main.kt")))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
+    fun `workspace gateway rejects paths outside the reservation before mutation`() {
+        val repository = initializedRepository()
+        val gateway = LocalCodingWorkspaceGateway()
+
+        assertFailsWith<IllegalArgumentException> {
+            gateway.applyAndCommit(
+                repository.toString(),
+                CodingPatchProposal(
+                    summary = "Escape the worktree.",
+                    operations = listOf(CodingFileOperation(CODING_FILE_WRITE, "../outside.txt", "forbidden")),
+                ),
+                executionId = 10,
+            )
+        }
+
+        assertEquals("fun answer() = 1\n", Files.readString(repository.resolve("src/Main.kt")))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
+    fun `workspace gateway rejects a dirty index before applying model operations`() {
+        val repository = initializedRepository()
+        val gateway = LocalCodingWorkspaceGateway()
+        Files.writeString(repository.resolve("user-change.txt"), "owned by user\n")
+        run(repository, "git", "add", "user-change.txt")
+
+        assertFailsWith<IllegalArgumentException> {
+            gateway.applyAndCommit(
+                repository.toString(),
+                CodingPatchProposal(
+                    summary = "Change the application.",
+                    operations = listOf(CodingFileOperation(CODING_FILE_WRITE, "src/Main.kt", "fun answer() = 42\n")),
+                ),
+                executionId = 11,
+            )
+        }
+
+        assertEquals("fun answer() = 1\n", Files.readString(repository.resolve("src/Main.kt")))
+        assertTrue(run(repository, "git", "status", "--porcelain").contains("A  user-change.txt"))
+    }
+
+    @Test
+    fun `workspace gateway runs an allowed verification command without a shell`() {
+        val repository = initializedRepository()
+        val script = repository.resolve("gradlew")
+        Files.writeString(script, "#!/bin/sh\nprintf 'verified %s\\n' \"$1\"\n")
+        script.toFile().setExecutable(true)
+        run(repository, "git", "add", "gradlew")
+        run(repository, "git", "commit", "-m", "Add verifier")
+
+        val observation = LocalCodingWorkspaceGateway().executeVerification(
+            repository.toString(),
+            VerificationCommand("./gradlew", listOf("test", "--no-daemon")),
+        )
+
+        assertEquals(0, observation.exitCode)
+        assertEquals("./gradlew test --no-daemon", observation.command)
+        assertTrue(observation.summary.contains("verified test"))
+        assertTrue(observation.outputHash.matches(Regex("[0-9a-f]{64}")))
+    }
+
+    @Test
+    fun `workspace gateway bounds large verification output`() {
+        val repository = initializedRepository()
+        val script = repository.resolve("large-output")
+        Files.writeString(script, "#!/bin/sh\nhead -c 1048576 /dev/zero | tr '\\000' x\n")
+        script.toFile().setExecutable(true)
+        run(repository, "git", "add", "large-output")
+        run(repository, "git", "commit", "-m", "Add large-output verifier")
+
+        val observation = LocalCodingWorkspaceGateway().executeVerification(
+            repository.toString(),
+            VerificationCommand("./large-output"),
+        )
+
+        assertEquals(0, observation.exitCode)
+        assertTrue(observation.summary.length <= 4_096)
+        assertTrue(observation.outputHash.matches(Regex("[0-9a-f]{64}")))
+    }
+
+    @Test
+    fun `admitted verification rejects quoting that cannot round trip as typed arguments`() {
+        assertFailsWith<IllegalArgumentException> {
+            LocalCodingWorkspaceGateway().parseVerificationCommand("./gradlew 'test suite'")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            LocalCodingWorkspaceGateway().parseVerificationCommand("./gradlew  test")
+        }
+    }
+
+        @Test
+        fun `external toolchain pack adds verification without rebuilding Orchard`() {
+                val repository = initializedRepository()
+                Files.writeString(repository.resolve("community.build"), "community-toolchain-v1\n")
+                val verifier = repository.resolve("community-verify")
+                Files.writeString(verifier, "#!/bin/sh\nprintf 'community %s\\n' \"$1\"\n")
+                verifier.toFile().setExecutable(true)
+                run(repository, "git", "add", ".")
+                run(repository, "git", "commit", "-m", "Add community toolchain")
+                val policyDirectory = createTempDirectory("orchard-toolchain-packs-")
+                val gateway = LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(policyDirectory))
+                assertNull(gateway.resolveToolchainPolicy(repository.toString()))
+                Files.writeString(
+                        policyDirectory.resolve("community.json"),
+                        """
+                        {
+                            "schemaVersion": 1,
+                            "packId": "community.example-toolchain",
+                            "packVersion": 3,
+                            "profiles": [{
+                                "id": "community-build",
+                                "priority": 500,
+                                "allFiles": ["community.build"],
+                                "commands": {
+                                    "BUILD": { "executable": "./community-verify", "arguments": ["build"] },
+                                    "TEST": { "executable": "./community-verify", "arguments": ["test"] }
+                                }
+                            }]
+                        }
+                        """.trimIndent(),
+                )
+                val policy = requireNotNull(gateway.resolveToolchainPolicy(repository.toString()))
+                val observation = gateway.executeVerification(repository.toString(), requireNotNull(policy.commands["TEST"]))
+
+                assertEquals("community.example-toolchain", policy.packId)
+                assertEquals(3, policy.packVersion)
+                assertEquals("community-build", policy.profileId)
+                assertTrue(policy.policyHash.matches(Regex("[0-9a-f]{64}")))
+                assertEquals("./community-verify test", observation.command)
+                assertTrue(observation.summary.contains("community test"))
+        }
+
+        @Test
+        fun `external toolchain pack validation rejects repository escape detectors`() {
+                val repository = initializedRepository()
+                val policyDirectory = createTempDirectory("orchard-invalid-toolchain-packs-")
+                Files.writeString(
+                        policyDirectory.resolve("invalid.json"),
+                        """
+                        {
+                            "schemaVersion": 1,
+                            "packId": "community.invalid",
+                            "packVersion": 1,
+                            "profiles": [{
+                                "id": "escape",
+                                "allFiles": ["../outside"],
+                                "commands": {
+                                    "BUILD": { "executable": "./verify", "arguments": ["build"] }
+                                }
+                            }]
+                        }
+                        """.trimIndent(),
+                )
+
+                assertFailsWith<IllegalArgumentException> {
+                        FileToolchainPolicyCatalog(policyDirectory).resolve(repository)
+                }
+        }
+
+        @Test
+        fun `external toolchain pack wins an equal-priority match explicitly`() {
+                val repository = initializedRepository()
+                val gradle = repository.resolve("gradlew")
+                Files.writeString(gradle, "#!/bin/sh\nexit 0\n")
+                gradle.toFile().setExecutable(true)
+                run(repository, "git", "add", "gradlew")
+                run(repository, "git", "commit", "-m", "Add Gradle wrapper")
+                val policyDirectory = createTempDirectory("orchard-priority-toolchain-packs-")
+                Files.writeString(
+                        policyDirectory.resolve("override.json"),
+                        """
+                        {
+                            "schemaVersion": 1,
+                            "packId": "community.gradle-policy",
+                            "packVersion": 1,
+                            "profiles": [{
+                                "id": "gradle-wrapper",
+                                "priority": 100,
+                                "allFiles": ["gradlew"],
+                                "commands": {
+                                    "BUILD": { "executable": "./gradlew", "arguments": ["community-build"] }
+                                }
+                            }]
+                        }
+                        """.trimIndent(),
+                )
+
+                val policy = requireNotNull(FileToolchainPolicyCatalog(policyDirectory).resolve(repository))
+
+                assertEquals("community.gradle-policy", policy.packId)
+                assertEquals(listOf("community-build"), policy.commands.getValue("BUILD").arguments)
+        }
+
+        @Test
+        fun `external toolchain pack file size is bounded before decoding`() {
+                val repository = initializedRepository()
+                val policyDirectory = createTempDirectory("orchard-oversized-toolchain-packs-")
+                Files.writeString(policyDirectory.resolve("oversized.json"), " ".repeat(256 * 1024 + 1))
+
+                assertFailsWith<IllegalArgumentException> {
+                        FileToolchainPolicyCatalog(policyDirectory).resolve(repository)
+                }
+        }
+
+            @Test
+            fun `malformed hot-loaded pack is distinct from a valid catalog with no match`() {
+                val repository = initializedRepository()
+                val policyDirectory = createTempDirectory("orchard-malformed-toolchain-packs-")
+                val catalog = FileToolchainPolicyCatalog(policyDirectory)
+                assertNull(catalog.resolve(repository))
+                Files.writeString(policyDirectory.resolve("partial.json"), "{\"schemaVersion\":1")
+
+                assertFailsWith<IllegalStateException> {
+                    catalog.resolve(repository)
+                }
+            }
+
+    @Test
+    fun `repository validation binds evidence to a stable canonical diff hash`() {
+        val repository = initializedRepository()
+        val authority = createTempDirectory("orchard-coding-repository-authority-")
+        val bindings = FileRepositoryBindingStore(authority)
+        bindings.bind(1, repository.toString())
+        val base = run(repository, "git", "rev-parse", "HEAD")
+        Files.writeString(repository.resolve("src/Main.kt"), "fun answer() = 42\n")
+        run(repository, "git", "add", "src/Main.kt")
+        run(repository, "git", "commit", "-m", "Candidate")
+        val target = run(repository, "git", "rev-parse", "HEAD")
+
+        val first = bindings.validateRevision(1, base, target)
+        val second = bindings.validateRevision(1, base, target)
+
+        assertTrue(requireNotNull(first).changedFromBase)
+        assertTrue(requireNotNull(first.diffHash).matches(Regex("[0-9a-f]{64}")))
+        assertEquals(first, second)
+    }
+
+    private fun claim(executionId: Long, runId: Long, attempt: Int): CodingWorkerClaim {
+        val draft = CodingWorkerClaim(
+            executionId = executionId,
+            runId = runId,
+            attempt = attempt,
+            contextHash = "a".repeat(64),
+            workspacePath = "/tmp/orchard-worktree-$runId",
+            bindingFingerprint = "b".repeat(64),
+            toolchainPackId = "orchard.default-toolchains",
+            toolchainPackVersion = 1,
+            toolchainProfileId = "gradle-wrapper",
+            toolchainPolicyHash = "c".repeat(64),
+            claimedAt = "2026-06-21T00:00:00Z",
+            hash = "",
+        )
+        return draft.copy(hash = codingWorkerClaimHash(draft))
+    }
+
+    private fun intent(
+        type: Int,
+        title: String,
+        projectId: Int = 0,
+        epicId: Int = 0,
+        storyId: Int = 0,
+    ) = DocumentIntent(
+        actionTypeId = ACTION_CREATE,
+        entityTypeId = type,
+        boundWorkflowId = DEFAULT_DELIVERY_WORKFLOW_ID,
+        projectId = projectId,
+        epicId = epicId,
+        storyId = storyId,
+        title = title,
+    )
+
+    private fun initializedRepository(): Path {
+        val directory = createTempDirectory("orchard-coding-worktree-")
+        run(directory, "git", "init")
+        run(directory, "git", "config", "user.name", "Orchard Test")
+        run(directory, "git", "config", "user.email", "orchard-test@localhost")
+        Files.createDirectories(directory.resolve("src"))
+        Files.writeString(directory.resolve("src/Main.kt"), "fun answer() = 1\n")
+        run(directory, "git", "add", ".")
+        run(directory, "git", "commit", "-m", "Initial")
+        return directory
+    }
+
+    private fun run(directory: Path, vararg command: String): String {
+        val process = ProcessBuilder(command.toList())
+            .directory(directory.toFile())
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+        check(process.waitFor() == 0) { "Command ${command.joinToString(" ")} failed: $output" }
+        return output
+    }
+
+    private class FixedCodingModel(private val output: String) : ModelProvider {
+        override suspend fun triage(prompt: String): String = error("Unsupported")
+
+        override suspend fun plan(
+            prompt: String,
+            actionType: Int,
+            entityType: Int,
+            workspace: WorkspaceStore,
+        ): String = error("Unsupported")
+
+        override fun bindingProfile() = ModelBindingProfile(
+            bindingId = "test:coding-model",
+            provider = "test",
+            model = "fixed-coding-model",
+            contextWindowTokens = 131_072,
+            capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+
+        override suspend fun executeCodingPatch(
+            prompt: String,
+            maxOutputTokens: Int,
+            contextWindowTokens: Int,
+        ) = ModelGeneration(output, prompt.length, output.length)
+    }
+}

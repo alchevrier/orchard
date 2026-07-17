@@ -27,6 +27,7 @@ data class RepositoryView(
 data class RevisionValidation(
     val commitHash: String,
     val changedFromBase: Boolean,
+    val diffHash: String? = null,
 )
 
 interface RepositoryBindingStore {
@@ -108,7 +109,22 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
         if (runGit(root, "merge-base", "--is-ancestor", baseRevision, canonicalTarget.output).exitCode != 0) return null
         val diff = runGit(root, "diff", "--quiet", baseRevision, canonicalTarget.output)
         if (diff.exitCode !in 0..1) return null
-        return RevisionValidation(canonicalTarget.output, changedFromBase = diff.exitCode == 1)
+        val canonicalDiff = runGit(
+            root,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            baseRevision,
+            canonicalTarget.output,
+        )
+        if (canonicalDiff.exitCode != 0) return null
+        return RevisionValidation(
+            canonicalTarget.output,
+            changedFromBase = diff.exitCode == 1,
+            diffHash = checksum(
+                "${baseRevision.lowercase()}\n${canonicalTarget.output.lowercase()}\n${canonicalDiff.output}"
+            ),
+        )
     }
 
     @Synchronized

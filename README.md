@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 9.0 complete - Requirement Authority and Design Admission. Activated projects now require admitted Epic, Story, and Task/Bug designs, compile exact acceptance contracts, and pin current design authority before execution.
+> **Project status:** Milestone 9.3 complete - Runtime Toolchain Policy Packs. Community toolchains can now extend governed verification from validated local JSON without rebuilding or restarting Orchard.
 
 ## Milestone 1: Local Architect MVP
 
@@ -308,11 +308,11 @@ Delivered and verified:
 
 Milestone 8.2 boundaries:
 
-- Dispatch creates a governed workflow run; it does not yet launch a coding-agent process or grant one write authority.
+- Dispatch creates the governed workflow run and isolated workspace consumed by the Milestone 9.2 coding worker.
 - The integration owner receives an isolated workspace but Orchard does not yet merge, rebase, resolve conflicts, or publish branches.
 - Dispatch worktrees and branches are retained; governed archival and cleanup are future work.
 - Priority is deterministic circuit order rather than a configurable deadline or scheduling class.
-- Local-model resource leases do not yet reserve capacity for future coding-agent processes.
+- Local-model resource leases now govern coding inference as well as definition and circuit synthesis.
 - Epic circuits gate Story completion; Task and Bug dispatch comes from Story circuits until Story-output aggregation is defined.
 - The scheduler is single-backend authority, not a distributed multi-process queue.
 
@@ -340,9 +340,94 @@ Milestone 9.0 boundaries:
 
 - Deterministic admission proves structure, traceability, allocation, and executable acceptance paths; independent semantic inspection is still required to prove non-weakening, feasibility, and policy consistency.
 - The external organizational Git policy source defined in ADR 004 is not yet synchronized or applied.
-- Acceptance criteria are pinned into workflow context but are not yet merged into the existing Work Definition completion-gate engine.
+- Acceptance criteria are pinned into workflow context; criterion-level completion enforcement is delivered in Milestone 9.1.
 - A dedicated Compose design-authoring and admission screen remains future UX work; authority is available through the typed backend API and workspace snapshot.
 - Parent revisions report stale descendants but do not synthesize replacement child designs.
+
+### Milestone 9.1: Contract-Compiled Acceptance Gates
+
+Orchard now carries admitted requirement authority through completion. Every criterion in the Task or Bug acceptance contract becomes an immutable gate in the resolved workflow, and all built-in, Work Definition, automated criterion, and human criterion gates must pass against one resulting repository revision.
+
+Delivered and verified:
+
+- Version 3 governed delivery workflows compiled from the pinned acceptance contract.
+- Stable criterion evidence kinds derived from admitted criterion IDs.
+- Exact requirement and criterion traceability in each compiled gate.
+- Automated criteria that accept only their admitted verification command and passing revision evidence.
+- Human criteria that reject command evidence and require immutable named judgments with rationale.
+- Rejected and superseding approved judgments retained in append-only workflow history.
+- Completion decisions that pin every contributing evidence and judgment event ID.
+- Same-revision composition across source, build, test, Work Definition, automated, and human gates.
+- Work episodes containing accepted evidence summaries and human approval rationale.
+- Replay validation that rejects invalid criterion, contract, verification, authority-reference, or completion claims.
+- Replay-time Git ancestry and outcome revalidation rather than trust in persisted revision strings or pass flags.
+- Recoverable-tail quarantine for workflow run, event, and episode journals, with interior corruption still failing closed.
+- Typed run projections for `PENDING`, `REJECTED`, and `PASSED` criterion gates.
+- Backend and desktop network contracts for recording and inspecting human judgments.
+
+Milestone 9.1 boundaries:
+
+- External producers may still submit evidence; Milestone 9.2 adds Orchard-owned bounded local verification without claiming OS-level sandbox isolation.
+- Workflow evidence recovery fails closed when the bound repository or referenced commits are unavailable for ancestry revalidation.
+- Named approvers are attributable caller claims, not yet authenticated identities or policy-role proofs.
+- Quorum, delegation, segregation of duties, and time-bounded waivers require the policy-composition layer.
+- A dedicated Compose judgment control remains future UX work.
+- External policy-pack synchronization and source-bound RAG are the next governance arc.
+
+### Milestone 9.2: Governed Autonomous Coding Worker
+
+Orchard now closes the first local execution loop. A circuit-dispatched governed run can be durably claimed, translated by a bounded local model into typed file operations, committed in its reserved Git worktree, verified, and submitted to the existing acceptance-gate engine.
+
+Delivered and verified:
+
+- Append-only checksummed `coding-worker.jsonl` claims and results with monotonic IDs, forced writes, cross-process append locking, restart validation, and torn-tail recovery.
+- Claims pinned to run context hash, isolated worktree, model-binding fingerprint, and bounded attempt number before inference.
+- `bounded-coding-patch-v1` model profile with strict JSON full-file `WRITE` and `DELETE` proposals.
+- Bounded tracked-file context assembly with model execution, resource admission, token, schema, and output provenance.
+- Clean-worktree admission, normalized path confinement, symlink and metadata rejection, atomic writes, `git diff --check`, and local candidate commits.
+- Run-authority revalidation immediately before mutation to prevent writes after cancellation or context change.
+- Argument-vector verification using only pinned commands or validated toolchain policy defaults, with reduced environment, timeout, process-tree termination, and bounded output.
+- Evidence submission exclusively through the Milestone 9.1 gate engine; the worker cannot approve human criteria or mark a run complete.
+- Canonical Git source-diff hashes re-proved during replay for new worker evidence.
+- Bounded immutable repair attempts, persisted cooldowns for transient resource denial, interrupted-claim recovery, and no repeat execution while a completed candidate awaits human judgment.
+- Automatic one-second worker scheduling plus typed execution-history and manual-tick APIs.
+- Focused real-Git tests for journal replay, duplicate claims, path escape, dirty-index contamination, candidate commits, command execution, and canonical diff hashing.
+
+Milestone 9.2 boundaries:
+
+- Candidate branches are not merged, rebased, pushed, published, conflict-resolved, archived, or cleaned up automatically.
+- Verification is bounded but not isolated by an OS filesystem/network sandbox; repository build scripts remain trusted local code.
+- The first proposal format replaces complete UTF-8 files rather than applying semantic or language-server edits.
+- The production binding remains `phi3:mini`; a code-specialized local binding can be routed later through the coding profile.
+- Context assembly uses bounded lexical ranking over tracked text files; source-bound RAG and symbol-aware retrieval remain future work.
+- A dedicated Compose coding-worker surface remains part of the upcoming UX effort.
+
+### Milestone 9.3: Runtime Toolchain Policy Packs
+
+Orchard now separates toolchain declarations from its trusted execution engine. Built-in and user-installed packs describe repository detectors and typed build/test commands, while Kotlin continues to enforce filesystem, process, evidence, and replay invariants.
+
+Delivered and verified:
+
+- Strict version 1 JSON schema for pack identity, profile priority, file detectors, evidence kinds, executables, and argument vectors.
+- Built-in Gradle, Maven, Cargo, Meson, CMake, and Node profiles moved out of the coding gateway into a resource policy pack.
+- Hot discovery of external packs from `~/.orchard/policy-packs/toolchains/*.json` on every future policy resolution.
+- Deterministic selection by descending priority, then stable pack and profile identity.
+- Fail-closed validation of schema versions, duplicate identities, bounds, traversal, reserved roots, malformed executables, and command arguments.
+- Bounded policy-directory scanning, pack-file reads, and streaming verification-output capture.
+- Typed command execution without shell expansion or a hard-coded ecosystem executable registry.
+- Repository-local executable confinement with regular-file, no-symbolic-link, and executable checks.
+- Durable worker claims pinning the selected pack ID, pack version, profile ID, and complete policy hash before inference.
+- Exact acceptance-contract commands retaining precedence and exact evidence text while executing as typed arguments.
+- Tests proving a previously unknown community toolchain can be added after catalog construction and used without restart or backend code changes.
+- Legacy coding-worker journal replay retained across the new policy authority fields.
+
+Milestone 9.3 boundaries:
+
+- External packs are local user-installed execution policy; Orchard does not fetch or activate remote packs automatically.
+- Git source allowlisting, revision synchronization, signatures, and a community registry remain future policy-source work.
+- Only toolchain verification is pack-backed. Stage workflows, delivery contracts, model catalogs, prompt registries, and classifiers remain subsequent migrations.
+- Pack commands are bounded argv, not shell scripts, but repository builds still lack an OS-level filesystem/network sandbox.
+- Pack selection is detector-based and not yet exposed as an explicit per-Project UI setting.
 
 ## Architecture
 
@@ -371,6 +456,11 @@ flowchart LR
     SC -->|dependency and artifact gates| DQ[Durable dispatch queue]
     DQ -->|priority and admission| WM
     DQ --> WT[Isolated Git worktrees]
+    WM --> CW[Governed coding worker]
+    CW -->|typed file operations| WT
+    CW -->|bounded verification evidence| WE
+    CW --> MX[Worker execution journal]
+    PP[Validated toolchain policy packs] -->|pinned typed commands| CW
     WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI
 ```
@@ -389,6 +479,8 @@ The backend exposes:
 - `POST http://127.0.0.1:8085/api/workflow-runs/{id}/attempts`
 - `POST http://127.0.0.1:8085/api/workflow-runs/{id}/evidence`
 - `POST http://127.0.0.1:8085/api/workflow-runs/{id}/cancel`
+- `GET http://127.0.0.1:8085/api/coding-worker/executions`
+- `POST http://127.0.0.1:8085/api/coding-worker/tick`
 
 The chat request is `{ "prompt": "..." }` with a 4092-byte UTF-8 limit. Both APIs return the same resource envelope, including non-success chat responses such as `409`, `422`, and `503`.
 
@@ -407,6 +499,7 @@ The chat request is `{ "prompt": "..." }` with a 4092-byte UTF-8 limit. Both API
 | System workflows | Require a versioned Ready Work Definition and derive acceptance evidence before delivery admission. |
 | Workflow runtime | Execute system and delivery policy through the same start, context, executor, evidence, and signal contract. |
 | Prompts | Keep system prompts as versioned resources. |
+| Coding worker | Treat model output as typed candidate operations; Orchard owns worktree mutation, verification, evidence, and retry authority. |
 
 See [docs/adrs](docs/adrs) for the decision history and proposed filesystem intelligence, workflow, and model-routing architecture.
 
@@ -479,6 +572,9 @@ These directories are runtime state and are not part of the repository. Accepted
 
 ## Next Milestones
 
+- Add verified external Git policy sources with allowlisted identity, signed revisions, manifests, freshness limits, and onboarding attestations.
+- Define an open policy-pack format so communities can publish engineering standards, assurance packs, inspectors, and acceptance templates that organizations compose with stricter private overlays.
+- Build source-bound local RAG only from verified policy commits; retrieval remains a disposable navigation projection and every passage retains repository, revision, path, range, and content-hash provenance.
 - Add an Investigation Center whose agents gather provenance-backed logs, diagnostics, reproductions, and requirement proposals for declared system-workflow phases.
 - Add governed implementation agents only after the accepted Work Definition fixes their behavioral target and evidence obligations.
 - Derive project observations, candidate practices, and executable project workflows from evidence.
