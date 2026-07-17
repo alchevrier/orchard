@@ -102,6 +102,8 @@ data class ContextManifest(
     val circuitDispatchId: Long? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val workspaceReservation: DispatchWorkspaceReservation? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val acceptanceContract: AcceptanceContract? = null,
 )
 
 @Serializable

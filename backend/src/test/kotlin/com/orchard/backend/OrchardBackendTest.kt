@@ -1579,6 +1579,28 @@ class CircuitIntelligenceServiceTest {
 
 class WorkspaceApiTest {
     @Test
+    fun designGovernanceRoutesActivateRecordAndAdmitAuthority() = testApplication {
+        val workspace = WorkspaceStore()
+        createTaskHierarchy(workspace)
+        application { workspaceApi(workspace) }
+
+        val activation = client.post("/api/projects/1/design-governance")
+        val candidate = client.post("/api/designs") {
+            contentType(ContentType.Application.Json)
+            setBody(
+                """{"workItemId":2,"title":"System design","problem":"Govern exact execution authority.","scope":["Epic boundary"],"assumptions":["Hierarchy is authoritative"],"constraints":["Fail closed"],"alternatives":["Ungoverned execution"],"architecture":["Compile immutable contracts"],"failureModes":["Missing authority blocks execution"],"qualityAttributes":["Auditable"],"securityImpact":"No new privilege.","complianceImpact":"No new obligation.","requirements":[{"requirementId":"SYS-API","statement":"The system shall govern execution.","criteria":[{"description":"Execution authority is inspectable.","verification":"Inspect the admitted contract.","gate":"AUTOMATED"}]}]}"""
+            )
+        }
+        val admission = client.post("/api/designs/1/admission")
+
+        assertEquals(HttpStatusCode.Created, activation.status)
+        assertEquals(HttpStatusCode.Created, candidate.status)
+        assertEquals(HttpStatusCode.OK, admission.status)
+        assertTrue(admission.bodyAsText().contains("\"status\":\"ADMITTED\""))
+        assertTrue(admission.bodyAsText().contains("\"contractId\":1"))
+    }
+
+    @Test
     fun circuitProposalRoutesSeparateGenerationFromHumanAcceptance() = testApplication {
         val workspace = WorkspaceStore()
         createTaskHierarchy(workspace)

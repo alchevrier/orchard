@@ -52,6 +52,8 @@ data class WorkspaceSnapshot(
     val circuitProposals: List<CircuitProposalView> = emptyList(),
     val stageWorkflows: List<StageExecutionWorkflowDefinition> = StageExecutionWorkflowRegistry.all(),
     val circuitDispatches: List<CircuitDispatchView> = emptyList(),
+    val designRevisions: List<DesignRevisionView> = emptyList(),
+    val projectGovernance: List<ProjectGovernanceView> = emptyList(),
 )
 
 enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
@@ -67,6 +69,7 @@ enum class WorkflowStartStatus {
     ALREADY_STARTED,
     WORK_DEFINITION_NOT_READY,
     STAGED_PLAN_BLOCKED,
+    DESIGN_NOT_ADMITTED,
     STORAGE_UNAVAILABLE,
 }
 
@@ -115,6 +118,7 @@ class WorkspaceStore(
     private val stagedPlanStore: StagedDeliveryPlanStore = TransientStagedDeliveryPlanStore(),
     private val circuitProposalStore: CircuitProposalStore = TransientCircuitProposalStore(),
     private val circuitDispatchStore: CircuitDispatchStore = TransientCircuitDispatchStore(),
+    private val designGovernanceStore: DesignGovernanceStore = TransientDesignGovernanceStore(),
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -154,6 +158,7 @@ class WorkspaceStore(
     private val stagedPlans = mutableListOf<StagedDeliveryPlan>()
     private val circuitProposals = mutableListOf<CircuitProposal>()
     private val circuitDispatches = mutableListOf<CircuitDispatch>()
+    private val designGovernanceEvents = mutableListOf<DesignGovernanceEvent>()
     private var nextRunId = 1L
     private var nextEventId = 1L
     private var nextDefinitionId = 1L
@@ -162,6 +167,11 @@ class WorkspaceStore(
     private var nextStagedPlanId = 1L
     private var nextCircuitProposalId = 1L
     private var nextCircuitDispatchId = 1L
+    private var nextDesignGovernanceEventId = 1L
+    private var nextDesignId = 1L
+    private var nextDesignDecisionId = 1L
+    private var nextAcceptanceContractId = 1L
+    private var nextGovernanceActivationId = 1L
     private var stagedPlanMessage = ""
 
     init {
@@ -169,6 +179,7 @@ class WorkspaceStore(
         restoreModelExperience(modelExperienceStore.loadEvents())
         restoreCollaboration(collaborationStore.loadEvents())
         restoreDefinitions(definitionStore.load())
+        restoreDesignGovernance(designGovernanceStore.loadEvents())
         restoreRuns(workflowMemory.loadRuns())
         restoreEvents(workflowMemory.loadEvents())
         validateRunReplacements()
@@ -287,6 +298,133 @@ class WorkspaceStore(
         }
         if (status == RepositoryBindStatus.BOUND) tryAdvanceCircuitDispatches()
         return RepositoryBindResult(status, snapshot(MESSAGE_REPOSITORY_BINDING))
+    }
+
+    @Synchronized
+    fun activateDesignGovernance(projectId: Int): DesignGovernanceResult {
+        val project = committedEntity(projectId, ENTITY_PROJECT)
+            ?: return designGovernanceFailure(DesignGovernanceStatus.WORK_ITEM_NOT_FOUND)
+        if (governanceActivation(project.id) != null) {
+            return designGovernanceFailure(DesignGovernanceStatus.GOVERNANCE_ALREADY_ACTIVE)
+        }
+        val activatedAt = java.time.Instant.now().toString()
+        val activation = ProjectGovernanceActivation(
+            activationId = nextGovernanceActivationId,
+            projectId = project.id,
+            activatedBy = COLLABORATOR_HUMAN,
+            activatedAt = activatedAt,
+            hash = stagedPlanHash("$nextGovernanceActivationId:${project.id}:$COLLABORATOR_HUMAN:$activatedAt"),
+        )
+        val event = DesignGovernanceEvent(nextDesignGovernanceEventId, activation = activation)
+        if (!appendDesignGovernanceEvent(event)) {
+            return designGovernanceFailure(DesignGovernanceStatus.STORAGE_UNAVAILABLE)
+        }
+        nextGovernanceActivationId++
+        return DesignGovernanceResult(DesignGovernanceStatus.RECORDED, snapshot(MESSAGE_READY))
+    }
+
+    @Synchronized
+    fun recordDesignCandidate(submission: DesignSubmission): DesignGovernanceResult {
+        val workItem = committedEntity(submission.workItemId)
+            ?: return designGovernanceFailure(DesignGovernanceStatus.WORK_ITEM_NOT_FOUND)
+        if (workItem.type !in setOf(ENTITY_EPIC, ENTITY_STORY, ENTITY_TASK, ENTITY_BUG)) {
+            return designGovernanceFailure(DesignGovernanceStatus.INVALID_SCOPE)
+        }
+        val project = projectFor(workItem)
+            ?: return designGovernanceFailure(DesignGovernanceStatus.INVALID_SCOPE)
+        if (governanceActivation(project.id) == null) {
+            return designGovernanceFailure(DesignGovernanceStatus.INVALID_SCOPE)
+        }
+        if (
+            workItem.type in setOf(ENTITY_TASK, ENTITY_BUG) &&
+            workflowRuns.any { it.context.workItemId == workItem.id }
+        ) {
+            return designGovernanceFailure(DesignGovernanceStatus.WORKFLOW_ALREADY_STARTED)
+        }
+        val normalized = normalizeDesignSubmission(submission)
+            ?: return designGovernanceFailure(DesignGovernanceStatus.INVALID_DESIGN)
+        val current = designRevisions().lastOrNull { it.workItemId == workItem.id }
+        if (normalized.baseRevision != (current?.revision ?: 0) || normalized.baseHash != current?.hash) {
+            return designGovernanceFailure(DesignGovernanceStatus.STALE_DESIGN)
+        }
+        val createdAt = java.time.Instant.now().toString()
+        val revision = (current?.revision ?: 0) + 1
+        val requirementLevel = requirementLevel(workItem.type)
+        val hash = designRevisionHash(
+            nextDesignId,
+            revision,
+            workItem,
+            requirementLevel,
+            normalized,
+            COLLABORATOR_HUMAN,
+            createdAt,
+        )
+        val design = DesignRevision(
+            designId = nextDesignId,
+            revision = revision,
+            workItemId = workItem.id,
+            workItemType = workItem.type,
+            requirementLevel = requirementLevel,
+            content = normalized,
+            actor = COLLABORATOR_HUMAN,
+            createdAt = createdAt,
+            hash = hash,
+        )
+        val event = DesignGovernanceEvent(nextDesignGovernanceEventId, design = design)
+        if (!appendDesignGovernanceEvent(event)) {
+            return designGovernanceFailure(DesignGovernanceStatus.STORAGE_UNAVAILABLE)
+        }
+        nextDesignId++
+        return DesignGovernanceResult(DesignGovernanceStatus.RECORDED, snapshot(MESSAGE_READY), design = design)
+    }
+
+    @Synchronized
+    fun admitDesign(designId: Long): DesignGovernanceResult {
+        val design = designRevisions().singleOrNull { it.designId == designId }
+            ?: return designGovernanceFailure(DesignGovernanceStatus.DESIGN_NOT_FOUND)
+        if (designDecisions().any { it.designId == designId }) {
+            return designGovernanceFailure(DesignGovernanceStatus.ALREADY_DECIDED)
+        }
+        if (designRevisions().lastOrNull { it.workItemId == design.workItemId }?.designId != designId) {
+            return designGovernanceFailure(DesignGovernanceStatus.STALE_DESIGN)
+        }
+        val workItem = requireNotNull(committedEntity(design.workItemId))
+        val project = requireNotNull(projectFor(workItem))
+        if (governanceActivation(project.id) == null) {
+            return designGovernanceFailure(DesignGovernanceStatus.INVALID_SCOPE)
+        }
+        val parentDesigns = governingParentDesigns(workItem)
+        val findings = inspectDesign(design, workItem, parentDesigns)
+        val decidedAt = java.time.Instant.now().toString()
+        val contract = if (findings.isEmpty()) compileAcceptanceContract(design, parentDesigns, decidedAt) else null
+        val status = if (contract == null) DESIGN_STATUS_REJECTED else DESIGN_STATUS_ADMITTED
+        val decisionHash = stagedPlanHash(
+            "$nextDesignDecisionId:$designId:$status:$COLLABORATOR_HUMAN:$decidedAt:" +
+                Json.encodeToString(findings) + ":" + Json.encodeToString(contract)
+        )
+        val decision = DesignAdmissionDecision(
+            decisionId = nextDesignDecisionId,
+            designId = designId,
+            status = status,
+            reviewer = COLLABORATOR_HUMAN,
+            findings = findings,
+            decidedAt = decidedAt,
+            contract = contract,
+            hash = decisionHash,
+        )
+        val event = DesignGovernanceEvent(nextDesignGovernanceEventId, decision = decision)
+        if (!appendDesignGovernanceEvent(event)) {
+            return designGovernanceFailure(DesignGovernanceStatus.STORAGE_UNAVAILABLE)
+        }
+        nextDesignDecisionId++
+        if (contract != null) nextAcceptanceContractId++
+        tryAdvanceCircuitDispatches()
+        return DesignGovernanceResult(
+            if (contract == null) DesignGovernanceStatus.REJECTED else DesignGovernanceStatus.ADMITTED,
+            snapshot(MESSAGE_READY),
+            design,
+            decision,
+        )
     }
 
     @Synchronized
@@ -804,6 +942,12 @@ class WorkspaceStore(
             ?: return workflowFailure(WorkflowStartStatus.WORK_ITEM_NOT_FOUND, "The work item hierarchy is incomplete.")
         val project = committedEntity(epic.parentId, ENTITY_PROJECT)
             ?: return workflowFailure(WorkflowStartStatus.WORK_ITEM_NOT_FOUND, "The work item hierarchy is incomplete.")
+        val acceptanceContract = if (governanceActivation(project.id) == null) null else {
+            currentAcceptanceContract(workItem) ?: return workflowFailure(
+                WorkflowStartStatus.DESIGN_NOT_ADMITTED,
+                "Admit a current implementation design whose contract references the active parent designs.",
+            )
+        }
         val head = runCatching { repositoryBindings.resolveHead(project.id) }.getOrNull()
             ?: return workflowFailure(
                 WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
@@ -862,6 +1006,7 @@ class WorkspaceStore(
             hash = "",
             circuitDispatchId = circuitDispatchId,
             workspaceReservation = workspaceReservation,
+            acceptanceContract = acceptanceContract,
         )
         check(
             WorkflowStepEngine.hasRequiredContext(
@@ -1105,6 +1250,8 @@ class WorkspaceStore(
             circuitProposalViews(),
             StageExecutionWorkflowRegistry.all(),
             circuitDispatchViews(),
+            designRevisionViews(),
+            projectGovernanceViews(),
         )
     }
 
@@ -1186,6 +1333,14 @@ class WorkspaceStore(
                         definition.workItemId == workItem.id &&
                         workDefinitions.any { it.definitionId == definition.definitionId && it == definition }
                 ) { "Workflow run ${run.runId} references an invalid work definition" }
+            }
+            run.context.acceptanceContract?.let { contract ->
+                require(
+                    contract.design.workItemId == workItem.id &&
+                        designDecisions().singleOrNull {
+                            it.status == DESIGN_STATUS_ADMITTED && it.contract == contract
+                        } != null
+                ) { "Workflow run ${run.runId} references invalid design authority" }
             }
             workflowRuns += run
             nextRunId++
@@ -1458,6 +1613,357 @@ class WorkspaceStore(
             nextEventId++
         }
     }
+
+    private fun restoreDesignGovernance(restoredEvents: List<DesignGovernanceEvent>) {
+        restoredEvents.forEach { event ->
+            require(event.eventId == nextDesignGovernanceEventId)
+            require(listOfNotNull(event.design, event.decision, event.activation).size == 1)
+            event.activation?.let { activation ->
+                require(activation.activationId == nextGovernanceActivationId)
+                require(committedEntity(activation.projectId, ENTITY_PROJECT) != null)
+                require(governanceActivation(activation.projectId) == null)
+                require(
+                    activation.hash == stagedPlanHash(
+                        "${activation.activationId}:${activation.projectId}:${activation.activatedBy}:${activation.activatedAt}"
+                    )
+                )
+                nextGovernanceActivationId++
+            }
+            event.design?.let { design ->
+                require(design.designId == nextDesignId)
+                val workItem = requireNotNull(committedEntity(design.workItemId))
+                val project = requireNotNull(projectFor(workItem))
+                require(governanceActivation(project.id) != null)
+                require(design.workItemType == workItem.type && design.requirementLevel == requirementLevel(workItem.type))
+                val prior = designRevisions().lastOrNull { it.workItemId == design.workItemId }
+                require(design.revision == (prior?.revision ?: 0) + 1)
+                require(
+                    design.hash == designRevisionHash(
+                        design.designId,
+                        design.revision,
+                        workItem,
+                        design.requirementLevel,
+                        design.content,
+                        design.actor,
+                        design.createdAt,
+                    )
+                )
+                nextDesignId++
+            }
+            event.decision?.let { decision ->
+                require(decision.decisionId == nextDesignDecisionId)
+                val design = designRevisions().singleOrNull { it.designId == decision.designId }
+                require(design != null && designDecisions().none { it.designId == decision.designId })
+                require(designRevisions().lastOrNull { it.workItemId == design.workItemId }?.designId == design.designId)
+                require(decision.status in setOf(DESIGN_STATUS_ADMITTED, DESIGN_STATUS_REJECTED))
+                require((decision.status == DESIGN_STATUS_ADMITTED) == (decision.contract != null))
+                val workItem = requireNotNull(committedEntity(design.workItemId))
+                val parentDesigns = governingParentDesigns(workItem)
+                val expectedFindings = inspectDesign(design, workItem, parentDesigns)
+                require(decision.findings == expectedFindings)
+                decision.contract?.let { contract ->
+                    require(contract.contractId == nextAcceptanceContractId)
+                    require(contract.design.designId == design.designId && contract.design.hash == design.hash)
+                    require(contract.compiledAt == decision.decidedAt)
+                    require(contract.parentDesigns == parentDesigns.map { it.reference() })
+                    require(contract == compileAcceptanceContract(design, parentDesigns, decision.decidedAt))
+                    nextAcceptanceContractId++
+                }
+                require(
+                    decision.hash == designDecisionHash(
+                        decision.decisionId,
+                        decision.designId,
+                        decision.status,
+                        decision.reviewer,
+                        decision.decidedAt,
+                        decision.findings,
+                        decision.contract,
+                    )
+                )
+                nextDesignDecisionId++
+            }
+            designGovernanceEvents += event
+            nextDesignGovernanceEventId++
+        }
+    }
+
+    private fun appendDesignGovernanceEvent(event: DesignGovernanceEvent): Boolean = try {
+        designGovernanceStore.append(event)
+        designGovernanceEvents += event
+        nextDesignGovernanceEventId++
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun normalizeDesignSubmission(submission: DesignSubmission): DesignSubmission? {
+        fun normalizeList(values: List<String>): List<String>? {
+            if (values.size > MAX_DESIGN_ENTRIES) return null
+            return values.map(String::trim).takeIf { entries ->
+                entries.all { it.isNotEmpty() && it.length <= MAX_DESIGN_TEXT }
+            }
+        }
+        val requirements = submission.requirements.map { requirement ->
+            requirement.copy(
+                requirementId = requirement.requirementId.trim().uppercase(),
+                statement = requirement.statement.trim(),
+                parentRequirementIds = requirement.parentRequirementIds.map { it.trim().uppercase() },
+                criteria = requirement.criteria.map { criterion ->
+                    criterion.copy(
+                        description = criterion.description.trim(),
+                        verification = criterion.verification.trim(),
+                        gate = criterion.gate.trim().uppercase(),
+                    )
+                },
+            )
+        }
+        if (
+            submission.title.isBlank() || submission.title.length > MAX_DESIGN_TEXT ||
+            submission.problem.isBlank() || submission.problem.length > MAX_DESIGN_TEXT ||
+            submission.securityImpact.length > MAX_DESIGN_TEXT ||
+            submission.complianceImpact.length > MAX_DESIGN_TEXT ||
+            requirements.size > MAX_DESIGN_REQUIREMENTS ||
+            requirements.map { it.requirementId }.distinct().size != requirements.size ||
+            requirements.any { requirement ->
+                !requirement.requirementId.matches(REQUIREMENT_ID) ||
+                    requirement.statement.isBlank() || requirement.statement.length > MAX_DESIGN_TEXT ||
+                    requirement.parentRequirementIds.size > MAX_DESIGN_REQUIREMENTS ||
+                    requirement.parentRequirementIds.distinct().size != requirement.parentRequirementIds.size ||
+                    requirement.parentRequirementIds.any { !it.matches(REQUIREMENT_ID) } ||
+                    requirement.criteria.size > MAX_DESIGN_CRITERIA ||
+                    requirement.criteria.any {
+                        it.description.length > MAX_DESIGN_TEXT || it.verification.length > MAX_DESIGN_TEXT
+                    }
+            }
+        ) return null
+        return submission.copy(
+            title = submission.title.trim(),
+            problem = submission.problem.trim(),
+            scope = normalizeList(submission.scope) ?: return null,
+            assumptions = normalizeList(submission.assumptions) ?: return null,
+            constraints = normalizeList(submission.constraints) ?: return null,
+            alternatives = normalizeList(submission.alternatives) ?: return null,
+            architecture = normalizeList(submission.architecture) ?: return null,
+            failureModes = normalizeList(submission.failureModes) ?: return null,
+            qualityAttributes = normalizeList(submission.qualityAttributes) ?: return null,
+            securityImpact = submission.securityImpact.trim(),
+            complianceImpact = submission.complianceImpact.trim(),
+            requirements = requirements,
+        )
+    }
+
+    private fun inspectDesign(
+        design: DesignRevision,
+        workItem: WorkspaceEntity,
+        parentDesigns: List<DesignRevision>,
+    ): List<DesignFinding> = buildList {
+        val content = design.content
+        listOf(
+            "SCOPE_REQUIRED" to content.scope,
+            "ASSUMPTIONS_REQUIRED" to content.assumptions,
+            "CONSTRAINTS_REQUIRED" to content.constraints,
+            "ALTERNATIVES_REQUIRED" to content.alternatives,
+            "ARCHITECTURE_REQUIRED" to content.architecture,
+            "FAILURE_MODES_REQUIRED" to content.failureModes,
+            "QUALITY_ATTRIBUTES_REQUIRED" to content.qualityAttributes,
+        ).filter { (_, values) -> values.isEmpty() }.forEach { (code, _) ->
+            add(DesignFinding(code, "The design must explicitly address ${code.removeSuffix("_REQUIRED").lowercase().replace('_', ' ')}."))
+        }
+        if (content.securityImpact.isBlank()) add(DesignFinding("SECURITY_IMPACT_REQUIRED", "Security impact must be explicit, including none."))
+        if (content.complianceImpact.isBlank()) add(DesignFinding("COMPLIANCE_IMPACT_REQUIRED", "Compliance impact must be explicit, including none."))
+        if (content.requirements.isEmpty()) add(DesignFinding("REQUIREMENTS_REQUIRED", "At least one exact requirement is required."))
+        val directParent = parentDesigns.firstOrNull()
+        if (workItem.type != ENTITY_EPIC && directParent == null) {
+            add(DesignFinding("PARENT_DESIGN_REQUIRED", "The direct parent must have an admitted design before this design can be admitted."))
+        }
+        val validParentIds = directParent?.content?.requirements?.mapTo(linkedSetOf()) { it.requirementId }.orEmpty()
+        val allocatedParentIds = content.requirements.flatMapTo(linkedSetOf()) { it.parentRequirementIds }
+        if (directParent != null && !allocatedParentIds.containsAll(validParentIds)) {
+            add(
+                DesignFinding(
+                    "PARENT_REQUIREMENT_UNALLOCATED",
+                    "Every direct-parent requirement must be allocated to at least one child requirement.",
+                )
+            )
+        }
+        content.requirements.forEach { requirement ->
+            when {
+                workItem.type == ENTITY_EPIC && requirement.parentRequirementIds.isNotEmpty() -> add(
+                    DesignFinding("SYSTEM_REQUIREMENT_HAS_PARENT", "System requirements cannot name a parent requirement.", requirement.requirementId)
+                )
+                workItem.type != ENTITY_EPIC && requirement.parentRequirementIds.isEmpty() -> add(
+                    DesignFinding("PARENT_TRACE_REQUIRED", "The requirement must trace to at least one direct parent requirement.", requirement.requirementId)
+                )
+                workItem.type != ENTITY_EPIC && requirement.parentRequirementIds.any { it !in validParentIds } -> add(
+                    DesignFinding("PARENT_TRACE_INVALID", "The requirement references a requirement outside the admitted direct-parent design.", requirement.requirementId)
+                )
+            }
+            if (requirement.criteria.isEmpty()) {
+                add(DesignFinding("ACCEPTANCE_PATH_REQUIRED", "Every requirement needs an acceptance criterion or human gate.", requirement.requirementId))
+            }
+            requirement.criteria.forEach { criterion ->
+                if (criterion.gate !in setOf(CRITERION_AUTOMATED, CRITERION_HUMAN)) {
+                    add(DesignFinding("CRITERION_GATE_INVALID", "Criterion gate must be AUTOMATED or HUMAN.", requirement.requirementId))
+                } else if (criterion.description.isBlank() || criterion.gate == CRITERION_AUTOMATED && criterion.verification.isBlank()) {
+                    add(DesignFinding("CRITERION_INCOMPLETE", "Automated criteria require an exact verification; all criteria require a description.", requirement.requirementId))
+                }
+            }
+        }
+    }
+
+    private fun compileAcceptanceContract(
+        design: DesignRevision,
+        parentDesigns: List<DesignRevision>,
+        compiledAt: String,
+    ): AcceptanceContract {
+        val criteria = design.content.requirements.flatMap { requirement ->
+            requirement.criteria.mapIndexed { index, criterion ->
+                ContractCriterion(
+                    criterionId = "${requirement.requirementId}:C${index + 1}",
+                    requirementId = requirement.requirementId,
+                    description = criterion.description,
+                    verification = criterion.verification,
+                    gate = criterion.gate,
+                )
+            }
+        }
+        val unsigned = AcceptanceContract(
+            contractId = nextAcceptanceContractId,
+            design = design.reference(),
+            parentDesigns = parentDesigns.map { it.reference() },
+            inheritedRequirementIds = parentDesigns.flatMap { parent ->
+                parent.content.requirements.map { it.requirementId }
+            }.distinct(),
+            criteria = criteria,
+            compiledAt = compiledAt,
+            hash = "",
+        )
+        return unsigned.copy(hash = acceptanceContractHash(unsigned))
+    }
+
+    private fun DesignRevision.reference(): DesignAuthorityReference =
+        DesignAuthorityReference(workItemId, designId, revision, hash)
+
+    private fun designRevisionHash(
+        designId: Long,
+        revision: Int,
+        workItem: WorkspaceEntity,
+        level: String,
+        content: DesignSubmission,
+        actor: String,
+        createdAt: String,
+    ): String = stagedPlanHash(
+        "$designId:$revision:${workItem.id}:${workItem.type}:$level:$actor:$createdAt:${Json.encodeToString(content)}"
+    )
+
+    private fun acceptanceContractHash(contract: AcceptanceContract): String = stagedPlanHash(
+        Json.encodeToString(contract.copy(hash = ""))
+    )
+
+    private fun designDecisionHash(
+        decisionId: Long,
+        designId: Long,
+        status: String,
+        reviewer: String,
+        decidedAt: String,
+        findings: List<DesignFinding>,
+        contract: AcceptanceContract?,
+    ): String = stagedPlanHash(
+        "$decisionId:$designId:$status:$reviewer:$decidedAt:${Json.encodeToString(findings)}:" +
+            Json.encodeToString<AcceptanceContract?>(contract)
+    )
+
+    private fun designRevisions(): List<DesignRevision> = designGovernanceEvents.mapNotNull { it.design }
+
+    private fun designDecisions(): List<DesignAdmissionDecision> = designGovernanceEvents.mapNotNull { it.decision }
+
+    private fun governanceActivation(projectId: Int): ProjectGovernanceActivation? =
+        designGovernanceEvents.mapNotNull { it.activation }.singleOrNull { it.projectId == projectId }
+
+    private fun latestAdmittedDesign(workItemId: Int): DesignRevision? {
+        val admittedIds = designDecisions().filter { it.status == DESIGN_STATUS_ADMITTED }.mapTo(hashSetOf()) { it.designId }
+        return designRevisions().lastOrNull { it.workItemId == workItemId && it.designId in admittedIds }
+    }
+
+    private fun currentAcceptanceContract(workItem: WorkspaceEntity): AcceptanceContract? {
+        val design = latestAdmittedDesign(workItem.id) ?: return null
+        val contract = designDecisions().singleOrNull {
+            it.designId == design.designId && it.status == DESIGN_STATUS_ADMITTED
+        }?.contract ?: return null
+        val currentParents = governingParentDesigns(workItem).map { it.reference() }
+        return contract.takeIf { it.design == design.reference() && it.parentDesigns == currentParents }
+    }
+
+    private fun governingParentDesigns(workItem: WorkspaceEntity): List<DesignRevision> = when (workItem.type) {
+        ENTITY_EPIC -> emptyList()
+        ENTITY_STORY -> listOfNotNull(latestAdmittedDesign(workItem.parentId))
+        ENTITY_TASK, ENTITY_BUG -> {
+            val story = committedEntity(workItem.parentId, ENTITY_STORY)
+            val epic = story?.let { committedEntity(it.parentId, ENTITY_EPIC) }
+            listOfNotNull(story?.let { latestAdmittedDesign(it.id) }, epic?.let { latestAdmittedDesign(it.id) })
+        }
+        else -> emptyList()
+    }
+
+    private fun designRevisionViews(): List<DesignRevisionView> {
+        val decisions = designDecisions().associateBy { it.designId }
+        val latestAdmittedByItem = designRevisions().groupBy { it.workItemId }.mapValues { (_, designs) ->
+            designs.lastOrNull { decisions[it.designId]?.status == DESIGN_STATUS_ADMITTED }?.designId
+        }
+        return designRevisions().map { design ->
+            val decision = decisions[design.designId]
+            val status = when {
+                decision == null -> DESIGN_STATUS_CANDIDATE
+                decision.status == DESIGN_STATUS_ADMITTED && latestAdmittedByItem[design.workItemId] != design.designId -> DESIGN_STATUS_SUPERSEDED
+                else -> decision.status
+            }
+            DesignRevisionView(design, status, decision)
+        }
+    }
+
+    private fun projectGovernanceViews(): List<ProjectGovernanceView> =
+        designGovernanceEvents.mapNotNull { it.activation }.map { activation ->
+            ProjectGovernanceView(activation, governanceFindings(activation.projectId))
+        }
+
+    private fun governanceFindings(projectId: Int): List<DesignFinding> {
+        val project = committedEntity(projectId, ENTITY_PROJECT) ?: return emptyList()
+        return entities.take(committedEntityCount).filter { entity ->
+            projectFor(entity)?.id == project.id && entity.type in setOf(ENTITY_EPIC, ENTITY_STORY, ENTITY_TASK, ENTITY_BUG)
+        }.mapNotNull { entity ->
+            when {
+                latestAdmittedDesign(entity.id) == null -> DesignFinding(
+                    "DESIGN_NOT_ADMITTED",
+                    "${typeLabel(entity.type)} ${entity.id} has no admitted design.",
+                )
+                currentAcceptanceContract(entity) == null -> DesignFinding(
+                    "DESIGN_AUTHORITY_STALE",
+                    "${typeLabel(entity.type)} ${entity.id} must be readmitted against the current parent designs.",
+                )
+                else -> null
+            }
+        }
+    }
+
+    private fun projectFor(entity: WorkspaceEntity): WorkspaceEntity? = when (entity.type) {
+        ENTITY_PROJECT -> entity
+        ENTITY_EPIC -> committedEntity(entity.parentId, ENTITY_PROJECT)
+        ENTITY_STORY -> committedEntity(entity.parentId, ENTITY_EPIC)?.let { committedEntity(it.parentId, ENTITY_PROJECT) }
+        ENTITY_TASK, ENTITY_BUG -> committedEntity(entity.parentId, ENTITY_STORY)
+            ?.let { committedEntity(it.parentId, ENTITY_EPIC) }
+            ?.let { committedEntity(it.parentId, ENTITY_PROJECT) }
+        else -> null
+    }
+
+    private fun requirementLevel(workItemType: Int): String = when (workItemType) {
+        ENTITY_EPIC -> "SYSTEM"
+        ENTITY_STORY -> "SUBSYSTEM"
+        ENTITY_TASK, ENTITY_BUG -> "IMPLEMENTATION"
+        else -> error("Unsupported design work item type $workItemType")
+    }
+
+    private fun designGovernanceFailure(status: DesignGovernanceStatus): DesignGovernanceResult =
+        DesignGovernanceResult(status, snapshot(MESSAGE_READY))
 
     private fun validateRunReplacements() {
         workflowRuns.groupBy { it.context.workItemId }.values.forEach { runs ->
@@ -2180,7 +2686,12 @@ class WorkspaceStore(
         const val MAX_PLAN_NODES = 26
         const val MAX_PLAN_EDGES_PER_NODE = 26
         const val MAX_PLAN_ARTIFACTS_PER_NODE = 16
+        const val MAX_DESIGN_ENTRIES = 64
+        const val MAX_DESIGN_REQUIREMENTS = 128
+        const val MAX_DESIGN_CRITERIA = 32
+        const val MAX_DESIGN_TEXT = 4096
         val PLAN_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+        val REQUIREMENT_ID = Regex("[A-Z][A-Z0-9_-]{2,63}")
         val GIT_HASH = Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
         val SHA256 = Regex("[0-9a-fA-F]{64}")
         val TERMINAL_RUN_STATES = setOf(RUN_STATE_DONE, RUN_STATE_CANCELLED)

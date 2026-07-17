@@ -26,6 +26,9 @@ import com.orchard.backend.workspace.FileModelExperienceStore
 import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
 import com.orchard.backend.workspace.FileCircuitProposalStore
 import com.orchard.backend.workspace.FileCircuitDispatchStore
+import com.orchard.backend.workspace.FileDesignGovernanceStore
+import com.orchard.backend.workspace.DesignGovernanceStatus
+import com.orchard.backend.workspace.DesignSubmission
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
@@ -79,6 +82,7 @@ fun main() {
         FileStagedDeliveryPlanStore(OrchardPaths.WORKSPACE_DIR),
         FileCircuitProposalStore(OrchardPaths.WORKSPACE_DIR),
         FileCircuitDispatchStore(OrchardPaths.WORKSPACE_DIR),
+        FileDesignGovernanceStore(OrchardPaths.WORKSPACE_DIR),
     )
     val modelProvider = OllamaClient()
     val resourceController = MachineResourceController(
@@ -132,6 +136,33 @@ fun Application.workspaceApi(
     routing {
         get("/api/workspace") {
             call.respond(workspace.snapshot(MESSAGE_READY))
+        }
+        post("/api/projects/{projectId}/design-governance") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.activateDesignGovernance(projectId)
+            call.respond(designGovernanceStatus(result.status), result.snapshot)
+        }
+        post("/api/designs") {
+            val request = runCatching { call.receive<DesignSubmission>() }.getOrNull()
+            if (request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.recordDesignCandidate(request)
+            call.respond(designGovernanceStatus(result.status), result.snapshot)
+        }
+        post("/api/designs/{designId}/admission") {
+            val designId = call.parameters["designId"]?.toLongOrNull()
+            if (designId == null || designId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.admitDesign(designId)
+            call.respond(designGovernanceStatus(result.status), result.snapshot)
         }
         get("/api/model-profiles") {
             if (definitionIntelligence == null) {
@@ -298,7 +329,8 @@ fun Application.workspaceApi(
                 WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
                 WorkflowStartStatus.REPOSITORY_DIRTY,
                 WorkflowStartStatus.WORK_DEFINITION_NOT_READY -> HttpStatusCode.UnprocessableEntity
-                WorkflowStartStatus.STAGED_PLAN_BLOCKED -> HttpStatusCode.Conflict
+                WorkflowStartStatus.STAGED_PLAN_BLOCKED,
+                WorkflowStartStatus.DESIGN_NOT_ADMITTED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.ALREADY_STARTED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
@@ -428,6 +460,21 @@ private fun collaborationStatus(status: DefinitionCollaborationStatus): HttpStat
     DefinitionCollaborationStatus.WORKFLOW_ALREADY_STARTED -> HttpStatusCode.Conflict
     DefinitionCollaborationStatus.INVALID_RECORD -> HttpStatusCode.UnprocessableEntity
     DefinitionCollaborationStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+}
+
+private fun designGovernanceStatus(status: DesignGovernanceStatus): HttpStatusCode = when (status) {
+    DesignGovernanceStatus.RECORDED -> HttpStatusCode.Created
+    DesignGovernanceStatus.ADMITTED -> HttpStatusCode.OK
+    DesignGovernanceStatus.REJECTED,
+    DesignGovernanceStatus.INVALID_SCOPE,
+    DesignGovernanceStatus.INVALID_DESIGN -> HttpStatusCode.UnprocessableEntity
+    DesignGovernanceStatus.WORK_ITEM_NOT_FOUND,
+    DesignGovernanceStatus.DESIGN_NOT_FOUND -> HttpStatusCode.NotFound
+    DesignGovernanceStatus.STALE_DESIGN,
+    DesignGovernanceStatus.ALREADY_DECIDED,
+    DesignGovernanceStatus.GOVERNANCE_ALREADY_ACTIVE,
+    DesignGovernanceStatus.WORKFLOW_ALREADY_STARTED -> HttpStatusCode.Conflict
+    DesignGovernanceStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
 }
 
 @Serializable

@@ -4,7 +4,7 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 8.2 complete - Durable Circuit Dispatch. Accepted Story circuits now materialize durable pending work, automatically start eligible nodes in isolated Git worktrees, fan out on accepted evidence, and assign one integration owner.
+> **Project status:** Milestone 9.0 complete - Requirement Authority and Design Admission. Activated projects now require admitted Epic, Story, and Task/Bug designs, compile exact acceptance contracts, and pin current design authority before execution.
 
 ## Milestone 1: Local Architect MVP
 
@@ -315,6 +315,34 @@ Milestone 8.2 boundaries:
 - Local-model resource leases do not yet reserve capacity for future coding-agent processes.
 - Epic circuits gate Story completion; Task and Bug dispatch comes from Story circuits until Story-output aggregation is defined.
 - The scheduler is single-backend authority, not a distributed multi-process queue.
+
+### Milestone 9.0: Requirement Authority and Design Admission
+
+Orchard now treats design and requirement decomposition as enforceable system authority. Governance is explicitly activated per Project; activated projects fail closed when implementation authority is absent or stale, while legacy projects preserve their existing workflow until migrated.
+
+Delivered and verified:
+
+- Exact Epic system, Story subsystem, and Task/Bug implementation requirement levels.
+- Stable requirement IDs, direct-parent traceability, and complete direct-parent allocation.
+- Immutable candidate design revisions with optimistic revision and content-hash concurrency.
+- Deterministic design admission with structured, immutable rejection findings.
+- Atomic admission and criterion-level acceptance-contract compilation.
+- Exact design and parent-design references, inherited requirement IDs, verification methods, and human or automated gates in each contract.
+- Append-only checksummed `design-governance.jsonl` authority with forced writes and monotonic IDs.
+- Restart recovery that recomputes deterministic findings, design hashes, decision hashes, parent references, and acceptance contracts.
+- Manual and circuit-dispatched execution gates that require current admitted Task/Bug authority.
+- Immutable workflow contexts that pin the complete acceptance contract.
+- Stale-descendant impact projection when a new Epic or Story design is admitted.
+- Historical stability for already-started runs under their original pinned contract.
+- Typed HTTP operations for project activation, candidate recording, and deterministic admission.
+
+Milestone 9.0 boundaries:
+
+- Deterministic admission proves structure, traceability, allocation, and executable acceptance paths; independent semantic inspection is still required to prove non-weakening, feasibility, and policy consistency.
+- The external organizational Git policy source defined in ADR 004 is not yet synchronized or applied.
+- Acceptance criteria are pinned into workflow context but are not yet merged into the existing Work Definition completion-gate engine.
+- A dedicated Compose design-authoring and admission screen remains future UX work; authority is available through the typed backend API and workspace snapshot.
+- Parent revisions report stale descendants but do not synthesize replacement child designs.
 
 ## Architecture
 
