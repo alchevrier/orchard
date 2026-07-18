@@ -70,6 +70,7 @@ data class CodingWorkerExecutionView(
 interface CodingWorkerStore {
     fun loadEvents(): List<CodingWorkerEvent>
     fun append(event: CodingWorkerEvent)
+    fun appendNext(create: (eventId: Long, preceding: List<CodingWorkerEvent>) -> CodingWorkerEvent): CodingWorkerEvent
 }
 
 class TransientCodingWorkerStore : CodingWorkerStore {
@@ -82,6 +83,15 @@ class TransientCodingWorkerStore : CodingWorkerStore {
     override fun append(event: CodingWorkerEvent) {
         validateCodingWorkerEvent(event, events.size + 1L, events)
         events += event
+    }
+
+    @Synchronized
+    override fun appendNext(
+        create: (eventId: Long, preceding: List<CodingWorkerEvent>) -> CodingWorkerEvent,
+    ): CodingWorkerEvent {
+        val event = create(events.size + 1L, events.toList())
+        append(event)
+        return event
     }
 }
 
@@ -133,6 +143,35 @@ class FileCodingWorkerStore(private val directory: Path) : CodingWorkerStore {
                 FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
             }
         }
+    }
+
+    @Synchronized
+    override fun appendNext(
+        create: (eventId: Long, preceding: List<CodingWorkerEvent>) -> CodingWorkerEvent,
+    ): CodingWorkerEvent {
+        Files.createDirectories(directory)
+        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lockChannel ->
+            lockChannel.lock().use {
+                val existing = loadEventsUnlocked()
+                val event = create(existing.size + 1L, existing)
+                validateCodingWorkerEvent(event, existing.size + 1L, existing)
+                appendUnlocked(event)
+                event
+            }
+        }
+    }
+
+    private fun appendUnlocked(event: CodingWorkerEvent) {
+        val payload = json.encodeToString(event)
+        val line = json.encodeToString(
+            CodingWorkerEnvelope(value = event, checksum = stagedPlanHash(payload))
+        ) + "\n"
+        FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND).use { channel ->
+            val bytes = ByteBuffer.wrap(line.toByteArray(Charsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
+        }
+        FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
     }
 
     private companion object {
@@ -245,7 +284,9 @@ private fun validateCodingWorkerEvent(
         require(claim.hash == currentHash || claim.hash == prePlanHash || claim.hash == preCompanyHash || claim.hash == legacyHash) {
             "Coding worker claim hash mismatch"
         }
-        require(executions.none { it.result == null }) { "Another coding worker execution is still active" }
+        require(executions.none { it.claim.runId == claim.runId && it.result == null }) {
+            "Another coding worker execution is still active for this run"
+        }
         val previous = executions.filter { it.claim.runId == claim.runId }
         require(claim.attempt == previous.size + 1) { "Coding worker attempt sequence is invalid" }
     }

@@ -12,6 +12,7 @@ import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.ModelExecutionObservationDraft
 import com.orchard.backend.workspace.WorkspaceStore
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -70,39 +71,34 @@ class CompanyAuditService(
     private val resourceController: MachineResourceController = MachineResourceController.unrestricted(),
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
 ) {
-    private val mutex = Mutex()
+    private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
     suspend fun tick(): CompanyAuditTickResult {
+        val runId = eligibleRunIds().firstOrNull() ?: return CompanyAuditTickResult(CompanyAuditTickStatus.IDLE)
+        return tick(runId)
+    }
+
+    fun eligibleRunIds(): List<Long> = candidateExecutions(company.projectViews()).map { it.claim.runId }
+
+    suspend fun tick(runId: Long): CompanyAuditTickResult {
+        val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
         if (!mutex.tryLock()) return CompanyAuditTickResult(CompanyAuditTickStatus.BUSY)
         return try {
-            executeTick()
+            executeTick(runId)
         } finally {
             mutex.unlock()
         }
     }
 
-    private suspend fun executeTick(): CompanyAuditTickResult {
+    private suspend fun executeTick(runId: Long): CompanyAuditTickResult {
         val companyViews = company.projectViews()
-        val completed = codingWorker.executions().asSequence()
-            .filter { it.result?.status == CODING_EXECUTION_COMPLETED }
-            .groupBy { it.claim.runId }
-            .values
-            .mapNotNull { executions -> executions.maxByOrNull { it.claim.executionId } }
-            .sortedBy { it.claim.executionId }
-            .firstOrNull { execution ->
-                val result = requireNotNull(execution.result)
-                companyViews.none { view ->
-                    view.acceptances.any { it.runId == execution.claim.runId && it.candidateRevision == result.revision } ||
-                        view.audits.any {
-                            it.runId == execution.claim.runId && it.candidateRevision == result.revision &&
-                                it.status != AUDIT_CONFORMING
-                        }
-                }
-            } ?: return CompanyAuditTickResult(CompanyAuditTickStatus.IDLE)
+        val completed = candidateExecutions(companyViews).singleOrNull { it.claim.runId == runId }
+            ?: return CompanyAuditTickResult(CompanyAuditTickStatus.IDLE)
         val result = requireNotNull(completed.result)
         val revision = requireNotNull(result.revision)
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.singleOrNull { it.runId == completed.claim.runId }
             ?: return CompanyAuditTickResult(CompanyAuditTickStatus.STORAGE_UNAVAILABLE, completed.claim.runId)
+
         val sourceDiff = run.evidence.singleOrNull { it.kind == "SOURCE_DIFF" && it.revision == revision && it.passed }
             ?: return CompanyAuditTickResult(
                 CompanyAuditTickStatus.INVALID_JUDGMENT,
@@ -210,6 +206,25 @@ class CompanyAuditService(
             "Audit judgment resolved as ${recorded.status}.",
         )
     }
+
+    private fun candidateExecutions(companyViews: List<CompanyProjectView>) =
+        codingWorker.executions().asSequence()
+            .filter { it.result?.status == CODING_EXECUTION_COMPLETED }
+            .groupBy { it.claim.runId }
+            .values
+            .mapNotNull { executions -> executions.maxByOrNull { it.claim.executionId } }
+            .sortedBy { it.claim.executionId }
+            .filter { execution ->
+                val result = requireNotNull(execution.result)
+                companyViews.none { view ->
+                    view.acceptances.any { it.runId == execution.claim.runId && it.candidateRevision == result.revision } ||
+                        view.audits.any {
+                            it.runId == execution.claim.runId && it.candidateRevision == result.revision &&
+                                it.status != AUDIT_CONFORMING
+                        }
+                }
+            }
+            .toList()
 
     private fun validProposal(proposal: AuditProposal, ruleSet: ArchitectureRuleSet): Boolean {
         if (proposal.rationale.isBlank() || proposal.findings.isEmpty()) return false

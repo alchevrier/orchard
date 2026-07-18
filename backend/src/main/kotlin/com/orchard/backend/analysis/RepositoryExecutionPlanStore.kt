@@ -82,6 +82,7 @@ data class RepositoryExecutionPlan(
 interface RepositoryExecutionPlanStore {
     fun load(): List<RepositoryExecutionPlan>
     fun append(plan: RepositoryExecutionPlan)
+    fun appendNext(runId: Long, create: (planId: Long, revision: Int) -> RepositoryExecutionPlan): RepositoryExecutionPlan
 }
 
 class TransientRepositoryExecutionPlanStore : RepositoryExecutionPlanStore {
@@ -94,6 +95,16 @@ class TransientRepositoryExecutionPlanStore : RepositoryExecutionPlanStore {
     override fun append(plan: RepositoryExecutionPlan) {
         validateRepositoryExecutionPlan(plan, plans)
         plans += plan
+    }
+
+    @Synchronized
+    override fun appendNext(
+        runId: Long,
+        create: (planId: Long, revision: Int) -> RepositoryExecutionPlan,
+    ): RepositoryExecutionPlan {
+        val plan = create(plans.size + 1L, plans.count { it.runId == runId } + 1)
+        append(plan)
+        return plan
     }
 }
 
@@ -142,6 +153,36 @@ class FileRepositoryExecutionPlanStore(private val directory: Path) : Repository
                 FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
             }
         }
+    }
+
+    @Synchronized
+    override fun appendNext(
+        runId: Long,
+        create: (planId: Long, revision: Int) -> RepositoryExecutionPlan,
+    ): RepositoryExecutionPlan {
+        Files.createDirectories(directory)
+        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+            lock.lock().use {
+                val plans = loadUnlocked()
+                val plan = create(plans.size + 1L, plans.count { it.runId == runId } + 1)
+                validateRepositoryExecutionPlan(plan, plans)
+                appendUnlocked(plan)
+                plan
+            }
+        }
+    }
+
+    private fun appendUnlocked(plan: RepositoryExecutionPlan) {
+        val payload = json.encodeToString(plan)
+        val line = json.encodeToString(
+            RepositoryExecutionPlanEnvelope(value = plan, checksum = stagedPlanHash(payload))
+        ) + "\n"
+        FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND).use { channel ->
+            val bytes = ByteBuffer.wrap(line.toByteArray(Charsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
+        }
+        FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
     }
 
     private companion object {

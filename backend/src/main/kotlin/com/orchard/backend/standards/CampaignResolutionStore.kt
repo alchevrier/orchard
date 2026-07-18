@@ -101,6 +101,11 @@ interface CampaignResolutionStore {
     fun admissions(): List<CampaignResolutionAdmission>
     fun appendCase(case: CampaignResolutionCase)
     fun appendProposal(proposal: CampaignResolutionProposal)
+    fun appendNextProposal(create: (proposalId: Long) -> CampaignResolutionProposal): CampaignResolutionProposal {
+        val proposal = create((proposals().maxOfOrNull { it.proposalId } ?: 0L) + 1L)
+        appendProposal(proposal)
+        return proposal
+    }
     fun appendAdmission(admission: CampaignResolutionAdmission)
 }
 
@@ -131,6 +136,13 @@ class TransientCampaignResolutionStore : CampaignResolutionStore {
     }
 
     @Synchronized
+    override fun appendNextProposal(create: (proposalId: Long) -> CampaignResolutionProposal): CampaignResolutionProposal {
+        val proposal = create((proposalRecords.maxOfOrNull { it.proposalId } ?: 0L) + 1L)
+        appendProposal(proposal)
+        return proposal
+    }
+
+    @Synchronized
     override fun appendAdmission(admission: CampaignResolutionAdmission) {
         validateAdmissionAppend(caseRecords, proposalRecords, admissionRecords, admission)
         admissionRecords += admission
@@ -158,6 +170,23 @@ class FileCampaignResolutionStore(private val directory: Path) : CampaignResolut
     override fun appendProposal(proposal: CampaignResolutionProposal) = append(proposal = proposal)
 
     @Synchronized
+    override fun appendNextProposal(create: (proposalId: Long) -> CampaignResolutionProposal): CampaignResolutionProposal {
+        Files.createDirectories(directory)
+        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lockChannel ->
+            lockChannel.lock().use {
+                val records = load()
+                val cases = records.mapNotNull { it.case }
+                val proposals = records.mapNotNull { it.proposal }
+                val admissions = records.mapNotNull { it.admission }
+                val proposal = create((proposals.maxOfOrNull { it.proposalId } ?: 0L) + 1L)
+                validateProposalAppend(cases, proposals, admissions, proposal)
+                appendEnvelope(proposal = proposal)
+                proposal
+            }
+        }
+    }
+
+    @Synchronized
     override fun appendAdmission(admission: CampaignResolutionAdmission) = append(admission = admission)
 
     private fun append(
@@ -175,16 +204,24 @@ class FileCampaignResolutionStore(private val directory: Path) : CampaignResolut
                 case?.let { validateCaseAppend(cases, it) }
                 proposal?.let { validateProposalAppend(cases, proposals, admissions, it) }
                 admission?.let { validateAdmissionAppend(cases, proposals, admissions, it) }
-                val payload = case?.let(json::encodeToString)
-                    ?: proposal?.let(json::encodeToString)
-                    ?: json.encodeToString(requireNotNull(admission))
-                val envelope = CampaignResolutionEnvelope(case = case, proposal = proposal, admission = admission, checksum = sha256(payload))
-                FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND).use { channel ->
-                    val bytes = ByteBuffer.wrap((json.encodeToString(envelope) + "\n").toByteArray(Charsets.UTF_8))
-                    while (bytes.hasRemaining()) channel.write(bytes)
-                    channel.force(true)
-                }
+                appendEnvelope(case, proposal, admission)
             }
+        }
+    }
+
+    private fun appendEnvelope(
+        case: CampaignResolutionCase? = null,
+        proposal: CampaignResolutionProposal? = null,
+        admission: CampaignResolutionAdmission? = null,
+    ) {
+        val payload = case?.let(json::encodeToString)
+            ?: proposal?.let(json::encodeToString)
+            ?: json.encodeToString(requireNotNull(admission))
+        val envelope = CampaignResolutionEnvelope(case = case, proposal = proposal, admission = admission, checksum = sha256(payload))
+        FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND).use { channel ->
+            val bytes = ByteBuffer.wrap((json.encodeToString(envelope) + "\n").toByteArray(Charsets.UTF_8))
+            while (bytes.hasRemaining()) channel.write(bytes)
+            channel.force(true)
         }
     }
 

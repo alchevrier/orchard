@@ -53,6 +53,15 @@ data class ModelBindingEvidence(
 }
 
 object DefaultModelExecutionProfiles {
+    val boundedConversationConductor = ModelExecutionProfile(
+        id = "bounded-conversation-conductor-v1",
+        version = 1,
+        reasoningClass = "BOUNDED_CONVERSATION_CONDUCTOR",
+        inputBudgetTokens = 48_000,
+        outputBudgetTokens = 4_000,
+        requiredCapabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+    )
+
     val boundedDefinitionReasoning = ModelExecutionProfile(
         id = "bounded-definition-reasoning-v1",
         version = 1,
@@ -99,6 +108,7 @@ object DefaultModelExecutionProfiles {
     )
 
     fun resolve(id: String): ModelExecutionProfile = when (id) {
+        boundedConversationConductor.id -> boundedConversationConductor
         boundedDefinitionReasoning.id -> boundedDefinitionReasoning
         boundedCircuitSynthesis.id -> boundedCircuitSynthesis
         boundedCodingPatch.id -> boundedCodingPatch
@@ -108,6 +118,7 @@ object DefaultModelExecutionProfiles {
     }
 
     fun all(): List<ModelExecutionProfile> = listOf(
+        boundedConversationConductor,
         boundedDefinitionReasoning,
         boundedCircuitSynthesis,
         broadRepositoryAnalysis,

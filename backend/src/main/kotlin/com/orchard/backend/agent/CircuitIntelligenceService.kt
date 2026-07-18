@@ -16,6 +16,7 @@ import com.orchard.backend.vector.effectiveModelExecutionProfile
 import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.vector.modelBindingFingerprint
 import com.orchard.backend.workspace.CircuitExecutionProvenance
+import com.orchard.backend.workspace.ConversationCommandReference
 import com.orchard.backend.workspace.CircuitProposalContent
 import com.orchard.backend.workspace.CircuitProposalStatus
 import com.orchard.backend.workspace.CircuitSynthesisContext
@@ -71,17 +72,17 @@ class CircuitIntelligenceService(
         systemPrompt: String = loadPrompt(),
     ) : this(workspace, listOf(modelProvider), systemPrompt = systemPrompt)
 
-    suspend fun propose(scopeId: Int): CircuitGenerationResult {
+    suspend fun propose(scopeId: Int, conversationCommand: ConversationCommandReference? = null): CircuitGenerationResult {
         val mutex = scopeMutexes.computeIfAbsent(scopeId) { Mutex() }
         if (!mutex.tryLock()) return result(CircuitGenerationStatus.BUSY)
         return try {
-            generate(scopeId)
+            generate(scopeId, conversationCommand)
         } finally {
             mutex.unlock()
         }
     }
 
-    private suspend fun generate(scopeId: Int): CircuitGenerationResult {
+    private suspend fun generate(scopeId: Int, conversationCommand: ConversationCommandReference?): CircuitGenerationResult {
         val context = workspace.circuitSynthesisContext(scopeId)
             ?: return result(CircuitGenerationStatus.SCOPE_NOT_FOUND)
         if (context.members.isEmpty()) return result(CircuitGenerationStatus.INVALID_SCOPE)
@@ -170,6 +171,7 @@ class CircuitIntelligenceService(
                 executionId = execution.executionId,
             ),
             expectedContext = context,
+            conversationCommand = conversationCommand,
         )
         return when (recorded.status) {
             CircuitProposalStatus.RECORDED -> CircuitGenerationResult(CircuitGenerationStatus.CREATED, recorded.snapshot)

@@ -26,6 +26,11 @@ import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.CompanyProjectView
 import com.orchard.backend.company.FileCompanyControlStore
+import com.orchard.backend.conversation.ConversationConductorService
+import com.orchard.backend.conversation.FileConversationStore
+import com.orchard.backend.conversation.ModelConversationInterpreter
+import com.orchard.backend.conversation.conversationRoutes
+import com.orchard.backend.conversation.defaultConversationCapabilities
 import com.orchard.backend.vector.FileModelProviderCatalogStore
 import com.orchard.backend.vector.FileModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProviderCatalog
@@ -109,7 +114,10 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -142,7 +150,6 @@ fun main() {
         FileMachineUsagePolicyStore(OrchardPaths.WORKSPACE_DIR),
         SystemMachineCapacityMonitor(),
     )
-    val architect = ArchitectService(workspace, modelProviderRegistry, resourceController)
     val definitionIntelligence = DefinitionIntelligenceService(
         workspace,
         modelProviders,
@@ -223,12 +230,32 @@ fun main() {
         LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR)),
         resourceController,
     )
+    val conversationConductor = ConversationConductorService(
+        FileConversationStore(OrchardPaths.WORKSPACE_DIR),
+        ModelConversationInterpreter(modelProviders, resourceController),
+        defaultConversationCapabilities(
+            workspace,
+            definitionIntelligence,
+            circuitIntelligence,
+            companyControl,
+            companyCircuit,
+        ),
+    )
     val dispatchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     dispatchScope.launch {
         while (isActive) {
             delay(DISPATCH_INTERVAL_MILLIS)
             runCatching { workspace.dispatchEligible() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable circuit dispatch tick failed", error)
+            }
+            runCatching { conversationConductor.reconcilePending() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation command reconciliation failed", error)
+            }
+            runCatching { conversationConductor.projectWorkspaceActivity(workspace) }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation activity projection failed", error)
+            }
+            runCatching { conversationConductor.projectCompanyActivity(companyControl.projectViews()) }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Durable company activity projection failed", error)
             }
         }
     }
@@ -237,7 +264,12 @@ fun main() {
     analysisScope.launch {
         while (isActive) {
             delay(ANALYSIS_INTERVAL_MILLIS)
-            runCatching { repositoryAnalysis.tick() }.onFailure { error ->
+            runCatching {
+                coroutineScope {
+                    conversationConductor.dispatchableRunIds(repositoryAnalysis.eligibleRunIds())
+                        .map { runId -> async { repositoryAnalysis.tick(runId) } }.awaitAll()
+                }
+            }.onFailure { error ->
                 ANALYSIS_LOGGER.log(Level.WARNING, "Repository analysis tick failed", error)
             }
         }
@@ -245,7 +277,12 @@ fun main() {
     codingScope.launch {
         while (isActive) {
             delay(CODING_INTERVAL_MILLIS)
-            runCatching { codingWorker.tick() }.onFailure { error ->
+            runCatching {
+                coroutineScope {
+                    conversationConductor.dispatchableRunIds(codingWorker.eligibleRunIds())
+                        .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
+                }
+            }.onFailure { error ->
                 CODING_LOGGER.log(Level.WARNING, "Governed coding worker tick failed", error)
             }
         }
@@ -254,7 +291,12 @@ fun main() {
     auditScope.launch {
         while (isActive) {
             delay(AUDIT_INTERVAL_MILLIS)
-            runCatching { companyAudit.tick() }.onFailure { error ->
+            runCatching {
+                coroutineScope {
+                    conversationConductor.dispatchableRunIds(companyAudit.eligibleRunIds())
+                        .map { runId -> async { companyAudit.tick(runId) } }.awaitAll()
+                }
+            }.onFailure { error ->
                 AUDIT_LOGGER.log(Level.WARNING, "Independent company audit tick failed", error)
             }
         }
@@ -290,10 +332,8 @@ fun main() {
             remediationCampaigns,
             campaignResolutions,
             standardsPolicy,
+            conversationConductor,
         )
-    }
-    val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
-        architectApi(architect)
     }
     Runtime.getRuntime().addShutdownHook(Thread {
         dispatchScope.cancel()
@@ -302,11 +342,9 @@ fun main() {
         auditScope.cancel()
         campaignScope.cancel()
         workspaceServer.stop()
-        architectServer.stop()
         modelProviderRegistry.close()
     })
-    workspaceServer.start(wait = false)
-    architectServer.start(wait = true)
+    workspaceServer.start(wait = true)
 }
 
 fun Application.workspaceApi(
@@ -323,9 +361,11 @@ fun Application.workspaceApi(
     remediationCampaigns: RemediationCampaignService? = null,
     campaignResolutions: CampaignResolutionService? = null,
     standardsPolicy: StandardsPolicyService? = null,
+    conversationConductor: ConversationConductorService? = null,
 ) {
     configureJson()
     routing {
+        if (conversationConductor != null) conversationRoutes(conversationConductor)
         get("/api/workspace") {
             call.respond(workspace.snapshot(MESSAGE_READY))
         }

@@ -108,6 +108,7 @@ data class WorkspaceEntity(
     val title: String,
     val content: String,
     val status: Int = 0,
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 class WorkspaceStore(
@@ -281,6 +282,7 @@ class WorkspaceStore(
             intent.title,
             intent.content,
             intent.boundWorkflowId,
+            intent.conversationCommand,
         )
     }
 
@@ -309,20 +311,27 @@ class WorkspaceStore(
     }
 
     @Synchronized
-    fun advanceProjectGenesis(projectId: Int, submission: ProjectGenesisSubmission): ProjectGenesisResult {
+    fun advanceProjectGenesis(
+        projectId: Int,
+        submission: ProjectGenesisSubmission,
+        conversationCommand: ConversationCommandReference? = null,
+    ): ProjectGenesisResult {
         val project = committedEntity(projectId, ENTITY_PROJECT)
             ?: return projectGenesisFailure(ProjectGenesisStatus.PROJECT_NOT_FOUND)
         val current = currentProjectGenesis(project.id)
         if (submission.baseRevision != (current?.revision ?: 0) || submission.baseHash != current?.hash) {
             return projectGenesisFailure(ProjectGenesisStatus.STALE_REVISION)
         }
-        val next = when (current?.phase ?: GENESIS_CLASSIFICATION) {
+        val candidate = when (current?.phase ?: GENESIS_CLASSIFICATION) {
             GENESIS_CLASSIFICATION -> classifyProjectGenesis(project.id, submission)
             GENESIS_EXPERIENCE -> defineProjectExperience(project.id, requireNotNull(current), submission)
             GENESIS_ARCHITECTURE -> defineProjectArchitecture(project.id, requireNotNull(current), submission)
             GENESIS_BLUEPRINT -> defineRepositoryBlueprint(project.id, requireNotNull(current), submission)
             else -> null
         } ?: return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        val next = candidate.copy(conversationCommand = conversationCommand, hash = "").let { unsigned ->
+            unsigned.copy(hash = projectGenesisHash(unsigned))
+        }
         if (!appendProjectGenesisRevision(next)) {
             return projectGenesisFailure(ProjectGenesisStatus.STORAGE_UNAVAILABLE)
         }
@@ -330,7 +339,10 @@ class WorkspaceStore(
     }
 
     @Synchronized
-    fun admitProjectGenesis(projectId: Int): ProjectGenesisResult {
+    fun admitProjectGenesis(
+        projectId: Int,
+        conversationCommand: ConversationCommandReference? = null,
+    ): ProjectGenesisResult {
         val project = committedEntity(projectId, ENTITY_PROJECT)
             ?: return projectGenesisFailure(ProjectGenesisStatus.PROJECT_NOT_FOUND)
         val current = currentProjectGenesis(project.id)
@@ -359,6 +371,7 @@ class WorkspaceStore(
             blueprint = current.blueprint,
             admitted = true,
             previous = current,
+            conversationCommand = conversationCommand,
         )
         if (!appendProjectGenesisRevision(admitted)) {
             return projectGenesisFailure(ProjectGenesisStatus.STORAGE_UNAVAILABLE)
@@ -594,6 +607,7 @@ class WorkspaceStore(
         content: DefinitionProposalContent,
         provenance: DefinitionExecutionProvenance? = null,
         parentProposalId: Long? = null,
+        conversationCommand: ConversationCommandReference? = null,
     ): DefinitionCollaborationResult {
         val workItem = committedEntity(workItemId)
             ?: return collaborationFailure(DefinitionCollaborationStatus.WORK_ITEM_NOT_FOUND, "The work item does not exist.")
@@ -648,6 +662,7 @@ class WorkspaceStore(
                 assumptions = content.assumptions.map(String::trim),
             ),
             provenance = provenance,
+            conversationCommand = conversationCommand,
         )
         val event = DefinitionCollaborationEvent(nextCollaborationEventId, proposal = proposal)
         if (!appendCollaborationEvent(event)) return collaborationFailure(
@@ -801,6 +816,7 @@ class WorkspaceStore(
         content: CircuitProposalContent,
         provenance: CircuitExecutionProvenance,
         expectedContext: CircuitSynthesisContext? = null,
+        conversationCommand: ConversationCommandReference? = null,
     ): CircuitProposalResult {
         val submission = content.plan
         val scope = committedEntity(submission.scopeId)
@@ -840,6 +856,7 @@ class WorkspaceStore(
             revision = circuitProposals.count { it.scopeId == scope.id } + 1,
             content = normalizedContent,
             provenance = provenance,
+            conversationCommand = conversationCommand,
         )
         return try {
             circuitProposalStore.append(proposal)
@@ -944,7 +961,10 @@ class WorkspaceStore(
     }
 
     @Synchronized
-    fun startWorkflow(workItemId: Int): WorkflowStartResult {
+    fun startWorkflow(
+        workItemId: Int,
+        conversationCommand: ConversationCommandReference? = null,
+    ): WorkflowStartResult {
         reconcileCircuitDispatches()
         val latest = circuitDispatches.lastOrNull { dispatch ->
             dispatch.workItemId == workItemId &&
@@ -967,10 +987,14 @@ class WorkspaceStore(
             dispatch.workItemId == workItemId && dispatchRun(dispatch) == null &&
                 activeStagedPlan(dispatch.scopeId)?.planId == dispatch.planId
         }
-        return startWorkflow(workItemId, pending?.dispatchId)
+        return startWorkflow(workItemId, pending?.dispatchId, conversationCommand)
     }
 
-    private fun startWorkflow(workItemId: Int, circuitDispatchId: Long?): WorkflowStartResult {
+    private fun startWorkflow(
+        workItemId: Int,
+        circuitDispatchId: Long?,
+        conversationCommand: ConversationCommandReference? = null,
+    ): WorkflowStartResult {
         val workItem = committedEntity(workItemId)
         if (workItem == null) return workflowFailure(
             WorkflowStartStatus.WORK_ITEM_NOT_FOUND,
@@ -1100,6 +1124,7 @@ class WorkspaceStore(
             context = unsignedManifest.copy(hash = manifestHash(unsignedManifest)),
             workflow = workflow,
             workDefinition = workDefinition,
+            conversationCommand = conversationCommand,
         )
         try {
             workflowMemory.appendRun(run)
@@ -1488,7 +1513,14 @@ class WorkspaceStore(
         advanceCircuitDispatches()
     }.isSuccess
 
-    private fun appendEntity(entityType: Int, parentId: Int, title: String, content: String, workflowId: Long): Boolean {
+    private fun appendEntity(
+        entityType: Int,
+        parentId: Int,
+        title: String,
+        content: String,
+        workflowId: Long,
+        conversationCommand: ConversationCommandReference? = null,
+    ): Boolean {
         val entity = WorkspaceEntity(
             id = nextEntityId++,
             type = entityType,
@@ -1496,6 +1528,7 @@ class WorkspaceStore(
             parentId = parentId,
             title = title,
             content = content,
+            conversationCommand = conversationCommand,
         )
         entities += entity
         lastCreatedId = entity.id
@@ -2204,6 +2237,7 @@ class WorkspaceStore(
         blueprint: RepositoryBlueprint? = null,
         admitted: Boolean = false,
         previous: ProjectGenesisRevision? = null,
+        conversationCommand: ConversationCommandReference? = null,
     ): ProjectGenesisRevision {
         val unsigned = ProjectGenesisRevision(
             genesisId = nextGenesisId,
@@ -2220,6 +2254,7 @@ class WorkspaceStore(
             admitted = admitted,
             actor = COLLABORATOR_HUMAN,
             hash = "",
+            conversationCommand = conversationCommand,
         )
         return unsigned.copy(hash = projectGenesisHash(unsigned))
     }
@@ -2688,6 +2723,7 @@ class WorkspaceStore(
             workDefinition = run.workDefinition,
             judgments = events.mapNotNull { it.judgment },
             criterionGates = criterionGateViews(run),
+            conversationCommand = run.conversationCommand,
         )
     }
 

@@ -60,7 +60,7 @@ The cockpit projects effective practices, mandatory floors, overlay sources, con
 
 ## Boundaries
 
-- Actor and grantor strings are attributable records, not authenticated identities. Roles, delegation, quorum, and signatures are deferred to Milestone 10.2.
+- Actor and grantor strings are attributable records, not authenticated identities. Roles, delegation, quorum, and signatures are deferred to Milestone 10.3.
 - Organization overlays are local ledger authority, not verified external policy sources.
 - The desktop currently provides project-focused authoring conveniences; typed APIs support organization, project, module, and work-item scope.
 - Exception control evidence proves unchanged repository bytes, not the real-world effectiveness of a compensating process.

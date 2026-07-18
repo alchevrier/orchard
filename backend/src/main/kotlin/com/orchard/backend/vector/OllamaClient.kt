@@ -50,6 +50,11 @@ interface ModelProvider : AutoCloseable {
         maxOutputTokens: Int,
         contextWindowTokens: Int,
     ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
+    suspend fun executeConversation(
+        prompt: String,
+        maxOutputTokens: Int,
+        contextWindowTokens: Int,
+    ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
     fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand = ModelResourceDemand(0, 1)
     fun architectResourceDemand(): ModelResourceDemand = ModelResourceDemand(0, 1)
     override fun close() = Unit

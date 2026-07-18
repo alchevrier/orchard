@@ -23,6 +23,7 @@ import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceStore
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.Serializable
@@ -72,7 +73,7 @@ class RepositoryAnalysisService(
     private val systemPrompt: String = loadPrompt(),
     private val companyControl: CompanyControlService? = null,
 ) {
-    private val mutex = Mutex()
+    private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
     init {
         planStore.load()
@@ -85,23 +86,43 @@ class RepositoryAnalysisService(
         .maxByOrNull { it.revision }
 
     suspend fun tick(): RepositoryAnalysisTickResult {
-        if (!mutex.tryLock()) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.BUSY)
+        val runId = eligibleRunIds().firstOrNull() ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE)
+        return tick(runId)
+    }
+
+    fun eligibleRunIds(): List<Long> {
+        val plans = planStore.load()
+        return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
+            .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
+            .sortedBy { it.runId }
+            .filter { candidate ->
+                val currentRevision = workspaceGateway.currentRevision(requireNotNull(candidate.context.workspaceReservation).path)
+                plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision }
+            }
+            .map { it.runId }
+            .toList()
+    }
+
+    suspend fun tick(runId: Long): RepositoryAnalysisTickResult {
+        val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
+        if (!mutex.tryLock()) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.BUSY, runId)
         return try {
-            analyzeNext()
+            analyze(runId)
         } finally {
             mutex.unlock()
         }
     }
 
-    private suspend fun analyzeNext(): RepositoryAnalysisTickResult {
+    private suspend fun analyze(runId: Long): RepositoryAnalysisTickResult {
         val plans = planStore.load()
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
-            .sortedBy { it.runId }
-            .firstOrNull { candidate ->
+            .singleOrNull { candidate ->
+                candidate.runId == runId && run {
                 val currentRevision = workspaceGateway.currentRevision(requireNotNull(candidate.context.workspaceReservation).path)
                 plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision }
-            } ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE)
+                }
+            } ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, runId)
         val workspacePath = requireNotNull(run.context.workspaceReservation).path
         val baseRevision = workspaceGateway.currentRevision(workspacePath)
             ?: return RepositoryAnalysisTickResult(
@@ -184,23 +205,27 @@ class RepositoryAnalysisService(
         if (workspaceGateway.currentRevision(workspacePath) != baseRevision) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.PLAN_STALE, run.runId, diagnostic = "Repository changed during analysis.")
         }
-        val plan = newRepositoryExecutionPlan(
-            planId = plans.size + 1L,
-            runId = run.runId,
-            revision = plans.filter { it.runId == run.runId }.maxOfOrNull { it.revision }?.plus(1) ?: 1,
-            projectId = run.context.projectId,
-            baseRevision = baseRevision,
-            content = output,
-            provenance = AnalysisExecutionProvenance(
-                executionProfileId = profile.id,
-                bindingFingerprint = modelBindingFingerprint(binding),
-                promptHash = sha256(prompt),
-                contextHash = sha256(envelopeJson),
-                outputHash = sha256(generation.text),
-                modelExecutionId = execution.executionId,
-            ),
-        )
-        return runCatching { planStore.append(plan) }.fold(
+        var plan: RepositoryExecutionPlan? = null
+        return runCatching {
+            plan = planStore.appendNext(run.runId) { planId, revision ->
+                newRepositoryExecutionPlan(
+                    planId = planId,
+                    runId = run.runId,
+                    revision = revision,
+                    projectId = run.context.projectId,
+                    baseRevision = baseRevision,
+                    content = output,
+                    provenance = AnalysisExecutionProvenance(
+                        executionProfileId = profile.id,
+                        bindingFingerprint = modelBindingFingerprint(binding),
+                        promptHash = sha256(prompt),
+                        contextHash = sha256(envelopeJson),
+                        outputHash = sha256(generation.text),
+                        modelExecutionId = execution.executionId,
+                    ),
+                )
+            }
+        }.fold(
             onSuccess = { RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.PLAN_CREATED, run.runId, plan) },
             onFailure = { RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty()) },
         )

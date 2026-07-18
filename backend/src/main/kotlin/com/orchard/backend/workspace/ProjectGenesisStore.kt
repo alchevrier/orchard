@@ -93,6 +93,7 @@ data class ProjectGenesisRevision(
     val actor: String,
     val createdAt: String = Instant.now().toString(),
     val hash: String,
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 @Serializable

@@ -45,6 +45,7 @@ data class DefinitionProposal(
     val provenance: DefinitionExecutionProvenance? = null,
     val createdAt: String = Instant.now().toString(),
     val hash: String,
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 @Serializable
@@ -174,6 +175,7 @@ fun newDefinitionProposal(
     actor: String,
     content: DefinitionProposalContent,
     provenance: DefinitionExecutionProvenance?,
+    conversationCommand: ConversationCommandReference? = null,
 ): DefinitionProposal {
     val unsigned = DefinitionProposal(
         proposalId = proposalId,
@@ -183,6 +185,7 @@ fun newDefinitionProposal(
         actor = actor,
         content = content,
         provenance = provenance,
+        conversationCommand = conversationCommand,
         hash = "",
     )
     return unsigned.copy(hash = definitionProposalHash(unsigned))

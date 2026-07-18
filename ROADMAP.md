@@ -5,11 +5,11 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `2` |
+| Version | `3` |
 | Status | `ACTIVE` |
 | Updated | `2026-07-18` |
 | Delivered baseline | Milestone 10.1 |
-| Next milestone | `10.2` Identity, Delegation, Quorum, and Signed Decisions |
+| Next milestone | `10.2` Durable Multi-Objective Conversational Conductor |
 | Canonical path | `ROADMAP.md` |
 
 ## How To Use This Roadmap
@@ -29,6 +29,7 @@ Authority precedence is:
 Use these stable states:
 
 - `COMPLETE`: delivered, validated, documented, committed, and included in the delivered baseline.
+- `IN_PROGRESS`: implementation is admitted and underway, but one or more exit-evidence gates remain open.
 - `NEXT`: the single preferred milestone to design and implement next.
 - `PLANNED`: dependency-ordered work with an agreed problem and outcome, but not yet admitted for implementation.
 - `CANDIDATE`: valuable direction that still needs architectural discovery or sequencing.
@@ -103,9 +104,97 @@ Non-goals:
 - Fetching external policy repositories.
 - Automatic legal or regulatory compliance claims.
 
-### Milestone 10.2: Identity, Delegation, Quorum, and Signed Decisions
+### Milestone 10.2: Durable Multi-Objective Conversational Conductor
 
-- State: `NEXT`
+- State: `IN_PROGRESS`
+- Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`
+- Governing ADRs: ADR 010, ADR 011, ADR 038 through ADR 044; ADR 044 must be accepted before completion.
+
+Goal: make one durable conversation the primary control surface for several concurrent engineering objectives, from discussion and investigation through admitted planning, coding, verification, independent audit, acceptance, and local promotion.
+
+Why now: Orchard already owns the individual company authorities, but its Architect chat is request-local, globally serialized, create-only, and disconnected from downstream lifecycle records. The shortest path to replacing the current coding-agent workflow is to conduct those existing authorities conversationally rather than add another isolated governance layer.
+
+Product contract:
+
+- One chronological conversation may contain several explicitly identified objective lanes.
+- The operator can discuss, investigate, propose, admit, start, pause, resume, reprioritize, redirect, cancel, and inspect work without leaving the conversation.
+- Conversation records prove what was said and correlated; existing domain records remain authoritative for product, work, code, evidence, audit, policy, and promotion.
+- Model interpretation remains candidate data. Read-only discussion and inspection may run directly, while mutation requires an exact valid user admission.
+- The user experiences one long-lived chat, but every model call receives a bounded reconstruction rather than an unbounded transcript.
+- Independent objectives may progress concurrently under resource and repository policy; commands within one objective remain ordered.
+
+Delivery slices:
+
+1. **Conversation ledger and projection**
+  - Checksummed append-only conversations, messages, immutable objective revisions, command proposals, admissions, and downstream correlations.
+  - Stable IDs, content hashes, per-conversation sequence, client idempotency keys, recoverable replay, and typed APIs.
+  - Objective states for candidate, awaiting admission, ready, active, paused, blocked, completed, cancelled, and superseded work.
+2. **Interpretation and bounded context compiler**
+  - A provider-neutral conversation profile with strict speech acts for discussion, inspection, objective formation, domain action, admission, control, status, and clarification.
+  - Deterministic validation of every referenced conversation, message, objective, project, repository, proposal, and authority record.
+  - Source-linked objective summaries, recent relevant dialogue, unresolved questions, current authority, and revision-pinned evidence compiled within the selected model budget.
+  - Full model provenance, token usage, latency, prompt/output hashes, and provider-policy enforcement for every conversational inference.
+3. **Typed domain-action adapters**
+  - A closed capability registry declaring typed payload, read/mutation class, owning service, admission rule, allowed objective states, result type, and idempotency strategy.
+  - Conductor adapters for genesis, work definition, staged planning, workflow start/cancel, repository analysis, coding progression, audit, promotion, standards, campaigns, and resolution.
+  - Stable command IDs persisted as optional source references in downstream authority, or authority-specific deterministic adoption keys where extension is impossible.
+  - Dispatch-intent records before service invocation and exact downstream ID/hash correlation afterward; recovery never matches by title, timestamp, or generated prose.
+  - No direct store mutation and no duplicate conversational version of downstream authority.
+  - Restart reconciliation when a domain mutation succeeds before conversational correlation is appended.
+4. **Multi-objective scheduling and recovery**
+  - Objective-scoped locks, acyclic dependencies, priority, resource admission, and independent-lane concurrency without a global chat mutex.
+  - Run/case-scoped selection for analysis, coding, audit, and resolution workers where current service-wide mutexes prevent independent progress.
+  - Destination-repository serialization and ancestry revalidation for promotion even when upstream worktrees execute concurrently.
+  - Safe pause, resume, redirect, and cancellation semantics that preserve completed evidence and revalidate stale repository or policy authority.
+  - Monotonic activity projection from asynchronous workers into the originating objective and conversation.
+5. **Conversational desktop**
+  - One restored chronological transcript with an objective rail, focus switching, state, dependencies, priority, pending admissions, diagnostics, and correlated evidence.
+  - Inline review and admission of exact proposed actions plus links into existing detailed authority projections.
+  - Cursor-based refresh is sufficient initially; transport streaming is not required for correctness.
+6. **Orchard-on-Orchard replacement proof**
+  - Use one conversation to deliver three consecutive Orchard changes: a bounded defect, a cross-backend/frontend contract, and an authority change with persistence compatibility, tests, and an ADR.
+  - Each change passes through planning, coding, verification, independent audit, acceptance, and local promotion.
+  - Conversation, explicit admission, provider configuration, and inspection are allowed; repository source edits outside Orchard's admitted coding worktrees are not.
+  - Report human interventions, failed attempts, elapsed time, model/provider usage, tokens, and final promoted evidence.
+
+Exit evidence:
+
+- Duplicate message delivery produces one durable message and at most one command or downstream action.
+- Discussion cannot mutate authority, and model output cannot admit its own objective or action.
+- Malformed, invented, ambiguous, stale, and cross-project references fail closed with a conversational clarification or diagnostic.
+- Two independent objectives progress concurrently while one can be paused, redirected, or blocked without affecting the other.
+- No hidden conversation-wide or worker-wide mutex serializes independent eligible objectives; same-destination promotion remains safely ordered.
+- Objective dependencies remain acyclic and survive restart with exact state and priority.
+- A crash between downstream mutation and correlation recovers without duplicate workspace entities, workflow runs, coding work, or promotion.
+- Every mutating capability persists or deterministically resolves its source command identity; ambiguous adoption fails closed.
+- A transcript larger than the selected model context remains operable through bounded, source-linked reconstruction.
+- A compatible cloud-provider change preserves conversation, objective, and authority continuity.
+- One conversation can plan one objective, execute another, observe an audit, and resolve a blocked objective without context leakage.
+- Backend and desktop restart restore exact chronology, objective state, admissions, and correlated activity.
+- The three defined Orchard-on-Orchard proof changes reach local promotion with no source edits outside Orchard worktrees and no bypass of the conductor or existing governance gates.
+- Full backend/frontend build, clean diagnostics, compatibility tests, ADR acceptance, user/developer documentation, and committed milestone.
+
+Non-goals:
+
+- Treating the full transcript as one infinite model prompt.
+- Letting chat records replace product, repository, evidence, audit, standards, or promotion authority.
+- Unrestricted shell execution, silent mutation from ambiguous language, or model-authored admission.
+- Remote multi-client control, cryptographic identity, quorum, signatures, or automatic Git push.
+- Voice/mobile clients, distributed agent swarms, and automatic budget increases.
+- Requiring the future symbol-aware evidence graph before the conductor can use existing revision-pinned repository analysis.
+
+Implementation evidence recorded on 2026-07-18:
+
+- Durable ledger, strict bounded interpretation, typed APIs, exact admission/correlation/reconciliation, source-linked summaries, and the persistent desktop conductor are implemented.
+- Analysis, coding, audit, and campaign-resolution work use run/case-scoped execution; coding claims and generated IDs are allocated atomically in durable stores.
+- Objective state and dependencies are revalidated at dispatch, and paused/dependent correlated runs are filtered and priority-ordered before production worker scheduling.
+- Conversational model provenance is structured and checksum-covered; capability descriptors expose ownership, admission, projected result, and idempotency contracts.
+- Conversation, coding-worker, company-circuit, desktop-client, compatibility, and full Gradle build validation pass with no editor diagnostics.
+- Remaining completion gate: initialize admitted Orchard-on-Orchard authority and record the three required locally promoted changes, including intervention, provider/token, elapsed-time, failure, evidence, and bypass reports. ADR 044 remains `Proposed` until this proof succeeds.
+
+### Milestone 10.3: Identity, Delegation, Quorum, and Signed Decisions
+
+- State: `PLANNED`
 - Depends on: `10.1`
 
 Goal: replace caller-asserted actor strings with verifiable local authority for sensitive policy and acceptance decisions.
@@ -129,10 +218,10 @@ Non-goals:
 - General internet identity federation.
 - Remote policy synchronization.
 
-### Milestone 10.3: Verified Policy Sources and Deterministic Composition
+### Milestone 10.4: Verified Policy Sources and Deterministic Composition
 
 - State: `PLANNED`
-- Depends on: `10.1`, `10.2`
+- Depends on: `10.1`, `10.3`
 
 Goal: let organizations and communities publish reusable policy while preserving source identity, freshness, composition, and local inspectability.
 
@@ -155,10 +244,10 @@ Non-goals:
 - Treating retrieval output as policy.
 - Silent policy updates from arbitrary public repositories.
 
-### Milestone 10.4: Resolution Action Executors and Policy Migration
+### Milestone 10.5: Resolution Action Executors and Policy Migration
 
 - State: `PLANNED`
-- Depends on: `10.1`, `10.3`
+- Depends on: `10.1`, `10.4`
 
 Goal: execute admitted non-delivery resolution decisions through specialized authorities instead of leaving them as durable requests.
 
@@ -181,7 +270,7 @@ Exit evidence:
 ### Milestone 11.0: Conversational Product Successor Revisions
 
 - State: `PLANNED`
-- Depends on: `10.4`
+- Depends on: `10.5`
 
 Goal: let an admitted product evolve through a conversational successor revision with deterministic downstream invalidation.
 
@@ -252,7 +341,7 @@ Deliverables:
 ### Milestone 12.2: Evidence-Derived Organizational Learning
 
 - State: `CANDIDATE`
-- Depends on: `12.1`, `10.3`
+- Depends on: `12.1`, `10.4`
 
 Goal: derive reusable practices from accepted outcomes while keeping learned guidance separate from policy until admitted.
 
@@ -294,7 +383,7 @@ Deliverables:
 ### Milestone 13.2: Multi-Client and Remote Architect Control
 
 - State: `CANDIDATE`
-- Depends on: `10.2`, `13.0`
+- Depends on: `10.2`, `10.3`, `13.0`
 
 Goal: support multiple authenticated clients and remote control without losing single-writer authority or local-first custody.
 
@@ -348,5 +437,6 @@ Update this file in the same change that alters roadmap intent.
 
 | Date | Version | Change |
 | --- | --- | --- |
+| 2026-07-18 | 3 | Prioritized a durable multi-objective conversational conductor as Milestone 10.2 and moved identity and later policy work behind the workflow-replacement proof. |
 | 2026-07-18 | 2 | Completed scoped standards overlays and exception authority; selected identity, delegation, quorum, and signed decisions as Milestone 10.2. |
 | 2026-07-18 | 1 | Established the canonical roadmap after Milestone 10.0; selected scoped standards overlays and exception authority as Milestone 10.1. |

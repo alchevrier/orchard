@@ -34,6 +34,7 @@ import com.orchard.backend.workspace.WorkspaceStore
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.Serializable
@@ -86,7 +87,7 @@ class CodingWorkerService(
     private val companyControl: CompanyControlService? = null,
     private val repositoryAnalysis: RepositoryAnalysisService? = null,
 ) {
-    private val mutex = Mutex()
+    private val runMutexes = ConcurrentHashMap<Long, Mutex>()
     private val strictOutputJson = Json { encodeDefaults = true }
 
     init {
@@ -97,18 +98,26 @@ class CodingWorkerService(
     fun executions(): List<CodingWorkerExecutionView> = codingWorkerExecutions(workerStore.loadEvents())
 
     suspend fun tick(): CodingWorkerTickResult {
+        val runId = eligibleRunIds().firstOrNull() ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
+        return tick(runId)
+    }
+
+    fun eligibleRunIds(): List<Long> = candidateRuns(codingWorkerExecutions(workerStore.loadEvents())).map { it.runId }
+
+    suspend fun tick(runId: Long): CodingWorkerTickResult {
+        val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
         if (!mutex.tryLock()) return CodingWorkerTickResult(CodingWorkerTickStatus.BUSY)
         return try {
-            executeTick()
+            executeTick(runId)
         } finally {
             mutex.unlock()
         }
     }
 
-    private suspend fun executeTick(): CodingWorkerTickResult {
+    private suspend fun executeTick(runId: Long): CodingWorkerTickResult {
         val events = workerStore.loadEvents()
         val executions = codingWorkerExecutions(events)
-        executions.singleOrNull { it.result == null }?.let { interrupted ->
+        executions.singleOrNull { it.claim.runId == runId && it.result == null }?.let { interrupted ->
             val result = terminalResult(
                 interrupted.claim.executionId,
                 CODING_EXECUTION_INTERRUPTED,
@@ -116,7 +125,8 @@ class CodingWorkerService(
             )
             return appendResult(events, interrupted.claim, result, CodingWorkerTickStatus.INTERRUPTED_RECOVERED)
         }
-        val run = candidateRun(executions) ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
+        val run = candidateRuns(executions).singleOrNull { it.runId == runId }
+            ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
         val executionPlan = repositoryAnalysis?.currentPlan(run.runId)
         if (repositoryAnalysis != null && executionPlan == null) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.ANALYSIS_REQUIRED)
@@ -150,9 +160,12 @@ class CodingWorkerService(
         val binding = modelProvider.bindingProfile()
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
         val toolchainPolicy = toolchainResolution.getOrNull()
-        val claim = newClaim(events, executions, run, binding, toolchainPolicy, assignment, executionPlan)
-        try {
-            workerStore.append(CodingWorkerEvent(eventId = claim.executionId, claim = claim))
+        val claim = try {
+            requireNotNull(workerStore.appendNext { eventId, preceding ->
+                val currentExecutions = codingWorkerExecutions(preceding)
+                val claim = newClaim(eventId, currentExecutions, run, binding, toolchainPolicy, assignment, executionPlan)
+                CodingWorkerEvent(eventId = eventId, claim = claim)
+            }.claim)
         } catch (_: Exception) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
         }
@@ -328,7 +341,7 @@ class CodingWorkerService(
         }
     }
 
-    private fun candidateRun(executions: List<CodingWorkerExecutionView>): WorkflowRunView? {
+    private fun candidateRuns(executions: List<CodingWorkerExecutionView>): List<WorkflowRunView> {
         val attempts = executions.filter { it.result?.status in REPAIR_ATTEMPT_STATUSES }
             .groupingBy { it.claim.runId }
             .eachCount()
@@ -342,6 +355,7 @@ class CodingWorkerService(
                 ?.takeIf { it.status == CODING_EXECUTION_DEFERRED && Instant.parse(requireNotNull(it.retryAfter)).isAfter(Instant.now()) }
                 ?.let { runId }
         }.toSet()
+        val activeRuns = executions.filter { it.result == null }.mapTo(hashSetOf()) { it.claim.runId }
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
             .filter { run ->
@@ -350,13 +364,14 @@ class CodingWorkerService(
             }
             .filter { it.runId !in blockedRuns }
             .filter { it.runId !in deferredRuns }
+            .filter { it.runId !in activeRuns }
             .filter { attempts.getOrDefault(it.runId, 0) < retryBudget }
             .sortedBy { it.runId }
-            .firstOrNull()
+            .toList()
     }
 
     private fun newClaim(
-        events: List<CodingWorkerEvent>,
+        executionId: Long,
         executions: List<CodingWorkerExecutionView>,
         run: WorkflowRunView,
         binding: ModelBindingProfile,
@@ -365,7 +380,7 @@ class CodingWorkerService(
         executionPlan: RepositoryExecutionPlan?,
     ): CodingWorkerClaim {
         val draft = CodingWorkerClaim(
-            executionId = events.size + 1L,
+            executionId = executionId,
             runId = run.runId,
             attempt = executions.count { it.claim.runId == run.runId } + 1,
             contextHash = run.context.hash,
@@ -546,7 +561,7 @@ class CodingWorkerService(
         result: CodingWorkerResult,
         status: CodingWorkerTickStatus,
     ): CodingWorkerTickResult = try {
-        workerStore.append(CodingWorkerEvent(eventId = events.size + 1L, result = result))
+        workerStore.appendNext { eventId, _ -> CodingWorkerEvent(eventId = eventId, result = result) }
         CodingWorkerTickResult(status, CodingWorkerExecutionView(claim, result))
     } catch (_: Exception) {
         CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE, CodingWorkerExecutionView(claim))

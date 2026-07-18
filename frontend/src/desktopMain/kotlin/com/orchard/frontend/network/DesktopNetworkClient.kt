@@ -21,6 +21,42 @@ import kotlinx.serialization.json.Json
 
 class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) : AutoCloseable {
 
+    suspend fun getConversations(): List<ConversationListItemResponse> =
+        client.get("http://127.0.0.1:8085/api/conversations").body()
+
+    suspend fun createConversation(title: String): ConversationApiResponse =
+        client.post("http://127.0.0.1:8085/api/conversations") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(CreateConversationRequest(title))
+        }.body()
+
+    suspend fun getConversation(conversationId: Long, afterEventId: Long = 0): ConversationProjectionResponse =
+        client.get("http://127.0.0.1:8085/api/conversations/$conversationId") {
+            if (afterEventId > 0) parameter("afterEventId", afterEventId)
+        }.body()
+
+    suspend fun submitConversationMessage(
+        conversationId: Long,
+        request: SubmitConversationMessageRequest,
+    ): ConversationApiResponse = client.post("http://127.0.0.1:8085/api/conversations/$conversationId/messages") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(request)
+    }.body()
+
+    suspend fun admitConversationCommand(commandId: Long, commandHash: String): ConversationApiResponse =
+        client.post("http://127.0.0.1:8085/api/conversation-commands/$commandId/admission") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(AdmitConversationCommandRequest(commandHash))
+        }.body()
+
+    suspend fun controlConversationObjective(
+        objectiveId: Long,
+        request: ControlConversationObjectiveRequest,
+    ): ConversationApiResponse = client.post("http://127.0.0.1:8085/api/conversation-objectives/$objectiveId/control") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(request)
+    }.body()
+
     suspend fun getWorkspace(): WorkspaceSnapshotResponse =
         client.get("http://127.0.0.1:8085/api/workspace").body()
 
@@ -252,6 +288,131 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
 
 @Serializable
 private data class ArchitectChatRequest(val prompt: String)
+
+@Serializable data class CreateConversationRequest(val title: String, val actor: String = "HUMAN")
+@Serializable data class SubmitConversationMessageRequest(
+    val clientMessageId: String,
+    val expectedSequence: Long,
+    val content: String,
+    val objectiveId: Long? = null,
+    val actor: String = "HUMAN",
+)
+@Serializable data class AdmitConversationCommandRequest(val commandHash: String, val actor: String = "HUMAN")
+@Serializable data class ControlConversationObjectiveRequest(
+    val action: String,
+    val sourceMessageId: Long,
+    val sourceMessageHash: String,
+    val priority: Int? = null,
+    val dependencyObjectiveIds: List<Long>? = null,
+    val actor: String = "HUMAN",
+)
+@Serializable data class ConversationResponse(
+    val conversationId: Long,
+    val title: String,
+    val actor: String,
+    val createdAt: String,
+    val hash: String,
+)
+@Serializable data class ConversationMessageResponse(
+    val messageId: Long,
+    val conversationId: Long,
+    val sequence: Long,
+    val clientMessageId: String,
+    val role: String,
+    val content: String,
+    val objectiveId: Long? = null,
+    val replyToMessageId: Long? = null,
+    val actor: String,
+    val createdAt: String,
+    val hash: String,
+)
+@Serializable data class ConversationObjectiveResponse(
+    val objectiveId: Long,
+    val revision: Int,
+    val conversationId: Long,
+    val projectId: Int? = null,
+    val title: String,
+    val outcome: String,
+    val constraints: List<String> = emptyList(),
+    val priority: Int,
+    val dependencyObjectiveIds: List<Long> = emptyList(),
+    val state: String,
+    val sourceMessageId: Long,
+    val sourceMessageHash: String,
+    val actor: String,
+    val createdAt: String,
+    val previousHash: String? = null,
+    val hash: String,
+)
+@Serializable data class ConversationCommandProposalResponse(
+    val commandId: Long,
+    val conversationId: Long,
+    val objectiveId: Long? = null,
+    val sourceMessageId: Long,
+    val sourceMessageHash: String,
+    val capabilityId: String,
+    val payloadJson: String,
+    val mutation: Boolean,
+    val proposedAt: String,
+    val hash: String,
+)
+@Serializable data class ConversationCommandAdmissionResponse(
+    val admissionId: Long,
+    val commandId: Long,
+    val commandHash: String,
+    val actor: String,
+    val admittedAt: String,
+    val hash: String,
+)
+@Serializable data class ConversationCommandExecutionResponse(
+    val executionId: Long,
+    val commandId: Long,
+    val commandHash: String,
+    val state: String,
+    val downstreamType: String? = null,
+    val downstreamId: String? = null,
+    val downstreamHash: String? = null,
+    val repositoryRevision: String? = null,
+    val diagnostic: String = "",
+    val recordedAt: String,
+    val hash: String,
+)
+@Serializable data class ConversationCommandViewResponse(
+    val proposal: ConversationCommandProposalResponse,
+    val admission: ConversationCommandAdmissionResponse? = null,
+    val executions: List<ConversationCommandExecutionResponse> = emptyList(),
+)
+@Serializable data class ConversationActivityResponse(
+    val activityId: Long,
+    val conversationId: Long,
+    val objectiveId: Long? = null,
+    val kind: String,
+    val summary: String,
+    val authorityType: String? = null,
+    val authorityId: String? = null,
+    val authorityHash: String? = null,
+    val recordedAt: String,
+    val hash: String,
+)
+@Serializable data class ConversationProjectionResponse(
+    val conversation: ConversationResponse,
+    val messages: List<ConversationMessageResponse> = emptyList(),
+    val objectives: List<ConversationObjectiveResponse> = emptyList(),
+    val commands: List<ConversationCommandViewResponse> = emptyList(),
+    val activities: List<ConversationActivityResponse> = emptyList(),
+    val lastEventId: Long,
+)
+@Serializable data class ConversationApiResponse(
+    val status: String,
+    val projection: ConversationProjectionResponse? = null,
+    val diagnostic: String = "",
+)
+@Serializable data class ConversationListItemResponse(
+    val conversation: ConversationResponse,
+    val messageCount: Int,
+    val objectiveCount: Int,
+    val lastEventId: Long,
+)
 
 @Serializable
 private data class BindRepositoryRequest(val path: String)

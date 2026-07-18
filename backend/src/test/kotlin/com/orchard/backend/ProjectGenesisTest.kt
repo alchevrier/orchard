@@ -6,6 +6,7 @@ import com.orchard.backend.workspace.AcceptanceCriterion
 import com.orchard.backend.workspace.ArchitectureComponent
 import com.orchard.backend.workspace.ArchitectureDecision
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
+import com.orchard.backend.workspace.ConversationCommandReference
 import com.orchard.backend.workspace.DESIGN_STATUS_ADMITTED
 import com.orchard.backend.workspace.ENTITY_EPIC
 import com.orchard.backend.workspace.ENTITY_PROJECT
@@ -110,14 +111,18 @@ class ProjectGenesisTest {
         )
         val experienced = advance(first, experienceSubmission(classified), GENESIS_ARCHITECTURE)
         val architected = advance(first, architectureSubmission(experienced), GENESIS_BLUEPRINT)
-        val blueprint = advance(first, blueprintSubmission(architected), GENESIS_ADMISSION)
+        val advanceReference = ConversationCommandReference(41, "a".repeat(64), "ADVANCE_PROJECT_GENESIS")
+        val blueprint = advance(first, blueprintSubmission(architected), GENESIS_ADMISSION, advanceReference)
+        assertEquals(advanceReference, blueprint.revision?.conversationCommand)
 
-        val admitted = first.admitProjectGenesis(1)
+        val admissionReference = ConversationCommandReference(42, "b".repeat(64), "ADMIT_PROJECT_GENESIS")
+        val admitted = first.admitProjectGenesis(1, admissionReference)
         assertEquals(ProjectGenesisStatus.ADMITTED, admitted.status)
         val ready = admitted.snapshot.projectGenesis.single()
         assertEquals(GENESIS_READY, ready.phase)
         assertEquals(100, ready.progress)
         assertTrue(ready.revision?.admitted == true)
+        assertEquals(admissionReference, ready.revision?.conversationCommand)
         assertTrue(ready.revision?.decisions.orEmpty().all { it.status == DESIGN_STATUS_ADMITTED })
 
         val recovered = newWorkspace(directory).snapshot(MESSAGE_READY).projectGenesis.single()
@@ -199,8 +204,9 @@ class ProjectGenesisTest {
         workspace: WorkspaceStore,
         submission: ProjectGenesisSubmission,
         expectedPhase: String,
+        conversationCommand: ConversationCommandReference? = null,
     ): com.orchard.backend.workspace.ProjectGenesisView {
-        assertEquals(ProjectGenesisStatus.RECORDED, workspace.advanceProjectGenesis(1, submission).status)
+        assertEquals(ProjectGenesisStatus.RECORDED, workspace.advanceProjectGenesis(1, submission, conversationCommand).status)
         return workspace.snapshot(MESSAGE_READY).projectGenesis.single().also {
             assertEquals(expectedPhase, it.phase)
         }

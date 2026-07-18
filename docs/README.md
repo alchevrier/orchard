@@ -10,6 +10,7 @@ Start with the [User Guide](user-guide/README.md) when you want to install, conf
 
 - [Getting Started](user-guide/getting-started.md): prerequisites, installation, launch, and first project.
 - [Product Workflow](user-guide/product-workflow.md): product genesis, company execution, promotion, standards, remediation, and resolution.
+- [Durable Conversations](user-guide/conversations.md): objective lanes, exact command admission, controls, activity, and restart restoration.
 - [Models and Resources](user-guide/models-and-resources.md): Ollama, LM Studio, OpenAI-compatible endpoints, provider policy, credentials, and machine limits.
 - [Governance](user-guide/governance.md): authority boundaries, standards, campaigns, exceptions, and decision states.
 - [Troubleshooting and Data](user-guide/troubleshooting.md): service checks, common failures, logs, local state, and recovery precautions.
@@ -23,6 +24,7 @@ Start with the [Developer Documentation](developer/README.md) when you want to b
 - [Persistence and Recovery](developer/persistence.md): runtime paths, store types, checksums, locking, replay, and compatibility rules.
 - [API Reference](developer/api-reference.md): HTTP servers, endpoint groups, response behavior, and source-of-truth guidance.
 - [Extension Points](developer/extension-points.md): providers, profiles, toolchain policy packs, standards, workflows, prompts, and UI integration.
+- [Conversation Conductor](developer/conversation-conductor.md): ledger, typed capabilities, recovery, provenance, and run-scoped scheduling.
 
 ### Understand Decisions and Direction
 

@@ -17,6 +17,7 @@ import com.orchard.backend.workspace.RepositoryBindingStore
 import com.orchard.backend.workspace.WorkspaceStore
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.Serializable
@@ -96,7 +97,7 @@ class CampaignResolutionService(
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
     private val systemPrompt: String = loadPrompt(),
 ) {
-    private val proposalMutex = Mutex()
+    private val proposalMutexes = ConcurrentHashMap<Long, Mutex>()
 
     fun views(projectId: Int? = null): List<CampaignResolutionView> = campaignResolutionViews(store, projectId)
 
@@ -204,6 +205,7 @@ class CampaignResolutionService(
     }
 
     suspend fun propose(caseId: Long): CampaignResolutionProposalResult {
+        val proposalMutex = proposalMutexes.computeIfAbsent(caseId) { Mutex() }
         if (!proposalMutex.tryLock()) return CampaignResolutionProposalResult(
             CampaignResolutionProposalStatus.MODEL_FAILED,
             diagnostic = "Another campaign resolution proposal is being generated.",
@@ -321,10 +323,11 @@ class CampaignResolutionService(
         if (currentTerminalEvaluation(case)?.hash != evaluation.hash) {
             return CampaignResolutionProposalResult(CampaignResolutionProposalStatus.STALE_EVALUATION)
         }
-        val proposal = runCatching {
-            newCampaignResolutionProposal(
-                CampaignResolutionProposal(
-                    proposalId = (store.proposals().maxOfOrNull { it.proposalId } ?: 0L) + 1L,
+        var proposal: CampaignResolutionProposal? = null
+        return runCatching {
+            proposal = store.appendNextProposal { proposalId ->
+                newCampaignResolutionProposal(CampaignResolutionProposal(
+                    proposalId = proposalId,
                     caseId = case.caseId,
                     evaluationHash = evaluation.hash,
                     action = output.action,
@@ -338,12 +341,9 @@ class CampaignResolutionService(
                     outputHash = sha256(generation.text),
                     proposedAt = Instant.now().toString(),
                     hash = "",
-                )
-            )
-        }.getOrElse {
-            return CampaignResolutionProposalResult(CampaignResolutionProposalStatus.INVALID_OUTPUT, diagnostic = it.message.orEmpty())
-        }
-        return runCatching { store.appendProposal(proposal) }.fold(
+                ))
+            }
+        }.fold(
             onSuccess = { CampaignResolutionProposalResult(CampaignResolutionProposalStatus.CREATED, proposal) },
             onFailure = { CampaignResolutionProposalResult(CampaignResolutionProposalStatus.STORAGE_UNAVAILABLE, diagnostic = it.message.orEmpty()) },
         )

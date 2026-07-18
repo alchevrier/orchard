@@ -166,6 +166,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
     @Composable
     fun render() {
+        var workspaceMode by remember { mutableStateOf("CONDUCTOR") }
         var isSubmitting by remember { mutableStateOf(false) }
         var isBindingRepository by remember { mutableStateOf(false) }
         var isGeneratingProposal by remember { mutableStateOf(false) }
@@ -229,7 +230,19 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         }
 
         OrchardTheme {
-            GuidedGenesisWorkspace(
+            if (workspaceMode == "CONDUCTOR") {
+                DurableConversationWorkspace(networkClient) { workspaceMode = "AUTHORITY" }
+            } else Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier.fillMaxWidth().height(44.dp).background(OrchardColors.surface).padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = { workspaceMode = "CONDUCTOR" }) { Text("Conductor", color = OrchardColors.moss) }
+                    Text("AUTHORITY INSPECTOR", color = OrchardColors.muted, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                }
+                Divider(color = OrchardColors.divider)
+                Box(Modifier.weight(1f)) {
+                    GuidedGenesisWorkspace(
                 projectId = projectId,
                 projectTitle = project?.title.orEmpty(),
                 epics = epics,
@@ -410,7 +423,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                         }
                     }
                 },
-                onRefresh = {
+                    onRefresh = {
                     if (!isSubmitting) {
                         scope.launch {
                             requestError = null
@@ -425,8 +438,10 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             }.onFailure { requestError = it.message ?: "Unable to refresh Orchard." }
                         }
                     }
-                },
-            )
+                    },
+                    )
+                }
+            }
         }
     }
 
@@ -781,8 +796,20 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         }
     }
 
-    private suspend fun sendArchitectPrompt(prompt: String): Result<Unit> = executeRequest {
-        networkClient.submitArchitectPrompt(prompt)
+    private suspend fun sendArchitectPrompt(prompt: String): Result<Unit> = runCatching {
+        val conversations = networkClient.getConversations()
+        val conversationId = conversations.lastOrNull()?.conversation?.conversationId
+            ?: requireNotNull(networkClient.createConversation("Orchard engineering").projection).conversation.conversationId
+        val projection = networkClient.getConversation(conversationId)
+        networkClient.submitConversationMessage(
+            conversationId,
+            com.orchard.frontend.network.SubmitConversationMessageRequest(
+                clientMessageId = "desktop:${java.util.UUID.randomUUID()}",
+                expectedSequence = projection.messages.size + 1L,
+                content = prompt,
+            ),
+        )
+        refreshWorkspace().getOrThrow()
     }
 
     private suspend fun advanceProjectGenesis(

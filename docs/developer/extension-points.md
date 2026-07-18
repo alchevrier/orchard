@@ -127,7 +127,7 @@ Update pure composition, append validation, effective-standard hashing, scan tar
 
 Keep proposal, admission, current effect, and revocation separate. Any new exception condition must be deterministic and included in scan/campaign authority identity when it can change conformance without changing Git HEAD.
 
-Actor authentication, role authorization, delegation, quorum, and signatures belong in the identity authority planned for Milestone 10.2. Do not retrofit them as trusted string comparisons inside `StandardsPolicyService`.
+Actor authentication, role authorization, delegation, quorum, and signatures belong in the identity authority planned for Milestone 10.3. Do not retrofit them as trusted string comparisons inside `StandardsPolicyService`.
 
 ## Add a Resolution Action Executor
 

@@ -1,14 +1,15 @@
 # Orchard User Guide
 
-This guide covers the current desktop product at Milestone 10.1. It is written for an operator who wants Orchard to form and run a governed local software company against a new or existing Git repository.
+This guide covers the current desktop product, including the Milestone 10.2 conductor implementation whose live replacement proof remains pending. It is written for an operator who wants Orchard to form and run a governed local software company against a new or existing Git repository.
 
 ## Start Here
 
 1. [Install and launch Orchard](getting-started.md).
 2. [Configure model providers and machine resources](models-and-resources.md).
 3. [Move a product through genesis and delivery](product-workflow.md).
-4. [Understand standards, campaigns, and resolution decisions](governance.md).
-5. [Diagnose services or protect local data](troubleshooting.md).
+4. [Conduct several durable objectives in one conversation](conversations.md).
+5. [Understand standards, campaigns, and resolution decisions](governance.md).
+6. [Diagnose services or protect local data](troubleshooting.md).
 
 ## What Orchard Does
 

@@ -1,5 +1,7 @@
 package com.orchard.backend.api
 
+import com.orchard.backend.workspace.ConversationCommandReference
+
 data class DocumentIntent(
     val actionTypeId: Int,
     val entityTypeId: Int,
@@ -9,4 +11,5 @@ data class DocumentIntent(
     val storyId: Int = 0,
     val title: String,
     val content: String = "",
+    val conversationCommand: ConversationCommandReference? = null,
 )

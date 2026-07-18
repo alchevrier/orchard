@@ -612,4 +612,56 @@ class DesktopNetworkClientTest {
 
         client.close()
     }
+
+    @Test
+    fun restoresConversationAfterEventCursor() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Get, request.method)
+            assertEquals("7", request.url.parameters["afterEventId"])
+            respond(
+                content = """{
+                    "conversation":{"conversationId":3,"title":"Orchard work","actor":"HUMAN","createdAt":"2026-06-21T00:00:00Z","hash":"${"a".repeat(64)}"},
+                    "messages":[],"objectives":[],"commands":[],"activities":[],"events":[],"lastEventId":9
+                }""".trimIndent(),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val projection = client.getConversation(3, 7)
+
+        assertEquals(9, projection.lastEventId)
+        assertEquals("Orchard work", projection.conversation.title)
+        client.close()
+    }
+
+    @Test
+    fun admitsExactConversationCommandHash() = runBlocking {
+        val commandHash = "b".repeat(64)
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/conversation-commands/11/admission", request.url.toString())
+            assertTrue(request.body.toByteArray().decodeToString().contains("\"commandHash\":\"$commandHash\""))
+            respond(
+                content = """{"status":"RECORDED","diagnostic":""}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val response = client.admitConversationCommand(11, commandHash)
+
+        assertEquals("RECORDED", response.status)
+        client.close()
+    }
 }

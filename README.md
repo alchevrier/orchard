@@ -6,7 +6,7 @@ Orchard is a local-first engineering workspace for turning natural-language inte
 
 > **Project status:** Milestone 10.1 complete - Scoped Standards Overlays and Exception Authority. Orchard now composes effective engineering policy across organization, project, module, and work-item scopes, protects mandatory floors, and applies only admitted, evidence-bound, expiring exceptions.
 
-> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The single next milestone is 10.2: Identity, Delegation, Quorum, and Signed Decisions.
+> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The single next milestone is 10.2: Durable Multi-Objective Conversational Conductor.
 
 ## Documentation
 
@@ -35,7 +35,7 @@ Delivered and verified:
 
 Milestone 10.1 boundaries:
 
-- Actor and grantor values remain attributable strings, not authenticated identities; roles, delegation, quorum, and signatures are Milestone 10.2.
+- Actor and grantor values remain attributable strings, not authenticated identities; roles, delegation, quorum, and signatures are Milestone 10.3.
 - Organization overlays are local authority, not verified external policy sources.
 - Compensating-control evidence proves unchanged repository bytes, not real-world process effectiveness.
 - The cockpit focuses authoring on project policy; typed APIs expose all supported scopes.

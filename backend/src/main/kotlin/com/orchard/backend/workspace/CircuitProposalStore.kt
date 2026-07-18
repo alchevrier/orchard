@@ -41,6 +41,7 @@ data class CircuitProposal(
     val provenance: CircuitExecutionProvenance,
     val createdAt: String = Instant.now().toString(),
     val hash: String,
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 @Serializable
@@ -164,6 +165,7 @@ fun newCircuitProposal(
     revision: Int,
     content: CircuitProposalContent,
     provenance: CircuitExecutionProvenance,
+    conversationCommand: ConversationCommandReference? = null,
 ): CircuitProposal {
     val unsigned = CircuitProposal(
         proposalId = proposalId,
@@ -171,6 +173,7 @@ fun newCircuitProposal(
         revision = revision,
         content = content,
         provenance = provenance,
+        conversationCommand = conversationCommand,
         hash = "",
     )
     return unsigned.copy(hash = circuitProposalHash(circuitProposalJson.encodeToString(unsigned)))

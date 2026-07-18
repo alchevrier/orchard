@@ -119,15 +119,18 @@ class CodingWorkerTest {
     }
 
     @Test
-    fun `worker journal restores completed execution and rejects a second active claim`() {
+    fun `worker journal allows independent active runs and rejects a second claim for one run`() {
         val directory = createTempDirectory("orchard-coding-worker-store-")
         val store = FileCodingWorkerStore(directory)
         val claim = claim(executionId = 1, runId = 17, attempt = 1)
         store.append(CodingWorkerEvent(eventId = 1, claim = claim))
 
         val competing = claim(executionId = 2, runId = 18, attempt = 1)
+        store.append(CodingWorkerEvent(eventId = 2, claim = competing))
+
+        val duplicateRun = claim(executionId = 3, runId = 17, attempt = 2)
         assertFailsWith<IllegalArgumentException> {
-            store.append(CodingWorkerEvent(eventId = 2, claim = competing))
+            store.append(CodingWorkerEvent(eventId = 3, claim = duplicateRun))
         }
 
         val resultDraft = CodingWorkerResult(
@@ -142,12 +145,12 @@ class CodingWorkerTest {
             hash = "",
         )
         val result = resultDraft.copy(hash = codingWorkerResultHash(resultDraft))
-        store.append(CodingWorkerEvent(eventId = 2, result = result))
+        store.append(CodingWorkerEvent(eventId = 3, result = result))
 
         val restored = codingWorkerExecutions(FileCodingWorkerStore(directory).loadEvents())
-        assertEquals(1, restored.size)
-        assertEquals(claim, restored.single().claim)
-        assertEquals(result, restored.single().result)
+        assertEquals(2, restored.size)
+        assertEquals(result, restored.single { it.claim.runId == 17L }.result)
+        assertEquals(null, restored.single { it.claim.runId == 18L }.result)
     }
 
     @Test

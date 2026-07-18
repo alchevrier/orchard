@@ -111,4 +111,4 @@ Do not edit an Orchard-managed worktree while a run is active. Destination drift
 
 ## Planned Governance
 
-The current next milestone adds identity, delegation, quorum, and signed decisions. Verified external policy sources follow it. Until those milestones land, actor and grantor strings are attributable records but not authenticated or cryptographic identity.
+The current next milestone adds one durable multi-objective conversation over Orchard's existing planning, coding, audit, promotion, and governance authorities. Identity, delegation, quorum, signed decisions, and verified external policy sources follow it. Until those milestones land, actor and grantor strings are attributable records but not authenticated or cryptographic identity.

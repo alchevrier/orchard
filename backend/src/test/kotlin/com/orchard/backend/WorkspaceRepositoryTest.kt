@@ -3,6 +3,7 @@ package com.orchard.backend
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
+import com.orchard.backend.workspace.ConversationCommandReference
 import com.orchard.backend.workspace.ENTITY_EPIC
 import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.ENTITY_STORY
@@ -937,10 +938,12 @@ class WorkspaceRepositoryTest {
         assertEquals(RepositoryBindStatus.BOUND, store.bindRepository(1, repositoryDirectory.toString()).status)
         assertEquals(DEFINITION_READY, store.submitWorkDefinition(4, readyDefinition()).snapshot.workDefinitions.single().assessment.status)
 
-        val started = store.startWorkflow(4)
+        val conversationCommand = ConversationCommandReference(51, "c".repeat(64), "START_WORKFLOW")
+        val started = store.startWorkflow(4, conversationCommand)
 
         assertEquals(WorkflowStartStatus.CREATED, started.status)
         val run = started.snapshot.workflowRuns.single()
+        assertEquals(conversationCommand, run.conversationCommand)
         assertEquals(pinnedRevision, run.context.repository.commitHash)
         assertEquals(listOf(1L), run.context.recalledEpisodes.map { it.episodeId })
         assertEquals(4, run.workflow.evidenceContract.requirements.size)

@@ -125,6 +125,8 @@ data class WorkflowRun(
     val workflow: ResolvedWorkflow,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val workDefinition: WorkDefinitionManifest? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 @Serializable
@@ -220,6 +222,7 @@ data class WorkflowRunView(
     val workDefinition: WorkDefinitionManifest? = null,
     val judgments: List<CriterionJudgment> = emptyList(),
     val criterionGates: List<CriterionGateView> = emptyList(),
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 interface WorkflowMemoryStore {

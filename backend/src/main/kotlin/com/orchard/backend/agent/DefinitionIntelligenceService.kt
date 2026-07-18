@@ -24,6 +24,7 @@ import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.workspace.COLLABORATOR_LOCAL_LLM
 import com.orchard.backend.workspace.DefinitionCollaborationStatus
 import com.orchard.backend.workspace.DefinitionExecutionProvenance
+import com.orchard.backend.workspace.ConversationCommandReference
 import com.orchard.backend.workspace.DefinitionProposalContent
 import com.orchard.backend.workspace.MESSAGE_DEFINITION_COLLABORATION
 import com.orchard.backend.workspace.DefinitionStepContext
@@ -133,17 +134,17 @@ class DefinitionIntelligenceService(
         }
     }
 
-    suspend fun propose(workItemId: Int): ProposalGenerationResult {
+    suspend fun propose(workItemId: Int, conversationCommand: ConversationCommandReference? = null): ProposalGenerationResult {
         val mutex = workItemMutexes.computeIfAbsent(workItemId) { Mutex() }
         if (!mutex.tryLock()) return result(ProposalGenerationStatus.BUSY)
         return try {
-            generate(workItemId)
+            generate(workItemId, conversationCommand)
         } finally {
             mutex.unlock()
         }
     }
 
-    private suspend fun generate(workItemId: Int): ProposalGenerationResult {
+    private suspend fun generate(workItemId: Int, conversationCommand: ConversationCommandReference?): ProposalGenerationResult {
         val context = workspace.definitionStepContext(workItemId)
             ?: return result(ProposalGenerationStatus.WORK_ITEM_NOT_FOUND)
         val step = context.systemWorkflow.stepDefinitions.single()
@@ -274,6 +275,7 @@ class DefinitionIntelligenceService(
                 outputHash = sha256(generation.text),
                 executionId = execution.executionId,
             ),
+            conversationCommand = conversationCommand,
         )
         return when (recorded.status) {
             DefinitionCollaborationStatus.RECORDED -> ProposalGenerationResult(

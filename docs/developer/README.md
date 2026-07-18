@@ -1,6 +1,6 @@
 # Orchard Developer Documentation
 
-This documentation covers the current Kotlin codebase and Milestone 10.1 runtime.
+This documentation covers the current Kotlin codebase and the Milestone 10.2 conductor implementation.
 
 ## Reading Order
 
@@ -9,6 +9,7 @@ This documentation covers the current Kotlin codebase and Milestone 10.1 runtime
 3. [Persistence and Recovery](persistence.md) before changing a store or serialized model.
 4. [API Reference](api-reference.md) before changing backend routes or the desktop client.
 5. [Extension Points](extension-points.md) before adding providers, profiles, prompts, policies, workflow authorities, or projections.
+6. [Conversation Conductor](conversation-conductor.md) before changing conversation authority, capabilities, recovery, or multi-objective scheduling.
 
 Use [ADRs](../adrs/) for rationale and the [Roadmap](../../ROADMAP.md) for intended sequencing. This guide describes delivered behavior; neither it nor the roadmap authorizes a runtime transition.
 
@@ -21,6 +22,7 @@ backend/
     agent/                      coding worker and repository gateway
     analysis/                   repository execution plans
     company/                    staffing, company circuit, audit, promotion
+    conversation/               durable conversation authority and conductor
     config/                     local path model
     domain/                     core product models
     resource/                   machine capacity admission
