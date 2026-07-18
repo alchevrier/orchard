@@ -88,6 +88,7 @@ class CompanyControlService(
 
     fun installedStaff(role: String? = null): List<InstalledStaff> {
         val executionProfileId = when (role) {
+            ROLE_ANALYST_DESIGNER -> com.orchard.backend.vector.DefaultModelExecutionProfiles.broadRepositoryAnalysis.id
             ROLE_IMPLEMENTER -> com.orchard.backend.vector.DefaultModelExecutionProfiles.boundedCodingPatch.id
             ROLE_ARCHITECTURE_AUDITOR,
             ROLE_QUALITY_AUDITOR -> com.orchard.backend.vector.DefaultModelExecutionProfiles.boundedIndependentAudit.id
@@ -96,7 +97,13 @@ class CompanyControlService(
         val profiles = workspace.modelProfiles()
             .filter { executionProfileId == null || it.executionProfileId == executionProfileId }
             .associateBy(ModelCapabilityProfile::bindingFingerprint)
-        return modelProviders.map { provider ->
+        val executionProfile = executionProfileId?.let(com.orchard.backend.vector.DefaultModelExecutionProfiles::resolve)
+        return modelProviders.filter { provider ->
+            executionProfile == null || provider.bindingProfile().let { binding ->
+                binding.contextWindowTokens >= executionProfile.inputBudgetTokens + executionProfile.outputBudgetTokens &&
+                    binding.capabilities.containsAll(executionProfile.requiredCapabilities)
+            }
+        }.map { provider ->
             val binding = provider.bindingProfile()
             val fingerprint = modelBindingFingerprint(binding)
             val profile = profiles[fingerprint]
@@ -105,7 +112,7 @@ class CompanyControlService(
                 bindingId = binding.bindingId,
                 provider = binding.provider,
                 model = binding.model,
-                roles = listOf(ROLE_IMPLEMENTER, ROLE_ARCHITECTURE_AUDITOR, ROLE_QUALITY_AUDITOR),
+                roles = listOf(ROLE_ANALYST_DESIGNER, ROLE_IMPLEMENTER, ROLE_ARCHITECTURE_AUDITOR, ROLE_QUALITY_AUDITOR),
                 sampleCount = profile?.sampleCount ?: 0,
                 schemaValidityRate = profile?.schemaValidityRate ?: 0.0,
                 confidence = profile?.confidence ?: 0.0,

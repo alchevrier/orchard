@@ -186,7 +186,41 @@ data class WorkspaceSnapshotResponse(
 data class CompanyWorkspaceResponse(
     val workspace: WorkspaceSnapshotResponse = WorkspaceSnapshotResponse(),
     val companyProjects: List<CompanyProjectResponse> = emptyList(),
+    val executionPlans: List<RepositoryExecutionPlanResponse> = emptyList(),
     val companyDiagnostic: String = "",
+)
+
+@Serializable
+data class RepositoryExecutionPlanResponse(
+    val planId: Long,
+    val runId: Long,
+    val revision: Int,
+    val projectId: Int,
+    val baseRevision: String,
+    val content: RepositoryAnalysisPlanContentResponse,
+    val hash: String,
+)
+
+@Serializable
+data class RepositoryAnalysisPlanContentResponse(
+    val disposition: String,
+    val summary: String,
+    val reuse: List<String> = emptyList(),
+    val preservedInvariants: List<String> = emptyList(),
+    val nonGoals: List<String> = emptyList(),
+    val operations: List<ExecutionPlanOperationResponse> = emptyList(),
+    val verificationCommands: List<String> = emptyList(),
+    val unresolvedQuestions: List<String> = emptyList(),
+)
+
+@Serializable
+data class ExecutionPlanOperationResponse(
+    val order: Int,
+    val action: String,
+    val path: String,
+    val symbol: String? = null,
+    val instruction: String,
+    val acceptanceCriteria: List<String> = emptyList(),
 )
 
 @Serializable

@@ -40,6 +40,11 @@ interface ModelProvider : AutoCloseable {
         maxOutputTokens: Int,
         contextWindowTokens: Int,
     ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
+    suspend fun executeRepositoryAnalysis(
+        prompt: String,
+        maxOutputTokens: Int,
+        contextWindowTokens: Int,
+    ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
     suspend fun executeCodingPatch(
         prompt: String,
         maxOutputTokens: Int,
@@ -92,6 +97,12 @@ class OllamaClient(
     ): ModelGeneration = generate(prompt, maxOutputTokens, contextWindowTokens)
 
     override suspend fun executeCircuitSynthesis(
+        prompt: String,
+        maxOutputTokens: Int,
+        contextWindowTokens: Int,
+    ): ModelGeneration = generate(prompt, maxOutputTokens, contextWindowTokens)
+
+    override suspend fun executeRepositoryAnalysis(
         prompt: String,
         maxOutputTokens: Int,
         contextWindowTokens: Int,

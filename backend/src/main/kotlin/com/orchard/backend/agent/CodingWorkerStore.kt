@@ -30,6 +30,8 @@ data class CodingWorkerClaim(
     val assignmentId: Long? = null,
     val staffRole: String? = null,
     val riskClass: String? = null,
+    val executionPlanId: Long? = null,
+    val executionPlanHash: String? = null,
     val toolchainPackId: String? = null,
     val toolchainPackVersion: Int? = null,
     val toolchainProfileId: String? = null,
@@ -148,6 +150,14 @@ private data class CodingWorkerEnvelope(
 internal fun codingWorkerClaimHash(claim: CodingWorkerClaim): String = stagedPlanHash(
     "${claim.executionId}:${claim.runId}:${claim.attempt}:${claim.contextHash}:${claim.workspacePath}:" +
         "${claim.bindingFingerprint}:${claim.assignmentId}:${claim.staffRole.orEmpty()}:${claim.riskClass.orEmpty()}:" +
+        "${claim.executionPlanId}:${claim.executionPlanHash.orEmpty()}:" +
+        "${claim.toolchainPackId.orEmpty()}:${claim.toolchainPackVersion}:" +
+        "${claim.toolchainProfileId.orEmpty()}:${claim.toolchainPolicyHash.orEmpty()}:${claim.claimedAt}"
+)
+
+private fun prePlanCodingWorkerClaimHash(claim: CodingWorkerClaim): String = stagedPlanHash(
+    "${claim.executionId}:${claim.runId}:${claim.attempt}:${claim.contextHash}:${claim.workspacePath}:" +
+        "${claim.bindingFingerprint}:${claim.assignmentId}:${claim.staffRole.orEmpty()}:${claim.riskClass.orEmpty()}:" +
         "${claim.toolchainPackId.orEmpty()}:${claim.toolchainPackVersion}:" +
         "${claim.toolchainProfileId.orEmpty()}:${claim.toolchainPolicyHash.orEmpty()}:${claim.claimedAt}"
 )
@@ -199,6 +209,7 @@ private fun validateCodingWorkerEvent(
             claim.toolchainPolicyHash,
         )
         val staffingAuthority = listOfNotNull(claim.assignmentId, claim.staffRole, claim.riskClass)
+        val planAuthority = listOfNotNull(claim.executionPlanId, claim.executionPlanHash)
         require(staffingAuthority.isEmpty() || staffingAuthority.size == 3) {
             "Coding worker claim has partial staffing authority"
         }
@@ -208,6 +219,12 @@ private fun validateCodingWorkerEvent(
             }
             require(claim.riskClass in setOf("LOW", "MEDIUM", "HIGH", "CRITICAL")) {
                 "Coding worker risk authority is invalid"
+            }
+        }
+        require(planAuthority.isEmpty() || planAuthority.size == 2) { "Coding worker claim has partial execution-plan authority" }
+        if (planAuthority.isNotEmpty()) {
+            require(requireNotNull(claim.executionPlanId) > 0 && requireNotNull(claim.executionPlanHash).matches(SHA256)) {
+                "Coding worker execution-plan authority is invalid"
             }
         }
         require(toolchainAuthority.isEmpty() || toolchainAuthority.size == 4) {
@@ -222,9 +239,10 @@ private fun validateCodingWorkerEvent(
             ) { "Coding worker claim toolchain authority is invalid" }
         }
         val currentHash = codingWorkerClaimHash(claim.copy(hash = ""))
+        val prePlanHash = if (planAuthority.isEmpty()) prePlanCodingWorkerClaimHash(claim.copy(hash = "")) else null
         val preCompanyHash = if (staffingAuthority.isEmpty()) preCompanyCodingWorkerClaimHash(claim.copy(hash = "")) else null
         val legacyHash = if (toolchainAuthority.isEmpty()) legacyCodingWorkerClaimHash(claim.copy(hash = "")) else null
-        require(claim.hash == currentHash || claim.hash == preCompanyHash || claim.hash == legacyHash) {
+        require(claim.hash == currentHash || claim.hash == prePlanHash || claim.hash == preCompanyHash || claim.hash == legacyHash) {
             "Coding worker claim hash mismatch"
         }
         require(executions.none { it.result == null }) { "Another coding worker execution is still active" }

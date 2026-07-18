@@ -1,5 +1,11 @@
 package com.orchard.backend.agent
 
+import com.orchard.backend.analysis.DISPOSITION_COMPLETE
+import com.orchard.backend.analysis.PLAN_OPERATION_CREATE
+import com.orchard.backend.analysis.PLAN_OPERATION_DELETE
+import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
+import com.orchard.backend.analysis.RepositoryAnalysisService
+import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.RISK_HIGH
@@ -44,6 +50,9 @@ enum class CodingWorkerTickStatus {
     APPLICATION_FAILED,
     VERIFICATION_FAILED,
     CANDIDATE_COMPLETED,
+    ANALYSIS_REQUIRED,
+    PLAN_STALE,
+    PLAN_BLOCKED,
     STORAGE_UNAVAILABLE,
 }
 
@@ -61,6 +70,7 @@ private data class CodingWorkerModelEnvelope(
     val forbiddenActions: List<String>,
     val requiredOutputSchema: String,
     val run: WorkflowRunView,
+    val executionPlan: RepositoryExecutionPlan? = null,
     val repositoryContext: CodingRepositoryContext,
 )
 
@@ -74,6 +84,7 @@ class CodingWorkerService(
     private val systemPrompt: String = loadPrompt(),
     private val retryBudget: Int = DEFAULT_RETRY_BUDGET,
     private val companyControl: CompanyControlService? = null,
+    private val repositoryAnalysis: RepositoryAnalysisService? = null,
 ) {
     private val mutex = Mutex()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -106,6 +117,17 @@ class CodingWorkerService(
             return appendResult(events, interrupted.claim, result, CodingWorkerTickStatus.INTERRUPTED_RECOVERED)
         }
         val run = candidateRun(executions) ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
+        val executionPlan = repositoryAnalysis?.currentPlan(run.runId)
+        if (repositoryAnalysis != null && executionPlan == null) {
+            return CodingWorkerTickResult(CodingWorkerTickStatus.ANALYSIS_REQUIRED)
+        }
+        val workspacePath = requireNotNull(run.context.workspaceReservation).path
+        if (executionPlan != null && workspaceGateway.currentRevision(workspacePath) != executionPlan.baseRevision) {
+            return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_STALE)
+        }
+        if (executionPlan?.content?.disposition == DISPOSITION_COMPLETE) {
+            return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_BLOCKED)
+        }
         val profile = DefaultModelExecutionProfiles.boundedCodingPatch
         val assignment = companyControl?.let { company ->
             if (company.compileRules(run.context.projectId).status != CompanyMutationStatus.RECORDED) {
@@ -126,10 +148,9 @@ class CodingWorkerService(
             ?: runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
         val binding = modelProvider.bindingProfile()
-        val workspacePath = requireNotNull(run.context.workspaceReservation).path
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
         val toolchainPolicy = toolchainResolution.getOrNull()
-        val claim = newClaim(events, executions, run, binding, toolchainPolicy, assignment)
+        val claim = newClaim(events, executions, run, binding, toolchainPolicy, assignment, executionPlan)
         try {
             workerStore.append(CodingWorkerEvent(eventId = claim.executionId, claim = claim))
         } catch (_: Exception) {
@@ -151,11 +172,15 @@ class CodingWorkerService(
             "No valid toolchain policy matches the reserved repository.",
         )
 
-        val repositoryContext = runCatching {
+        val collectedContext = runCatching {
             workspaceGateway.collectContext(workspacePath, run.context.title + "\n" + run.context.content)
         }.getOrElse { error ->
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.APPLICATION_FAILED, error.message)
         }
+        val repositoryContext = executionPlan?.let { plan ->
+            val targetPaths = plan.content.operations.mapTo(hashSetOf()) { it.path }
+            collectedContext.copy(files = collectedContext.files.filter { it.path in targetPaths })
+        } ?: collectedContext
         val envelope = CodingWorkerModelEnvelope(
             executionProfile = profile,
             workflowStepId = CODING_WORKFLOW_STEP_ID,
@@ -163,6 +188,7 @@ class CodingWorkerService(
             forbiddenActions = listOf("EXECUTE_COMMAND", "APPROVE_CRITERION", "COMPLETE_WORKFLOW", "PUSH", "MERGE"),
             requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
             run = run,
+            executionPlan = executionPlan,
             repositoryContext = repositoryContext,
         )
         val envelopeJson = json.encodeToString(envelope)
@@ -246,6 +272,14 @@ class CodingWorkerService(
             modelExecutionId = modelExecution.executionId,
         )
         val proposalHash = sha256(strictOutputJson.encodeToString(proposal))
+        if (executionPlan != null && !proposalAuthorized(proposal, executionPlan)) return finish(
+            claim,
+            CODING_EXECUTION_FAILED,
+            CodingWorkerTickStatus.PLAN_BLOCKED,
+            "The coding proposal exceeds the accepted execution-plan path or action scope.",
+            modelExecution.executionId,
+            proposalHash,
+        )
         if (!runStillActionable(run)) return finish(
             claim,
             CODING_EXECUTION_BLOCKED,
@@ -328,6 +362,7 @@ class CodingWorkerService(
         binding: ModelBindingProfile,
         toolchainPolicy: ResolvedToolchainPolicy?,
         assignment: com.orchard.backend.company.StaffAssignment?,
+        executionPlan: RepositoryExecutionPlan?,
     ): CodingWorkerClaim {
         val draft = CodingWorkerClaim(
             executionId = events.size + 1L,
@@ -339,6 +374,8 @@ class CodingWorkerService(
             assignmentId = assignment?.assignmentId,
             staffRole = assignment?.role,
             riskClass = assignment?.risk,
+            executionPlanId = executionPlan?.planId,
+            executionPlanHash = executionPlan?.hash,
             toolchainPackId = toolchainPolicy?.packId,
             toolchainPackVersion = toolchainPolicy?.packVersion,
             toolchainProfileId = toolchainPolicy?.profileId,
@@ -346,6 +383,17 @@ class CodingWorkerService(
             hash = "",
         )
         return draft.copy(hash = codingWorkerClaimHash(draft))
+    }
+
+    private fun proposalAuthorized(proposal: CodingPatchProposal, plan: RepositoryExecutionPlan): Boolean {
+        val authority = plan.content.operations.filter { it.action != "VERIFY" }.associate { it.path to it.action }
+        return proposal.operations.isNotEmpty() && proposal.operations.all { operation ->
+            when (operation.action) {
+                CODING_FILE_WRITE -> authority[operation.path] in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY)
+                CODING_FILE_DELETE -> authority[operation.path] == PLAN_OPERATION_DELETE
+                else -> false
+            }
+        }
     }
 
     private fun submitEvidence(

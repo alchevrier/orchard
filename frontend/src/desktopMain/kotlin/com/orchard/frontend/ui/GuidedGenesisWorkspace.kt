@@ -68,6 +68,7 @@ import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.ProjectGenesisViewResponse
 import com.orchard.frontend.network.RepositoryBlueprintRequest
 import com.orchard.frontend.network.CompanyProjectResponse
+import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 
 private const val GENESIS_CLASSIFICATION = "CLASSIFICATION"
 private const val GENESIS_EXPERIENCE = "EXPERIENCE"
@@ -110,6 +111,7 @@ internal fun GuidedGenesisWorkspace(
     isGeneratingProposal: Boolean,
     proposal: GenesisProposalResponse?,
     company: CompanyProjectResponse?,
+    executionPlan: RepositoryExecutionPlanResponse?,
     onCreateProject: (String) -> Unit,
     onCreateEpic: (String) -> Unit,
     onBindRepository: () -> Unit,
@@ -152,6 +154,7 @@ internal fun GuidedGenesisWorkspace(
                 isGeneratingProposal = isGeneratingProposal,
                 proposal = proposal,
                 company = company,
+                executionPlan = executionPlan,
                 onCreateProject = onCreateProject,
                 onCreateEpic = onCreateEpic,
                 onBindRepository = onBindRepository,
@@ -168,6 +171,7 @@ internal fun GuidedGenesisWorkspace(
                 phase = phase,
                 genesis = genesis,
                 company = company,
+                executionPlan = executionPlan,
             )
         }
     }
@@ -273,6 +277,7 @@ private fun ConversationSurface(
     isGeneratingProposal: Boolean,
     proposal: GenesisProposalResponse?,
     company: CompanyProjectResponse?,
+    executionPlan: RepositoryExecutionPlanResponse?,
     onCreateProject: (String) -> Unit,
     onCreateEpic: (String) -> Unit,
     onBindRepository: () -> Unit,
@@ -754,6 +759,7 @@ private fun ProjectionSurface(
     phase: String,
     genesis: ProjectGenesisViewResponse?,
     company: CompanyProjectResponse?,
+    executionPlan: RepositoryExecutionPlanResponse?,
 ) {
     Column(modifier.background(GenesisCanvas).padding(32.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -773,7 +779,7 @@ private fun ProjectionSurface(
         ) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                 if (genesis?.revision == null) EmptyProjection()
-                else if (phase == GENESIS_READY && company != null) CompanyProjection(genesis, company)
+                else if (phase == GENESIS_READY && company != null) CompanyProjection(genesis, company, executionPlan)
                 else GenesisProjection(genesis)
             }
         }
@@ -781,7 +787,11 @@ private fun ProjectionSurface(
 }
 
 @Composable
-private fun CompanyProjection(genesis: ProjectGenesisViewResponse, company: CompanyProjectResponse) {
+private fun CompanyProjection(
+    genesis: ProjectGenesisViewResponse,
+    company: CompanyProjectResponse,
+    executionPlan: RepositoryExecutionPlanResponse?,
+) {
     ProjectionSection("COMPANY HEALTH") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -805,6 +815,20 @@ private fun CompanyProjection(genesis: ProjectGenesisViewResponse, company: Comp
         company.assignments.takeLast(3).forEach { assignment ->
             Text(assignment.role.replace('_', ' '), Modifier.padding(top = 10.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             Text("${assignment.model}  /  ${assignment.risk} risk  /  ${(assignment.confidence * 100).toInt()}% evidence confidence", color = GenesisMuted, fontSize = 9.sp)
+        }
+    }
+    executionPlan?.let { plan ->
+        ProjectionSection("ANALYSIS & EXECUTION PLAN") {
+            MetadataLine(plan.content.disposition.replace('_', ' '), "Plan ${plan.revision}")
+            Text(plan.content.summary, Modifier.padding(top = 8.dp), color = GenesisInk, fontSize = 10.sp, lineHeight = 15.sp)
+            Text("Broad analysis 88K  /  bounded coding 24K", Modifier.padding(top = 8.dp), color = GenesisBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+            if (plan.content.reuse.isNotEmpty()) {
+                Text("Reuse  ${plan.content.reuse.joinToString()}", Modifier.padding(top = 8.dp), color = GenesisMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+            }
+            plan.content.operations.forEach { operation ->
+                Text("${operation.order}. ${operation.action} ${operation.path}", Modifier.padding(top = 8.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                Text(operation.instruction, color = GenesisMuted, fontSize = 9.sp, lineHeight = 14.sp)
+            }
         }
     }
     company.ruleSet?.let { rules ->

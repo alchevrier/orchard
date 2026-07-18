@@ -14,6 +14,10 @@ import com.orchard.backend.agent.CodingWorkerTickStatus
 import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
+import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
+import com.orchard.backend.analysis.RepositoryAnalysisService
+import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
+import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.company.CompanyAuditService
 import com.orchard.backend.company.CompanyCircuitService
@@ -132,13 +136,23 @@ fun main() {
         repositoryBindings,
     )
     val companyCircuit = CompanyCircuitService(workspace, companyControl, OrchardPaths.LOCAL_REPOSITORIES_DIR)
+    val codingWorkspaceGateway = LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR))
+    val repositoryAnalysis = RepositoryAnalysisService(
+        workspace,
+        listOf(modelProvider),
+        FileRepositoryExecutionPlanStore(OrchardPaths.WORKSPACE_DIR),
+        codingWorkspaceGateway,
+        resourceController,
+        companyControl = companyControl,
+    )
     val codingWorker = CodingWorkerService(
         workspace,
         listOf(modelProvider),
         FileCodingWorkerStore(OrchardPaths.WORKSPACE_DIR),
-        LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR)),
+        codingWorkspaceGateway,
         resourceController,
         companyControl = companyControl,
+        repositoryAnalysis = repositoryAnalysis,
     )
     val companyAudit = CompanyAuditService(
         workspace,
@@ -157,6 +171,15 @@ fun main() {
         }
     }
     val codingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val analysisScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    analysisScope.launch {
+        while (isActive) {
+            delay(ANALYSIS_INTERVAL_MILLIS)
+            runCatching { repositoryAnalysis.tick() }.onFailure { error ->
+                ANALYSIS_LOGGER.log(Level.WARNING, "Repository analysis tick failed", error)
+            }
+        }
+    }
     codingScope.launch {
         while (isActive) {
             delay(CODING_INTERVAL_MILLIS)
@@ -183,6 +206,7 @@ fun main() {
             genesisIntelligence,
             companyControl,
             companyCircuit,
+            repositoryAnalysis,
         )
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
@@ -190,6 +214,7 @@ fun main() {
     }
     Runtime.getRuntime().addShutdownHook(Thread {
         dispatchScope.cancel()
+        analysisScope.cancel()
         codingScope.cancel()
         auditScope.cancel()
         workspaceServer.stop()
@@ -208,6 +233,7 @@ fun Application.workspaceApi(
     genesisIntelligence: GenesisIntelligenceService? = null,
     companyControl: CompanyControlService? = null,
     companyCircuit: CompanyCircuitService? = null,
+    repositoryAnalysis: RepositoryAnalysisService? = null,
 ) {
     configureJson()
     routing {
@@ -219,7 +245,7 @@ fun Application.workspaceApi(
                 call.respond(HttpStatusCode.ServiceUnavailable)
                 return@get
             }
-            call.respond(workspaceResponse(workspace, companyControl))
+            call.respond(workspaceResponse(workspace, companyControl, repositoryAnalysis))
         }
         get("/api/company") {
             if (companyControl == null) {
@@ -227,6 +253,38 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(companyControl.projectViews())
+        }
+        get("/api/repository-analysis/plans") {
+            if (repositoryAnalysis == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(repositoryAnalysis.plans())
+        }
+        post("/api/repository-analysis/tick") {
+            if (repositoryAnalysis == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = runCatching { repositoryAnalysis.tick() }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val status = when (result.status) {
+                RepositoryAnalysisTickStatus.PLAN_CREATED -> HttpStatusCode.Created
+                RepositoryAnalysisTickStatus.IDLE -> HttpStatusCode.OK
+                RepositoryAnalysisTickStatus.BUSY,
+                RepositoryAnalysisTickStatus.PLAN_STALE,
+                RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED -> HttpStatusCode.Conflict
+                RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
+                RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED -> HttpStatusCode.UnprocessableEntity
+                RepositoryAnalysisTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
+                RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+                RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL,
+                RepositoryAnalysisTickStatus.MODEL_FAILED,
+                RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
         }
         post("/api/projects/{projectId}/company/start") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
@@ -250,9 +308,10 @@ fun Application.workspaceApi(
             call.respond(
                 status,
                 CompanyWorkspaceResponse(
-                    workspace.snapshot(MESSAGE_READY),
-                    requireNotNull(companyControl).projectViews(),
-                    result.diagnostic,
+                    workspace = workspace.snapshot(MESSAGE_READY),
+                    companyProjects = requireNotNull(companyControl).projectViews(),
+                    executionPlans = repositoryAnalysis?.plans().orEmpty(),
+                    companyDiagnostic = result.diagnostic,
                 ),
             )
         }
@@ -643,7 +702,10 @@ fun Application.workspaceApi(
                 CodingWorkerTickStatus.INTERRUPTED_RECOVERED -> HttpStatusCode.OK
                 CodingWorkerTickStatus.BUSY -> HttpStatusCode.Conflict
                 CodingWorkerTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
-                CodingWorkerTickStatus.INVALID_PROPOSAL -> HttpStatusCode.UnprocessableEntity
+                CodingWorkerTickStatus.INVALID_PROPOSAL,
+                CodingWorkerTickStatus.PLAN_BLOCKED -> HttpStatusCode.UnprocessableEntity
+                CodingWorkerTickStatus.ANALYSIS_REQUIRED,
+                CodingWorkerTickStatus.PLAN_STALE -> HttpStatusCode.Conflict
                 CodingWorkerTickStatus.MODEL_FAILED,
                 CodingWorkerTickStatus.APPLICATION_FAILED,
                 CodingWorkerTickStatus.VERIFICATION_FAILED,
@@ -656,9 +718,11 @@ fun Application.workspaceApi(
 
 private const val MAX_STAGED_PLAN_REQUEST_BYTES = 64 * 1024
 private const val DISPATCH_INTERVAL_MILLIS = 1_000L
+private const val ANALYSIS_INTERVAL_MILLIS = 1_000L
 private const val CODING_INTERVAL_MILLIS = 1_000L
 private const val AUDIT_INTERVAL_MILLIS = 1_000L
 private val DISPATCH_LOGGER: Logger = Logger.getLogger("com.orchard.backend.dispatch")
+private val ANALYSIS_LOGGER: Logger = Logger.getLogger("com.orchard.backend.analysis")
 private val CODING_LOGGER: Logger = Logger.getLogger("com.orchard.backend.coding")
 private val AUDIT_LOGGER: Logger = Logger.getLogger("com.orchard.backend.audit")
 
@@ -666,15 +730,18 @@ private val AUDIT_LOGGER: Logger = Logger.getLogger("com.orchard.backend.audit")
 data class CompanyWorkspaceResponse(
     val workspace: com.orchard.backend.workspace.WorkspaceSnapshot,
     val companyProjects: List<CompanyProjectView> = emptyList(),
+    val executionPlans: List<RepositoryExecutionPlan> = emptyList(),
     val companyDiagnostic: String = "",
 )
 
 private fun workspaceResponse(
     workspace: WorkspaceStore,
     companyControl: CompanyControlService?,
+    repositoryAnalysis: RepositoryAnalysisService? = null,
 ): CompanyWorkspaceResponse = CompanyWorkspaceResponse(
     workspace = workspace.snapshot(MESSAGE_READY),
     companyProjects = companyControl?.projectViews().orEmpty(),
+    executionPlans = repositoryAnalysis?.plans().orEmpty(),
 )
 
 private fun workflowMutationStatus(status: WorkflowMutationStatus, success: HttpStatusCode): HttpStatusCode = when (status) {

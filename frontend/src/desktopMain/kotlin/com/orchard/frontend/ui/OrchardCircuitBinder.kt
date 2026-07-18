@@ -97,6 +97,7 @@ import com.orchard.frontend.network.CircuitDispatchViewResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.CompanyProjectResponse
+import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
@@ -150,6 +151,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
     private var appliedResponseSequence = 0L
     private var response by mutableStateOf(WorkspaceSnapshotResponse())
     private var companyProjects by mutableStateOf<List<CompanyProjectResponse>>(emptyList())
+    private var executionPlans by mutableStateOf<List<RepositoryExecutionPlanResponse>>(emptyList())
 
     @Composable
     fun render() {
@@ -174,6 +176,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         val genesis = response.projectGenesis.singleOrNull { it.projectId == projectId }
         val repository = snapshot.repositories[projectId]
         val company = companyProjects.singleOrNull { it.projectId == projectId }
+        val executionPlan = executionPlans.filter { it.projectId == projectId }.maxByOrNull { it.planId }
 
         LaunchedEffect(genesis?.phase, genesis?.revision?.hash) {
             genesisProposal = null
@@ -203,6 +206,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 isGeneratingProposal = isGeneratingProposal,
                 proposal = genesisProposal,
                 company = company,
+                executionPlan = executionPlan,
                 onCreateProject = { name ->
                     runSubmission { sendArchitectPrompt("Create a project named \"$name\".") }
                 },
@@ -562,6 +566,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 if (sequence > appliedResponseSequence) {
                     response = envelope.workspace
                     companyProjects = envelope.companyProjects
+                    executionPlans = envelope.executionPlans
                     appliedResponseSequence = sequence
                 }
             }
@@ -646,6 +651,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 if (sequence > appliedResponseSequence) {
                     response = envelope.workspace
                     companyProjects = envelope.companyProjects
+                    executionPlans = envelope.executionPlans
                     appliedResponseSequence = sequence
                 }
             }

@@ -1,5 +1,14 @@
 package com.orchard.backend.company
 
+import com.orchard.backend.analysis.DISPOSITION_PARTIALLY_IMPLEMENTED
+import com.orchard.backend.analysis.DISPOSITION_SCAFFOLD_ONLY
+import com.orchard.backend.analysis.ExecutionPlanOperation
+import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
+import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
+import com.orchard.backend.analysis.RepositoryAnalysisService
+import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
+import com.orchard.backend.analysis.TransientRepositoryExecutionPlanStore
+import com.orchard.backend.analysis.RepositoryEvidenceCitation
 import com.orchard.backend.agent.CODING_FILE_WRITE
 import com.orchard.backend.agent.CodingFileOperation
 import com.orchard.backend.agent.CodingPatchProposal
@@ -61,15 +70,38 @@ class CompanyCircuitTest {
         val company = CompanyControlService(workspace, listOf(staff), FileCompanyControlStore(state), bindings)
         val circuit = CompanyCircuitService(workspace, company, projects)
         assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(staff),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+        )
         val worker = CodingWorkerService(
             workspace = workspace,
             modelProviders = listOf(staff),
             workerStore = TransientCodingWorkerStore(),
             workspaceGateway = LocalCodingWorkspaceGateway(),
             companyControl = company,
+            repositoryAnalysis = analysis,
+            retryBudget = 5,
         )
 
+        assertEquals(CodingWorkerTickStatus.ANALYSIS_REQUIRED, worker.tick().status)
+        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick().status)
+        assertEquals(DISPOSITION_SCAFFOLD_ONLY, analysis.plans().single().content.disposition)
+        val reservedPath = Path.of(workspace.snapshot(MESSAGE_READY).workflowRuns.single().context.repository.path)
+        val initialRevision = LocalCodingWorkspaceGateway().currentRevision(reservedPath.toString())
+        val initialReadme = Files.readString(reservedPath.resolve("README.md"))
+        assertEquals(CodingWorkerTickStatus.PLAN_BLOCKED, worker.tick().status)
+        assertEquals(1, staff.codingCallCount)
+        assertEquals(initialRevision, LocalCodingWorkspaceGateway().currentRevision(reservedPath.toString()))
+        assertEquals(initialReadme, Files.readString(reservedPath.resolve("README.md")))
         assertEquals(CodingWorkerTickStatus.VERIFICATION_FAILED, worker.tick().status)
+        assertEquals(2, staff.codingCallCount)
+        assertEquals(CodingWorkerTickStatus.PLAN_STALE, worker.tick().status)
+        assertEquals(2, staff.codingCallCount)
+        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick().status)
         val secondAttempt = worker.tick()
         assertEquals(
             CodingWorkerTickStatus.CANDIDATE_COMPLETED,
@@ -83,7 +115,12 @@ class CompanyCircuitTest {
         val violation = audit.tick()
         assertEquals(CompanyAuditTickStatus.VIOLATION, violation.status, violation.diagnostic)
         assertEquals("EVIDENCE_BLOCKED", workspace.snapshot(MESSAGE_READY).workflowRuns.single().state)
+        assertEquals(CodingWorkerTickStatus.PLAN_STALE, worker.tick().status)
+        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick().status)
         assertEquals(CodingWorkerTickStatus.CANDIDATE_COMPLETED, worker.tick().status)
+        assertTrue(analysis.plans().drop(1).all { it.content.disposition == DISPOSITION_PARTIALLY_IMPLEMENTED })
+        assertTrue(analysis.plans().all { "build.gradle.kts" in it.content.reuse })
+        assertTrue(worker.executions().all { it.claim.executionPlanId != null && it.claim.executionPlanHash != null })
 
         val repaired = requireNotNull(worker.executions().last().result)
         val repairedRevision = requireNotNull(repaired.revision)
@@ -297,6 +334,8 @@ class CompanyCircuitTest {
     private class ScenarioStaffModel : ModelProvider {
         private var codingCalls = 0
         private var auditCalls = 0
+        private var analysisCalls = 0
+        val codingCallCount: Int get() = codingCalls
 
         override suspend fun triage(prompt: String): String = "{}"
 
@@ -308,14 +347,67 @@ class CompanyCircuitTest {
             contextWindowTokens: Int,
         ): ModelGeneration {
             val content = when (codingCalls++) {
-                0 -> "plugins { this is not valid Kotlin }\n"
-                1 -> "plugins { base }\n\ndescription = \"Initial governed candidate\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
+                0 -> "plugins { base }\n"
+                1 -> "plugins { this is not valid Kotlin }\n"
+                2 -> "plugins { base }\n\ndescription = \"Initial governed candidate\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
                 else -> "plugins { base }\n\ndescription = \"Repaired after independent audit\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
+            }
+            val operations = if (codingCalls == 1) {
+                listOf(
+                    CodingFileOperation(CODING_FILE_WRITE, "build.gradle.kts", content),
+                    CodingFileOperation(CODING_FILE_WRITE, "README.md", "Unauthorized scope expansion.\n"),
+                )
+            } else {
+                listOf(CodingFileOperation(CODING_FILE_WRITE, "build.gradle.kts", content))
             }
             val output = Json.encodeToString(
                 CodingPatchProposal(
                     summary = "Implement the governed local experience.",
-                    operations = listOf(CodingFileOperation(CODING_FILE_WRITE, "build.gradle.kts", content)),
+                    operations = operations,
+                )
+            )
+            return ModelGeneration(output, prompt.length, output.length)
+        }
+
+        override suspend fun executeRepositoryAnalysis(
+            prompt: String,
+            maxOutputTokens: Int,
+            contextWindowTokens: Int,
+        ): ModelGeneration {
+            val contentHash = requireNotNull(
+                Regex("\\\"path\\\":\\\"build\\.gradle\\.kts\\\",\\\"content\\\":.*?\\\"contentHash\\\":\\\"([0-9a-f]{64})\\\"")
+                    .find(prompt)
+            ).groupValues[1]
+            val criterion = "The architect can observe one complete governed journey."
+            val disposition = if (analysisCalls++ == 0) DISPOSITION_SCAFFOLD_ONLY else DISPOSITION_PARTIALLY_IMPLEMENTED
+            val output = Json.encodeToString(
+                RepositoryAnalysisPlanContent(
+                    disposition = disposition,
+                    summary = if (disposition == DISPOSITION_SCAFFOLD_ONLY) {
+                        "The generated Gradle project is wired but has no admitted product behavior."
+                    } else {
+                        "The existing Gradle implementation should be repaired in place."
+                    },
+                    evidence = listOf(
+                        RepositoryEvidenceCitation(
+                            "build.gradle.kts",
+                            observation = "The existing build surface is the owning implementation and must be reused.",
+                            contentHash = contentHash,
+                        )
+                    ),
+                    reuse = listOf("build.gradle.kts"),
+                    preservedInvariants = listOf("Preserve the admitted local Gradle toolchain."),
+                    nonGoals = listOf("Do not create a parallel build implementation."),
+                    operations = listOf(
+                        ExecutionPlanOperation(
+                            1,
+                            PLAN_OPERATION_MODIFY,
+                            "build.gradle.kts",
+                            instruction = "Implement the accepted journey by extending the existing Gradle surface.",
+                            acceptanceCriteria = listOf(criterion),
+                        )
+                    ),
+                    verificationCommands = listOf("./gradlew test --no-daemon"),
                 )
             )
             return ModelGeneration(output, prompt.length, output.length)

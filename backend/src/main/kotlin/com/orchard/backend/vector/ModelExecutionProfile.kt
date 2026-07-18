@@ -75,7 +75,16 @@ object DefaultModelExecutionProfiles {
         id = "bounded-coding-patch-v1",
         version = 1,
         reasoningClass = "BOUNDED_CODING_PATCH",
-        inputBudgetTokens = 64_000,
+        inputBudgetTokens = 24_000,
+        outputBudgetTokens = 8_000,
+        requiredCapabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+    )
+
+    val broadRepositoryAnalysis = ModelExecutionProfile(
+        id = "broad-repository-analysis-v1",
+        version = 1,
+        reasoningClass = "BROAD_REPOSITORY_ANALYSIS",
+        inputBudgetTokens = 88_000,
         outputBudgetTokens = 8_000,
         requiredCapabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
     )
@@ -93,6 +102,7 @@ object DefaultModelExecutionProfiles {
         boundedDefinitionReasoning.id -> boundedDefinitionReasoning
         boundedCircuitSynthesis.id -> boundedCircuitSynthesis
         boundedCodingPatch.id -> boundedCodingPatch
+        broadRepositoryAnalysis.id -> broadRepositoryAnalysis
         boundedIndependentAudit.id -> boundedIndependentAudit
         else -> throw IllegalArgumentException("Unknown model execution profile $id")
     }
@@ -100,6 +110,7 @@ object DefaultModelExecutionProfiles {
     fun all(): List<ModelExecutionProfile> = listOf(
         boundedDefinitionReasoning,
         boundedCircuitSynthesis,
+        broadRepositoryAnalysis,
         boundedCodingPatch,
         boundedIndependentAudit,
     )

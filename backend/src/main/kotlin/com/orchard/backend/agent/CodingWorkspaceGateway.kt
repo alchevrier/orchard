@@ -21,6 +21,7 @@ const val CODING_FILE_DELETE = "DELETE"
 data class CodingContextFile(
     val path: String,
     val content: String,
+    val contentHash: String = sha256Content(content),
 )
 
 @Serializable
@@ -56,6 +57,8 @@ data class VerificationObservation(
 
 interface CodingWorkspaceGateway {
     fun collectContext(workspacePath: String, query: String): CodingRepositoryContext
+    fun collectAnalysisContext(workspacePath: String, query: String): CodingRepositoryContext = collectContext(workspacePath, query)
+    fun currentRevision(workspacePath: String): String? = null
     fun applyAndCommit(workspacePath: String, proposal: CodingPatchProposal, executionId: Long): CodingCandidate
     fun resolveToolchainPolicy(workspacePath: String): ResolvedToolchainPolicy?
     fun parseVerificationCommand(command: String): VerificationCommand
@@ -69,7 +72,21 @@ interface CodingWorkspaceGateway {
 class LocalCodingWorkspaceGateway(
     private val policyCatalog: ToolchainPolicyCatalog = FileToolchainPolicyCatalog(),
 ) : CodingWorkspaceGateway {
-    override fun collectContext(workspacePath: String, query: String): CodingRepositoryContext {
+    override fun collectContext(workspacePath: String, query: String): CodingRepositoryContext =
+        collectContext(workspacePath, query, MAX_CONTEXT_FILES, MAX_CONTEXT_BYTES)
+
+    override fun collectAnalysisContext(workspacePath: String, query: String): CodingRepositoryContext =
+        collectContext(workspacePath, query, MAX_ANALYSIS_CONTEXT_FILES, MAX_ANALYSIS_CONTEXT_BYTES)
+
+    override fun currentRevision(workspacePath: String): String? {
+        val root = validatedRoot(workspacePath)
+        requireGitWorkspace(root)
+        return run(root, listOf("git", "rev-parse", "--verify", "HEAD"), GIT_COMMAND_TIMEOUT_SECONDS)
+            .takeIf { it.exitCode == 0 && it.output.matches(GIT_HASH) }
+            ?.output
+    }
+
+    private fun collectContext(workspacePath: String, query: String, maxFiles: Int, maxBytes: Int): CodingRepositoryContext {
         val root = validatedRoot(workspacePath)
         requireGitWorkspace(root)
         val tracked = run(root, listOf("git", "ls-files"), CONTEXT_COMMAND_TIMEOUT_SECONDS).output
@@ -99,7 +116,7 @@ class LocalCodingWorkspaceGateway(
         val selected = mutableListOf<CodingContextFile>()
         ranked.forEach { (_, relative, content) ->
             val bytes = content.encodeToByteArray().size
-            if (selected.size < MAX_CONTEXT_FILES && bytesUsed + bytes <= MAX_CONTEXT_BYTES) {
+            if (selected.size < maxFiles && bytesUsed + bytes <= maxBytes) {
                 selected += CodingContextFile(relative, content)
                 bytesUsed += bytes
             }
@@ -362,9 +379,7 @@ class LocalCodingWorkspaceGateway(
         .filter { it.length >= 3 }
         .toSet()
 
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+    private fun sha256(value: String): String = sha256Content(value)
 
     private data class ProcessResult(val exitCode: Int, val output: String)
 
@@ -372,6 +387,8 @@ class LocalCodingWorkspaceGateway(
         const val MAX_CONTEXT_FILES = 32
         const val MAX_CONTEXT_FILE_BYTES = 64 * 1024L
         const val MAX_CONTEXT_BYTES = 256 * 1024
+        const val MAX_ANALYSIS_CONTEXT_FILES = 96
+        const val MAX_ANALYSIS_CONTEXT_BYTES = 768 * 1024
         const val MAX_OPERATIONS = 32
         const val MAX_PATCH_BYTES = 512 * 1024
         const val MAX_PATH_LENGTH = 512
@@ -396,3 +413,7 @@ class LocalCodingWorkspaceGateway(
         )
     }
 }
+
+internal fun sha256Content(value: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(value.toByteArray(Charsets.UTF_8))
+    .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }

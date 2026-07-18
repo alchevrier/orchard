@@ -4,7 +4,32 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 9.5 complete - Local Autonomous Company. Orchard now continuously staffs, implements, audits, repairs, accepts, and locally promotes admitted product work under one architect's authority.
+> **Project status:** Milestone 9.6 complete - Repository Analysis and Execution-Plan Compilation. Orchard now uses broad-context local analysis to discover existing implementation and compiles that design into exact, revision-bound work for a smaller coding model.
+
+## Milestone 9.6: Repository Analysis and Execution-Plan Compilation
+
+The local company now performs the architectural heavy lifting before coding. A staffed analyst-designer inspects revision-pinned repository evidence, distinguishes scaffolding from real behavior, finds reusable or partial implementations, and compiles an immutable execution plan. The coding worker receives only that accepted plan and its target files.
+
+Delivered and verified:
+
+- A dedicated `broad-repository-analysis-v1` profile with an 88K input aperture and independently staffed `ANALYST_DESIGNER` role.
+- Seven implementation dispositions: absent, scaffold-only, partial, different-form, nonconforming, complete, and conflicting.
+- Content-hashed repository citations proving every admitted analysis observation came from supplied revision-bound bytes.
+- Immutable, checksummed `repository-analysis-plans.jsonl` authority with monotonic successor plans after repository drift.
+- Coder-ready operations naming exact action, path, optional symbol, instruction, acceptance criteria, invariants, reuse targets, non-goals, and admitted verification commands.
+- Deterministic admission that rejects invented evidence, mismatched repository shape, uncovered acceptance criteria, changed verification commands, and unresolved architecture.
+- A reduced 24K coding profile whose repository context contains only accepted plan targets.
+- Coding claims pinned to exact execution-plan identity and hash, with unauthorized paths or action classes rejected before mutation.
+- `ANALYSIS_REQUIRED`, `PLAN_STALE`, and `PLAN_BLOCKED` outcomes that route uncertainty to analysis instead of coder improvisation.
+- Cockpit projection of implementation disposition, reuse strategy, ordered operations, and the broad-analysis/bounded-coding split.
+- End-to-end proof of scaffold detection, in-place reuse, unauthorized scope rejection without mutation, stale-plan reanalysis, coding repair, independent audit, acceptance, and local promotion.
+
+Milestone 9.6 boundaries:
+
+- Repository selection is bounded lexical retrieval over tracked text files; language-server symbols and source-bound vector retrieval remain future precision improvements.
+- The model proposes analysis and design, but deterministic validation is admission authority.
+- Conflicting implementations and unresolved architectural questions require the local architect; they are never silently delegated to coding.
+- A `COMPLETE` disposition currently blocks coding for explicit verification handling rather than automatically closing the workflow.
 
 ## Milestone 9.5: Local Autonomous Company
 
@@ -507,6 +532,9 @@ flowchart LR
     DQ -->|priority and admission| WM
     DQ --> WT[Isolated Git worktrees]
     WM --> CW[Governed coding worker]
+    WM --> RA[Broad repository analysis]
+    RA -->|revision-bound execution plan| EP[Execution plan authority]
+    EP -->|target files and exact operations| CW
     CW -->|typed file operations| WT
     CW -->|bounded verification evidence| WE
     CW --> MX[Worker execution journal]
@@ -531,6 +559,8 @@ The backend exposes:
 - `GET http://127.0.0.1:8085/api/workspace`
 - `GET http://127.0.0.1:8085/api/company/state`
 - `GET http://127.0.0.1:8085/api/company`
+- `GET http://127.0.0.1:8085/api/repository-analysis/plans`
+- `POST http://127.0.0.1:8085/api/repository-analysis/tick`
 - `POST http://127.0.0.1:8085/api/projects/{id}/company/start`
 - `POST http://127.0.0.1:8085/api/company/runs/{id}/promotion`
 - `POST http://127.0.0.1:8086/api/architect/chat`
@@ -628,7 +658,7 @@ Backend startup creates the directory structure:
 `-- rag-shared/
 ```
 
-These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Guided product-genesis revisions append to `project-genesis.jsonl`. Project bindings are stored in `repository-bindings.json`. Company rules, staffing, audits, escalations, acceptance, and local promotions append to `company-control.jsonl`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt journal tails are moved beside their source as timestamped `*.corrupt-*.jsonl` files.
+These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Guided product-genesis revisions append to `project-genesis.jsonl`. Project bindings are stored in `repository-bindings.json`. Revision-bound analysis and accepted coder plans append to `repository-analysis-plans.jsonl`. Company rules, staffing, audits, escalations, acceptance, and local promotions append to `company-control.jsonl`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt journal tails are moved beside their source as timestamped `*.corrupt-*.jsonl` files.
 
 ## Next Milestones
 
