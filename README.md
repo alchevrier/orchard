@@ -4,7 +4,34 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 9.8 complete - Engineering Standards Authority and Repository Conformance Compiler. Orchard now correlates adjustable engineering policy, ADRs, source, tests, and configuration into citation-backed candidate delivery work that requires explicit admission.
+> **Project status:** Milestone 9.9 complete - Closed-Loop Conformance Remediation. Orchard now carries admitted engineering findings through bounded implementation, verification, independent audit, local promotion, and revision-pinned follow-up scans before declaring them resolved.
+
+## Milestone 9.9: Closed-Loop Conformance Remediation
+
+Admitted conformance findings now become durable remediation campaigns rather than disconnected backlog items. A campaign coordinates Orchard's existing company runtime and proves closure from a promoted repository revision; finishing a Task alone can never close a finding.
+
+Delivered and verified:
+
+- Checksummed append-only campaign and evaluation authority with restart replay and one campaign per admitted conformance scan.
+- Exact persisted mappings from candidate backlog node IDs to admitted workspace entity IDs.
+- Stable cross-scan practice identity independent from model-generated finding IDs.
+- Deterministic compilation of candidate leaves into READY work definitions, inherited design contracts, and covering staged delivery circuits.
+- Sequential campaign slicing that prevents a second leaf from compiling until every prior linked run has an accepted local promotion.
+- Reuse of broad repository analysis, bounded coding, verification evidence, dual independent audit, company acceptance, and local fast-forward promotion.
+- Automatic follow-up scans pinned to the campaign's immutable standard revision and exact promoted repository revision.
+- Idempotent campaign evaluations keyed by campaign and repository revision.
+- Evidence-derived `CLOSED`, `IN_PROGRESS`, `BLOCKED`, and `ESCALATED` outcomes with regression detection across all seeded practices.
+- Immediate post-admission reconciliation plus periodic recovery ticks after restart or missed triggers.
+- Typed campaign APIs and cockpit projection of linked work, promoted revisions, practice transitions, closure, blocking, and regressions.
+- Focused tests for replay, duplicate rejection, campaign compilation, product-genesis interlocks, terminal outcomes, and unchanged-revision idempotency.
+
+Milestone 9.9 boundaries:
+
+- Campaign creation still requires explicit conformance backlog admission.
+- Product genesis, work definition, design, verification, audit, and promotion gates remain mandatory.
+- Blocked or escalated campaigns require a later human or Architect decision; automatic successor remediation is deferred.
+- Organization/module standards overlays, first-class campaign cost accounting, and workspace-capacity expansion remain future work.
+- Orchard never pushes a remote; campaign promotion is local and revision-pinned.
 
 ## Milestone 9.8: Engineering Standards Authority and Repository Conformance Compiler
 

@@ -6,6 +6,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -102,6 +104,7 @@ data class RepositoryConformanceScan(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class ConformanceBacklogAdmission(
     val admissionId: Long,
     val scanId: Long,
@@ -109,9 +112,17 @@ data class ConformanceBacklogAdmission(
     val projectId: Int,
     val repositoryRevision: String,
     val admittedEntityIds: List<Int>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val admittedNodes: List<AdmittedBacklogNode> = emptyList(),
     val actor: String,
     val admittedAt: String,
     val hash: String,
+)
+
+@Serializable
+data class AdmittedBacklogNode(
+    val nodeId: String,
+    val entityId: Int,
 )
 
 @Serializable
@@ -325,6 +336,11 @@ private fun validateAdmissionAppend(
     require(admission.admissionId > 0 && admission.actor.isNotBlank() && admission.admittedAt.isNotBlank() &&
         admission.admittedEntityIds.isNotEmpty() && admission.admittedEntityIds.distinct().size == admission.admittedEntityIds.size) {
         "Backlog admission identity is invalid"
+    }
+    require(admission.admittedNodes.isEmpty() ||
+        (admission.admittedNodes.map { it.nodeId } == scan.proposedBacklog.map { it.nodeId } &&
+            admission.admittedNodes.map { it.entityId } == admission.admittedEntityIds)) {
+        "Backlog admission node mapping is invalid"
     }
     require(existing.none { it.scanId == admission.scanId }) { "Conformance backlog is already admitted" }
     require(admission.hash == conformanceBacklogAdmissionHash(admission.copy(hash = ""))) { "Backlog admission hash is invalid" }

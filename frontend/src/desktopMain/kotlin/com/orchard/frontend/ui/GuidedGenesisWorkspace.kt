@@ -72,6 +72,7 @@ import com.orchard.frontend.network.CompanyProjectResponse
 import com.orchard.frontend.network.EngineeringPracticeResponse
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
+import com.orchard.frontend.network.RemediationCampaignViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 
 private const val GENESIS_CLASSIFICATION = "CLASSIFICATION"
@@ -117,6 +118,7 @@ internal fun GuidedGenesisWorkspace(
     company: CompanyProjectResponse?,
     executionPlan: RepositoryExecutionPlanResponse?,
     engineeringStandards: EngineeringStandardsViewResponse?,
+    remediationCampaigns: List<RemediationCampaignViewResponse>,
     isSavingStandard: Boolean,
     isScanningConformance: Boolean,
     isAdmittingConformance: Boolean,
@@ -184,6 +186,7 @@ internal fun GuidedGenesisWorkspace(
                 company = company,
                 executionPlan = executionPlan,
                 engineeringStandards = engineeringStandards,
+                remediationCampaigns = remediationCampaigns,
                 isSavingStandard = isSavingStandard,
                 isScanningConformance = isScanningConformance,
                 isAdmittingConformance = isAdmittingConformance,
@@ -779,6 +782,7 @@ private fun ProjectionSurface(
     company: CompanyProjectResponse?,
     executionPlan: RepositoryExecutionPlanResponse?,
     engineeringStandards: EngineeringStandardsViewResponse?,
+    remediationCampaigns: List<RemediationCampaignViewResponse>,
     isSavingStandard: Boolean,
     isScanningConformance: Boolean,
     isAdmittingConformance: Boolean,
@@ -817,8 +821,75 @@ private fun ProjectionSurface(
                         onAdmit = onAdmitConformance,
                     )
                 }
+                remediationCampaigns.forEach { campaign -> RemediationCampaignProjection(campaign) }
             }
         }
+    }
+}
+
+@Composable
+private fun RemediationCampaignProjection(view: RemediationCampaignViewResponse) {
+    val color = when (view.state) {
+        "CLOSED" -> GenesisGreen
+        "BLOCKED", "ESCALATED" -> GenesisRed
+        "VERIFYING" -> GenesisAmber
+        else -> GenesisBlue
+    }
+    ProjectionSection("REMEDIATION CAMPAIGN ${view.campaign.campaignId}") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).background(color, CircleShape))
+            Text(
+                view.state.replace('_', ' '),
+                Modifier.padding(start = 8.dp).weight(1f),
+                color = color,
+                fontWeight = FontWeight.Bold,
+                fontSize = 10.sp,
+            )
+            Text("Standard ${view.campaign.standardRevision}", color = GenesisMuted, fontSize = 9.sp)
+        }
+        MetadataLine("Seed scan ${view.campaign.seedScanId}", view.campaign.seedRepositoryRevision.take(12))
+        view.campaign.links.forEach { link ->
+            Text(link.practiceId, Modifier.padding(top = 8.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+            Text(
+                "${link.backlogNodeIds.size} work nodes  /  ${link.admittedEntityIds.size} admitted entities",
+                color = GenesisMuted,
+                fontSize = 9.sp,
+            )
+        }
+        view.evaluations.lastOrNull()?.let { evaluation ->
+            Divider(Modifier.padding(vertical = 10.dp), color = GenesisLine)
+            MetadataLine("Follow-up scan ${evaluation.scanId}", evaluation.repositoryRevision.take(12))
+            evaluation.practices.forEach { practice ->
+                val practiceColor = when {
+                    practice.regressed -> GenesisRed
+                    practice.resolved -> GenesisGreen
+                    else -> GenesisAmber
+                }
+                Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(6.dp).background(practiceColor, CircleShape))
+                    Text(practice.practiceId, Modifier.padding(start = 7.dp).weight(1f), color = GenesisInk, fontSize = 9.sp)
+                    Text(
+                        "${practice.priorDisposition.replace('_', ' ')} -> ${practice.currentDisposition.replace('_', ' ')}",
+                        color = practiceColor,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 8.sp,
+                    )
+                }
+            }
+            Text(
+                "Promotion ${evaluation.promotionIds.joinToString()} supplied the repository revision evaluated for closure.",
+                Modifier.padding(top = 8.dp),
+                color = GenesisMuted,
+                fontSize = 9.sp,
+                lineHeight = 13.sp,
+            )
+        } ?: Text(
+            "The admitted campaign advances one bounded leaf at a time through definition, coding, verification, independent audit, promotion, and follow-up scan.",
+            Modifier.padding(top = 9.dp),
+            color = GenesisMuted,
+            fontSize = 9.sp,
+            lineHeight = 14.sp,
+        )
     }
 }
 

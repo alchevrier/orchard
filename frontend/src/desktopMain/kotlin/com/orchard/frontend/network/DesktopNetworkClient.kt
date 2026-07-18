@@ -49,6 +49,9 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun admitConformanceBacklog(scanId: Long): BacklogAdmissionResultResponse =
         client.post("http://127.0.0.1:8085/api/conformance-scans/$scanId/admission").successBody()
 
+    suspend fun getRemediationCampaigns(projectId: Int): List<RemediationCampaignViewResponse> =
+        client.get("http://127.0.0.1:8085/api/projects/$projectId/remediation-campaigns").successBody()
+
     suspend fun advanceProjectGenesis(
         projectId: Int,
         submission: ProjectGenesisSubmissionRequest,
@@ -338,6 +341,70 @@ data class BacklogAdmissionResultResponse(
     val status: String,
     val admission: ConformanceBacklogAdmissionResponse? = null,
     val diagnostic: String = "",
+)
+
+@Serializable
+data class CampaignPracticeLinkResponse(
+    val practiceId: String,
+    val seedFindingId: String,
+    val backlogNodeIds: List<String>,
+    val admittedEntityIds: List<Int>,
+)
+
+@Serializable
+data class CampaignSeedPracticeResponse(
+    val practiceId: String,
+    val findingId: String,
+    val disposition: String,
+)
+
+@Serializable
+data class RemediationCampaignResponse(
+    val campaignId: Long,
+    val projectId: Int,
+    val standardId: Long,
+    val standardRevision: Int,
+    val standardHash: String,
+    val seedScanId: Long,
+    val seedScanHash: String,
+    val seedAdmissionId: Long,
+    val seedAdmissionHash: String,
+    val seedRepositoryRevision: String,
+    val seedPractices: List<CampaignSeedPracticeResponse>,
+    val links: List<CampaignPracticeLinkResponse>,
+    val createdAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class CampaignPracticeEvaluationResponse(
+    val practiceId: String,
+    val priorDisposition: String,
+    val currentDisposition: String,
+    val resolved: Boolean,
+    val regressed: Boolean,
+)
+
+@Serializable
+data class RemediationCampaignEvaluationResponse(
+    val evaluationId: Long,
+    val campaignId: Long,
+    val scanId: Long,
+    val scanHash: String,
+    val repositoryRevision: String,
+    val promotionIds: List<Long>,
+    val practices: List<CampaignPracticeEvaluationResponse>,
+    val state: String,
+    val idempotencyKey: String,
+    val recordedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class RemediationCampaignViewResponse(
+    val campaign: RemediationCampaignResponse,
+    val evaluations: List<RemediationCampaignEvaluationResponse>,
+    val state: String,
 )
 
 @Serializable

@@ -101,6 +101,7 @@ import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.CompanyProjectResponse
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
+import com.orchard.frontend.network.RemediationCampaignViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
@@ -163,6 +164,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var isBindingRepository by remember { mutableStateOf(false) }
         var isGeneratingProposal by remember { mutableStateOf(false) }
         var engineeringStandards by remember { mutableStateOf<EngineeringStandardsViewResponse?>(null) }
+        var remediationCampaigns by remember { mutableStateOf(emptyList<RemediationCampaignViewResponse>()) }
         var isSavingStandard by remember { mutableStateOf(false) }
         var isScanningConformance by remember { mutableStateOf(false) }
         var isAdmittingConformance by remember { mutableStateOf(false) }
@@ -187,11 +189,15 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         val executionPlan = executionPlans.filter { it.projectId == projectId }.maxByOrNull { it.planId }
 
         LaunchedEffect(projectId, repository?.available) {
-            engineeringStandards = if (projectId > 0 && repository?.available == true) {
-                runCatching { networkClient.getEngineeringStandards(projectId) }
-                    .onFailure { requestError = it.message ?: "Unable to load engineering standards." }
-                    .getOrNull()
-            } else null
+            if (projectId > 0 && repository?.available == true) {
+                runCatching {
+                    engineeringStandards = networkClient.getEngineeringStandards(projectId)
+                    remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
+                }.onFailure { requestError = it.message ?: "Unable to load engineering standards." }
+            } else {
+                engineeringStandards = null
+                remediationCampaigns = emptyList()
+            }
         }
 
         LaunchedEffect(genesis?.phase, genesis?.revision?.hash) {
@@ -224,6 +230,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 company = company,
                 executionPlan = executionPlan,
                 engineeringStandards = engineeringStandards,
+                remediationCampaigns = remediationCampaigns,
                 isSavingStandard = isSavingStandard,
                 isScanningConformance = isScanningConformance,
                 isAdmittingConformance = isAdmittingConformance,
@@ -300,6 +307,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             runCatching { networkClient.admitConformanceBacklog(scanId) }
                                 .onSuccess {
                                     engineeringStandards = networkClient.getEngineeringStandards(projectId)
+                                    remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
                                     refreshWorkspace().getOrThrow()
                                 }
                                 .onFailure { requestError = it.message ?: "Unable to admit the conformance backlog." }
@@ -311,7 +319,13 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                     if (!isSubmitting) {
                         scope.launch {
                             requestError = null
-                            refreshWorkspace().onFailure { requestError = it.message ?: "Unable to refresh Orchard." }
+                            runCatching {
+                                refreshWorkspace().getOrThrow()
+                                if (projectId > 0 && repository?.available == true) {
+                                    engineeringStandards = networkClient.getEngineeringStandards(projectId)
+                                    remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
+                                }
+                            }.onFailure { requestError = it.message ?: "Unable to refresh Orchard." }
                         }
                     }
                 },

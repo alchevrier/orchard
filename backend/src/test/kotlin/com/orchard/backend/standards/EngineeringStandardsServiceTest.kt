@@ -1,6 +1,7 @@
 package com.orchard.backend.standards
 
 import com.orchard.backend.api.DocumentIntent
+import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelGeneration
@@ -85,6 +86,54 @@ class EngineeringStandardsServiceTest {
 
         assertEquals(ConformanceScanStatus.INVALID_OUTPUT, result.status)
         assertEquals(1, workspace.entityCount)
+    }
+
+    @Test
+    fun `campaign reconciliation compiles admitted remediation exactly once`() = runTest {
+        val state = createTempDirectory("orchard-remediation-state-")
+        val repository = initializedRepository()
+        val workspace = WorkspaceStore()
+        val projectId = createProject(workspace)
+        val bindings = FileRepositoryBindingStore(state)
+        bindings.bind(projectId, repository.toString())
+        val standardsStore = TransientEngineeringStandardsStore()
+        val readmeHash = sha256(Files.readString(repository.resolve("README.md")))
+        val standards = EngineeringStandardsService(
+            workspace,
+            bindings,
+            listOf(FixedConformanceModel(output(readmeHash))),
+            standardsStore,
+        )
+        standards.updateStandard(
+            projectId,
+            EngineeringStandardSubmission("Orchard standard", listOf(defaultEngineeringPractices().first())),
+        )
+        val scan = assertNotNull(standards.scan(projectId).scan)
+        assertEquals(BacklogAdmissionStatus.ADMITTED, standards.admitBacklog(scan.scanId).status)
+        val campaignStore = TransientRemediationCampaignStore()
+        val campaigns = RemediationCampaignService(
+            workspace,
+            bindings,
+            standardsStore,
+            standards,
+            CompanyControlService(workspace, emptyList(), repositories = bindings),
+            campaignStore,
+        )
+
+        assertEquals(CAMPAIGN_TICK_WAITING_FOR_PROMOTION, campaigns.tick().status)
+        assertEquals(CAMPAIGN_TICK_WAITING_FOR_PROMOTION, campaigns.tick().status)
+
+        assertEquals(1, campaignStore.campaigns().size)
+        assertEquals(0, campaignStore.evaluations().size)
+        val campaign = campaignStore.campaigns().single()
+        assertEquals(listOf("AUTHORITY_INTEGRITY"), campaign.links.map { it.practiceId })
+        assertEquals(listOf("EPIC", "STORY", "TASK"), campaign.links.single().backlogNodeIds)
+        val snapshot = workspace.snapshot(com.orchard.backend.workspace.MESSAGE_READY)
+        assertEquals(1, snapshot.workDefinitions.size)
+        assertEquals(3, snapshot.designRevisions.count { it.status == com.orchard.backend.workspace.DESIGN_STATUS_ADMITTED })
+        assertEquals(2, snapshot.stagedPlans.size)
+        assertEquals(0, snapshot.workflowRuns.size)
+        assertEquals(1, snapshot.circuitDispatches.size)
     }
 
     private fun createProject(workspace: WorkspaceStore): Int {

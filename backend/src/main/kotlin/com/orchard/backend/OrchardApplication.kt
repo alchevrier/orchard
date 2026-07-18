@@ -42,6 +42,8 @@ import com.orchard.backend.standards.ConformanceScanStatus
 import com.orchard.backend.standards.EngineeringStandardSubmission
 import com.orchard.backend.standards.EngineeringStandardsService
 import com.orchard.backend.standards.FileEngineeringStandardsStore
+import com.orchard.backend.standards.FileRemediationCampaignStore
+import com.orchard.backend.standards.RemediationCampaignService
 import com.orchard.backend.standards.StandardUpdateStatus
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.FileRepositoryBindingStore
@@ -154,13 +156,22 @@ fun main() {
         resourceController,
         companyControl = companyControl,
     )
+    val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
     val engineeringStandards = EngineeringStandardsService(
         workspace,
         repositoryBindings,
         modelProviders,
-        FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR),
+        engineeringStandardsStore,
         codingWorkspaceGateway,
         resourceController,
+    )
+    val remediationCampaigns = RemediationCampaignService(
+        workspace,
+        repositoryBindings,
+        engineeringStandardsStore,
+        engineeringStandards,
+        companyControl,
+        FileRemediationCampaignStore(OrchardPaths.WORKSPACE_DIR),
     )
     val codingWorker = CodingWorkerService(
         workspace,
@@ -214,6 +225,15 @@ fun main() {
             }
         }
     }
+    val campaignScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    campaignScope.launch {
+        while (isActive) {
+            delay(CAMPAIGN_INTERVAL_MILLIS)
+            runCatching { remediationCampaigns.tick() }.onFailure { error ->
+                CAMPAIGN_LOGGER.log(Level.WARNING, "Remediation campaign tick failed", error)
+            }
+        }
+    }
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
         workspaceApi(
             workspace,
@@ -226,6 +246,7 @@ fun main() {
             repositoryAnalysis,
             modelProviderRegistry,
             engineeringStandards,
+            remediationCampaigns,
         )
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
@@ -236,6 +257,7 @@ fun main() {
         analysisScope.cancel()
         codingScope.cancel()
         auditScope.cancel()
+        campaignScope.cancel()
         workspaceServer.stop()
         architectServer.stop()
         modelProviderRegistry.close()
@@ -255,6 +277,7 @@ fun Application.workspaceApi(
     repositoryAnalysis: RepositoryAnalysisService? = null,
     modelProviderRegistry: ModelProviderRegistry? = null,
     engineeringStandards: EngineeringStandardsService? = null,
+    remediationCampaigns: RemediationCampaignService? = null,
 ) {
     configureJson()
     routing {
@@ -378,7 +401,29 @@ fun Application.workspaceApi(
                 BacklogAdmissionStatus.INVALID_BACKLOG -> HttpStatusCode.UnprocessableEntity
                 BacklogAdmissionStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
+            if (result.status == BacklogAdmissionStatus.ADMITTED) {
+                runCatching { remediationCampaigns?.reconcileAdmissions() }
+            }
             call.respond(status, result)
+        }
+        get("/api/projects/{projectId}/remediation-campaigns") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0 || remediationCampaigns == null) {
+                call.respond(if (projectId == null || projectId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(remediationCampaigns.views(projectId))
+        }
+        post("/api/remediation-campaigns/tick") {
+            if (remediationCampaigns == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = runCatching { remediationCampaigns.tick() }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            call.respond(HttpStatusCode.OK, result)
         }
         post("/api/projects/{projectId}/company/start") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
@@ -855,10 +900,12 @@ private const val DISPATCH_INTERVAL_MILLIS = 1_000L
 private const val ANALYSIS_INTERVAL_MILLIS = 1_000L
 private const val CODING_INTERVAL_MILLIS = 1_000L
 private const val AUDIT_INTERVAL_MILLIS = 1_000L
+private const val CAMPAIGN_INTERVAL_MILLIS = 1_000L
 private val DISPATCH_LOGGER: Logger = Logger.getLogger("com.orchard.backend.dispatch")
 private val ANALYSIS_LOGGER: Logger = Logger.getLogger("com.orchard.backend.analysis")
 private val CODING_LOGGER: Logger = Logger.getLogger("com.orchard.backend.coding")
 private val AUDIT_LOGGER: Logger = Logger.getLogger("com.orchard.backend.audit")
+private val CAMPAIGN_LOGGER: Logger = Logger.getLogger("com.orchard.backend.remediation")
 
 @Serializable
 data class CompanyWorkspaceResponse(

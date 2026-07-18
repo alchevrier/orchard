@@ -153,7 +153,19 @@ class EngineeringStandardsService(
     suspend fun scan(projectId: Int): ConformanceScanResult {
         if (!scanMutex.tryLock()) return ConformanceScanResult(ConformanceScanStatus.BUSY)
         return try {
-            scanLocked(projectId)
+            scanLocked(projectId, null)
+        } finally {
+            scanMutex.unlock()
+        }
+    }
+
+    internal suspend fun scanRevision(
+        projectId: Int,
+        standard: EngineeringStandardRevision,
+    ): ConformanceScanResult {
+        if (!scanMutex.tryLock()) return ConformanceScanResult(ConformanceScanStatus.BUSY)
+        return try {
+            scanLocked(projectId, standard)
         } finally {
             scanMutex.unlock()
         }
@@ -209,6 +221,9 @@ class EngineeringStandardsService(
                 projectId = scan.projectId,
                 repositoryRevision = scan.repositoryRevision,
                 admittedEntityIds = entityIds,
+                admittedNodes = scan.proposedBacklog.zip(entityIds) { node, entityId ->
+                    AdmittedBacklogNode(node.nodeId, entityId)
+                },
                 actor = actor,
                 admittedAt = Instant.now().toString(),
                 hash = "",
@@ -231,10 +246,17 @@ class EngineeringStandardsService(
         return entities.map { it.id }
     }
 
-    private suspend fun scanLocked(projectId: Int): ConformanceScanResult {
+    private suspend fun scanLocked(
+        projectId: Int,
+        requestedStandard: EngineeringStandardRevision?,
+    ): ConformanceScanResult {
         if (!projectExists(projectId)) return ConformanceScanResult(ConformanceScanStatus.PROJECT_NOT_FOUND)
-        val standard = store.standards().filter { it.projectId == projectId }.maxByOrNull { it.revision }
-            ?: return ConformanceScanResult(ConformanceScanStatus.STANDARD_NOT_FOUND)
+        val standard = requestedStandard?.takeIf { candidate ->
+            candidate.projectId == projectId && store.standards().any { it.hash == candidate.hash }
+        } ?: if (requestedStandard == null) {
+            store.standards().filter { it.projectId == projectId }.maxByOrNull { it.revision }
+        } else null
+        if (standard == null) return ConformanceScanResult(ConformanceScanStatus.STANDARD_NOT_FOUND)
         val head = repositoryBindings.resolveHead(projectId)
             ?: return ConformanceScanResult(ConformanceScanStatus.REPOSITORY_UNAVAILABLE)
         if (!head.clean) return ConformanceScanResult(ConformanceScanStatus.REPOSITORY_DIRTY)

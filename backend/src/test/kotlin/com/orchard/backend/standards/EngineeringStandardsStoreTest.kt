@@ -18,7 +18,18 @@ class EngineeringStandardsStoreTest {
         val scan = scan(second)
         store.appendScan(scan)
         val admission = newConformanceBacklogAdmission(
-            ConformanceBacklogAdmission(1, scan.scanId, scan.hash, 1, scan.repositoryRevision, listOf(2, 3, 4), "HUMAN", "2026-06-21T00:02:00Z", "")
+            ConformanceBacklogAdmission(
+                1,
+                scan.scanId,
+                scan.hash,
+                1,
+                scan.repositoryRevision,
+                listOf(2, 3, 4),
+                listOf(AdmittedBacklogNode("EPIC", 2), AdmittedBacklogNode("STORY", 3), AdmittedBacklogNode("TASK", 4)),
+                "HUMAN",
+                "2026-06-21T00:02:00Z",
+                "",
+            )
         )
         store.appendAdmission(admission)
 
@@ -68,6 +79,35 @@ class EngineeringStandardsStoreTest {
 
         assertFailsWith<IllegalArgumentException> { store.appendScan(unknownPractice) }
         assertFailsWith<IllegalArgumentException> { store.appendScan(uncoveredFinding) }
+    }
+
+    @Test
+    fun `legacy admission without explicit node mapping replays from disk`() {
+        val directory = createTempDirectory("orchard-legacy-engineering-standards-")
+        val store = FileEngineeringStandardsStore(directory)
+        val standard = standard(1)
+        val scan = scan(standard)
+        store.appendStandard(standard)
+        store.appendScan(scan)
+        val legacy = newConformanceBacklogAdmission(
+            ConformanceBacklogAdmission(
+                admissionId = 1,
+                scanId = scan.scanId,
+                scanHash = scan.hash,
+                projectId = scan.projectId,
+                repositoryRevision = scan.repositoryRevision,
+                admittedEntityIds = listOf(2, 3, 4),
+                actor = "HUMAN",
+                admittedAt = "2026-06-21T00:02:00Z",
+                hash = "",
+            )
+        )
+
+        store.appendAdmission(legacy)
+
+        val admissionLine = Files.readAllLines(directory.resolve("engineering-standards.jsonl")).last()
+        assertEquals(false, admissionLine.contains("admittedNodes"))
+        assertEquals(emptyList(), FileEngineeringStandardsStore(directory).admissions().single().admittedNodes)
     }
 
     private fun standard(revision: Int, previousHash: String? = null) = newEngineeringStandardRevision(
