@@ -4,7 +4,31 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 9.4 complete - Guided Product Genesis. Orchard now forces product experience, first-epic architecture, repository blueprint, and explicit admission before implementation authority opens.
+> **Project status:** Milestone 9.5 complete - Local Autonomous Company. Orchard now continuously staffs, implements, audits, repairs, accepts, and locally promotes admitted product work under one architect's authority.
+
+## Milestone 9.5: Local Autonomous Company
+
+An admitted genesis can now start a restart-safe company circuit. Orchard materializes greenfield repositories, compiles architecture into auditable rules, assigns local models as evidence-ranked staff, executes implementation work, and requires independent architecture and quality judgments before local promotion.
+
+Delivered and verified:
+
+- Continuous company phase projection over the existing staged-plan, dispatch, workflow, worker, evidence, and Git authorities.
+- A local staff registry with role, capability, risk, model-binding, assignment, escalation, and observed-experience provenance.
+- Deterministic compilation of admitted product architecture into revision-bound audit rules.
+- Governed coding execution pinned to the assigned staff identity and model binding.
+- Independent read-only architecture and quality audits whose findings cite current candidate evidence and every compiled rule.
+- Failed verification and audit violations reopen the existing workflow for repair and can escalate staffing seniority.
+- An accountability graph connecting project phase, runs, assignments, candidates, evidence, audits, acceptance, and promotion.
+- A post-genesis Architect cockpit that projects live company state and exposes only valid commands.
+- Greenfield blueprint materialization and explicit local fast-forward promotion after dual conforming audits; Orchard never pushes a remote.
+- Append-only company-control recovery and end-to-end tests covering failed work, reassignment, stale evidence, audit repair, restart, and promotion safety.
+
+Milestone 9.5 boundaries:
+
+- The company circuit is local and single-architect; distributed staff coordination and remote control protocols are outside this milestone.
+- Orchard promotes only within the bound local repository and does not create branches, pull requests, or remote pushes.
+- Company control records staffing, rules, audits, acceptance, escalation, and promotion metadata; existing workflow, evidence, worker, and Git stores remain canonical.
+- Product-genesis successor revisions and downstream invalidation remain a later conversational change circuit.
 
 ## Milestone 9.4: Guided Product Genesis
 
@@ -487,6 +511,12 @@ flowchart LR
     CW -->|bounded verification evidence| WE
     CW --> MX[Worker execution journal]
     PP[Validated toolchain policy packs] -->|pinned typed commands| CW
+    WS --> CC[Company control projection]
+    CC -->|staff assignment| CW
+    CW --> IA[Independent architecture and quality audits]
+    IA -->|evidence-bound judgment| CC
+    IA -->|violation repair| WM
+    CC -->|accepted local revision| RB
     WM --> RC[Deterministic context recall]
     WS -->|Serialized resource snapshot| UI
 ```
@@ -499,6 +529,10 @@ Orchard has two Gradle modules:
 The backend exposes:
 
 - `GET http://127.0.0.1:8085/api/workspace`
+- `GET http://127.0.0.1:8085/api/company/state`
+- `GET http://127.0.0.1:8085/api/company`
+- `POST http://127.0.0.1:8085/api/projects/{id}/company/start`
+- `POST http://127.0.0.1:8085/api/company/runs/{id}/promotion`
 - `POST http://127.0.0.1:8086/api/architect/chat`
 - `POST http://127.0.0.1:8085/api/work-items/{id}/runs`
 - `POST http://127.0.0.1:8085/api/work-items/{id}/definitions`
@@ -594,11 +628,10 @@ Backend startup creates the directory structure:
 `-- rag-shared/
 ```
 
-These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Guided product-genesis revisions append to `project-genesis.jsonl`. Project bindings are stored in `repository-bindings.json`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt journal tails are moved beside their source as timestamped `*.corrupt-*.jsonl` files.
+These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Guided product-genesis revisions append to `project-genesis.jsonl`. Project bindings are stored in `repository-bindings.json`. Company rules, staffing, audits, escalations, acceptance, and local promotions append to `company-control.jsonl`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt journal tails are moved beside their source as timestamped `*.corrupt-*.jsonl` files.
 
 ## Next Milestones
 
-- Materialize admitted greenfield repository blueprints and add explicit local candidate promotion without remote pushes.
 - Add conversational successor revisions that explain and enforce downstream invalidation after admitted product changes.
 - Export structured architectural decisions as correlated repository ADRs while retaining Orchard authority identity.
 - Add verified external Git policy sources with allowlisted identity, signed revisions, manifests, freshness limits, and onboarding attestations.

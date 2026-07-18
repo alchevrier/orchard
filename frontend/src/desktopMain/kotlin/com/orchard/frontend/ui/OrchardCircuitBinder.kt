@@ -96,6 +96,7 @@ import com.orchard.frontend.network.CircuitProposalReferenceRequest
 import com.orchard.frontend.network.CircuitDispatchViewResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.GenesisProposalResponse
+import com.orchard.frontend.network.CompanyProjectResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
@@ -148,6 +149,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
     private val requestSequence = AtomicLong()
     private var appliedResponseSequence = 0L
     private var response by mutableStateOf(WorkspaceSnapshotResponse())
+    private var companyProjects by mutableStateOf<List<CompanyProjectResponse>>(emptyList())
 
     @Composable
     fun render() {
@@ -171,6 +173,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             .map { it.id to it.title }
         val genesis = response.projectGenesis.singleOrNull { it.projectId == projectId }
         val repository = snapshot.repositories[projectId]
+        val company = companyProjects.singleOrNull { it.projectId == projectId }
 
         LaunchedEffect(genesis?.phase, genesis?.revision?.hash) {
             genesisProposal = null
@@ -199,6 +202,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 isBindingRepository = isBindingRepository,
                 isGeneratingProposal = isGeneratingProposal,
                 proposal = genesisProposal,
+                company = company,
                 onCreateProject = { name ->
                     runSubmission { sendArchitectPrompt("Create a project named \"$name\".") }
                 },
@@ -238,6 +242,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 },
                 onAdvance = { submission -> runSubmission { advanceProjectGenesis(projectId, submission) } },
                 onAdmit = { runSubmission { admitProjectGenesis(projectId) } },
+                onStartCompany = { runSubmission { startCompany(projectId) } },
+                onPromote = { runId -> runSubmission { promoteCompanyRun(runId) } },
                 onRefresh = {
                     if (!isSubmitting) {
                         scope.launch {
@@ -549,8 +555,17 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         }
     }
 
-    private suspend fun refreshWorkspace(): Result<Unit> = executeRequest {
-        networkClient.getWorkspace()
+    private suspend fun refreshWorkspace(): Result<Unit> {
+        val sequence = requestSequence.incrementAndGet()
+        return runCatching { networkClient.getCompanyState() }.map { envelope ->
+            responseMutex.withLock {
+                if (sequence > appliedResponseSequence) {
+                    response = envelope.workspace
+                    companyProjects = envelope.companyProjects
+                    appliedResponseSequence = sequence
+                }
+            }
+        }
     }
 
     private suspend fun sendArchitectPrompt(prompt: String): Result<Unit> = executeRequest {
@@ -566,6 +581,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
     private suspend fun admitProjectGenesis(projectId: Int): Result<Unit> = executeRequest {
         networkClient.admitProjectGenesis(projectId)
+    }
+
+    private suspend fun startCompany(projectId: Int): Result<Unit> = executeCompanyRequest {
+        networkClient.startCompany(projectId)
+    }
+
+    private suspend fun promoteCompanyRun(runId: Long): Result<Unit> = executeCompanyRequest {
+        networkClient.promoteCompanyRun(runId)
     }
 
     private suspend fun bindRepository(projectId: Int, path: String): Result<Unit> = executeRequest {
@@ -608,6 +631,21 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             responseMutex.withLock {
                 if (sequence > appliedResponseSequence) {
                     response = snapshot
+                    appliedResponseSequence = sequence
+                }
+            }
+        }
+    }
+
+    private suspend fun executeCompanyRequest(
+        request: suspend () -> com.orchard.frontend.network.CompanyWorkspaceResponse,
+    ): Result<Unit> {
+        val sequence = requestSequence.incrementAndGet()
+        return runCatching { request() }.map { envelope ->
+            responseMutex.withLock {
+                if (sequence > appliedResponseSequence) {
+                    response = envelope.workspace
+                    companyProjects = envelope.companyProjects
                     appliedResponseSequence = sequence
                 }
             }

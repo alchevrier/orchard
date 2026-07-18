@@ -1,5 +1,9 @@
 package com.orchard.backend.agent
 
+import com.orchard.backend.company.CompanyControlService
+import com.orchard.backend.company.CompanyMutationStatus
+import com.orchard.backend.company.RISK_HIGH
+import com.orchard.backend.company.ROLE_IMPLEMENTER
 import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
@@ -69,6 +73,7 @@ class CodingWorkerService(
     private val json: Json = Json { encodeDefaults = true },
     private val systemPrompt: String = loadPrompt(),
     private val retryBudget: Int = DEFAULT_RETRY_BUDGET,
+    private val companyControl: CompanyControlService? = null,
 ) {
     private val mutex = Mutex()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -102,13 +107,29 @@ class CodingWorkerService(
         }
         val run = candidateRun(executions) ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
         val profile = DefaultModelExecutionProfiles.boundedCodingPatch
-        val modelProvider = runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
+        val assignment = companyControl?.let { company ->
+            if (company.compileRules(run.context.projectId).status != CompanyMutationStatus.RECORDED) {
+                return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
+            }
+            val priorFailures = executions.count { it.claim.runId == run.runId && it.result?.status == CODING_EXECUTION_FAILED }
+            val current = company.assignment(run.runId, ROLE_IMPLEMENTER)
+            if (current != null && priorFailures > 0 && current.assignmentId == executions.lastOrNull { it.claim.runId == run.runId }?.claim?.assignmentId) {
+                company.escalate(run.runId, ROLE_IMPLEMENTER, "The previous coding attempt failed verification or candidate application.")
+            }
+            if (company.assign(run.runId, ROLE_IMPLEMENTER, RISK_HIGH).status != CompanyMutationStatus.RECORDED) {
+                return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
+            }
+            company.assignment(run.runId, ROLE_IMPLEMENTER)
+                ?: return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
+        }
+        val modelProvider = assignment?.let { companyControl?.provider(it) }
+            ?: runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
         val binding = modelProvider.bindingProfile()
         val workspacePath = requireNotNull(run.context.workspaceReservation).path
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
         val toolchainPolicy = toolchainResolution.getOrNull()
-        val claim = newClaim(events, executions, run, binding, toolchainPolicy)
+        val claim = newClaim(events, executions, run, binding, toolchainPolicy, assignment)
         try {
             workerStore.append(CodingWorkerEvent(eventId = claim.executionId, claim = claim))
         } catch (_: Exception) {
@@ -277,8 +298,6 @@ class CodingWorkerService(
         val attempts = executions.filter { it.result?.status in REPAIR_ATTEMPT_STATUSES }
             .groupingBy { it.claim.runId }
             .eachCount()
-        val completedRuns = executions.filter { it.result?.status == CODING_EXECUTION_COMPLETED }
-            .mapTo(hashSetOf()) { it.claim.runId }
         val blockedRuns = executions.groupBy { it.claim.runId }.mapNotNull { (runId, runExecutions) ->
             runExecutions.maxByOrNull { it.claim.executionId }?.result
                 ?.takeIf { it.status == CODING_EXECUTION_BLOCKED }
@@ -295,7 +314,6 @@ class CodingWorkerService(
                 run.context.circuitDispatchId != null &&
                     run.context.workspaceReservation?.mode in setOf("ISOLATED", "INTEGRATION")
             }
-            .filter { it.runId !in completedRuns }
             .filter { it.runId !in blockedRuns }
             .filter { it.runId !in deferredRuns }
             .filter { attempts.getOrDefault(it.runId, 0) < retryBudget }
@@ -309,6 +327,7 @@ class CodingWorkerService(
         run: WorkflowRunView,
         binding: ModelBindingProfile,
         toolchainPolicy: ResolvedToolchainPolicy?,
+        assignment: com.orchard.backend.company.StaffAssignment?,
     ): CodingWorkerClaim {
         val draft = CodingWorkerClaim(
             executionId = events.size + 1L,
@@ -317,6 +336,9 @@ class CodingWorkerService(
             contextHash = run.context.hash,
             workspacePath = requireNotNull(run.context.workspaceReservation).path,
             bindingFingerprint = modelBindingFingerprint(binding),
+            assignmentId = assignment?.assignmentId,
+            staffRole = assignment?.role,
+            riskClass = assignment?.risk,
             toolchainPackId = toolchainPolicy?.packId,
             toolchainPackVersion = toolchainPolicy?.packVersion,
             toolchainProfileId = toolchainPolicy?.profileId,
@@ -366,7 +388,9 @@ class CodingWorkerService(
             if (result.status != WorkflowMutationStatus.RECORDED) {
                 return "Evidence ${requirement.kind} was rejected with ${result.status}."
             }
-            if (observation.exitCode != 0) return "Verification ${requirement.kind} failed: ${observation.summary}"
+            val recorded = result.snapshot.workflowRuns.single { it.runId == run.runId }.evidence
+                .last { it.kind == requirement.kind && it.revision == candidate.revision }
+            if (!recorded.passed) return "Verification ${requirement.kind} failed: ${recorded.summary}"
         }
         return null
     }

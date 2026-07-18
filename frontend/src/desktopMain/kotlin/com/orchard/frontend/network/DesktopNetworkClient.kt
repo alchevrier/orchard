@@ -23,6 +23,15 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun getWorkspace(): WorkspaceSnapshotResponse =
         client.get("http://127.0.0.1:8085/api/workspace").body()
 
+    suspend fun getCompanyState(): CompanyWorkspaceResponse =
+        client.get("http://127.0.0.1:8085/api/company/state").body()
+
+    suspend fun startCompany(projectId: Int): CompanyWorkspaceResponse =
+        client.post("http://127.0.0.1:8085/api/projects/$projectId/company/start").successBody()
+
+    suspend fun promoteCompanyRun(runId: Long): CompanyWorkspaceResponse =
+        client.post("http://127.0.0.1:8085/api/company/runs/$runId/promotion").successBody()
+
     suspend fun advanceProjectGenesis(
         projectId: Int,
         submission: ProjectGenesisSubmissionRequest,
@@ -171,6 +180,124 @@ data class WorkspaceSnapshotResponse(
     val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse> = emptyList(),
     val circuitDispatches: List<CircuitDispatchViewResponse> = emptyList(),
     val projectGenesis: List<ProjectGenesisViewResponse> = emptyList(),
+)
+
+@Serializable
+data class CompanyWorkspaceResponse(
+    val workspace: WorkspaceSnapshotResponse = WorkspaceSnapshotResponse(),
+    val companyProjects: List<CompanyProjectResponse> = emptyList(),
+    val companyDiagnostic: String = "",
+)
+
+@Serializable
+data class CompanyProjectResponse(
+    val projectId: Int,
+    val phase: String,
+    val health: String,
+    val ruleSet: ArchitectureRuleSetResponse? = null,
+    val staff: List<InstalledStaffResponse> = emptyList(),
+    val assignments: List<StaffAssignmentResponse> = emptyList(),
+    val audits: List<AuditJudgmentResponse> = emptyList(),
+    val escalations: List<StaffEscalationResponse> = emptyList(),
+    val acceptances: List<CompanyAcceptanceResponse> = emptyList(),
+    val promotions: List<LocalPromotionResponse> = emptyList(),
+    val accountability: List<AccountabilityLinkResponse> = emptyList(),
+    val requiredDecision: String? = null,
+)
+
+@Serializable
+data class ArchitectureRuleSetResponse(
+    val ruleSetId: Long,
+    val projectId: Int,
+    val revision: Int,
+    val genesisRevision: Int,
+    val genesisHash: String,
+    val rules: List<ArchitectureRuleResponse>,
+    val compiledAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class ArchitectureRuleResponse(
+    val ruleId: String,
+    val kind: String,
+    val statement: String,
+    val repositoryPaths: List<String> = emptyList(),
+    val severity: String,
+)
+
+@Serializable
+data class InstalledStaffResponse(
+    val bindingFingerprint: String,
+    val bindingId: String,
+    val provider: String,
+    val model: String,
+    val roles: List<String>,
+    val sampleCount: Int,
+    val schemaValidityRate: Double,
+    val confidence: Double,
+)
+
+@Serializable
+data class StaffAssignmentResponse(
+    val assignmentId: Long,
+    val runId: Long,
+    val role: String,
+    val risk: String,
+    val model: String,
+    val rationale: String,
+    val evidenceSampleCount: Int,
+    val confidence: Double,
+)
+
+@Serializable
+data class AuditFindingResponse(
+    val ruleId: String,
+    val status: String,
+    val summary: String,
+)
+
+@Serializable
+data class AuditJudgmentResponse(
+    val auditId: Long,
+    val runId: Long,
+    val role: String,
+    val candidateRevision: String,
+    val findings: List<AuditFindingResponse>,
+    val status: String,
+    val rationale: String,
+)
+
+@Serializable
+data class StaffEscalationResponse(
+    val escalationId: Long,
+    val runId: Long,
+    val requiredRole: String,
+    val reason: String,
+)
+
+@Serializable
+data class CompanyAcceptanceResponse(
+    val acceptanceId: Long,
+    val runId: Long,
+    val candidateRevision: String,
+    val auditIds: List<Long>,
+    val acceptedBy: String,
+)
+
+@Serializable
+data class LocalPromotionResponse(
+    val promotionId: Long,
+    val runId: Long,
+    val candidateRevision: String,
+    val destinationRevision: String,
+)
+
+@Serializable
+data class AccountabilityLinkResponse(
+    val from: String,
+    val relation: String,
+    val to: String,
 )
 
 @Serializable

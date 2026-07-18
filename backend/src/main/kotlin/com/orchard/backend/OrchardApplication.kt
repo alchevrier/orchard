@@ -15,6 +15,13 @@ import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.config.OrchardPaths
+import com.orchard.backend.company.CompanyAuditService
+import com.orchard.backend.company.CompanyCircuitService
+import com.orchard.backend.company.CompanyCircuitStatus
+import com.orchard.backend.company.CompanyControlService
+import com.orchard.backend.company.CompanyMutationStatus
+import com.orchard.backend.company.CompanyProjectView
+import com.orchard.backend.company.FileCompanyControlStore
 import com.orchard.backend.vector.OllamaClient
 import com.orchard.backend.vector.FileModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProfileOverride
@@ -84,9 +91,10 @@ import io.ktor.utils.io.core.remaining
 
 fun main() {
     OrchardPaths.initialize()
+    val repositoryBindings = FileRepositoryBindingStore(OrchardPaths.WORKSPACE_DIR)
     val workspace = WorkspaceStore(
         FileWorkspaceRepository(OrchardPaths.WORKSPACE_DIR),
-        FileRepositoryBindingStore(OrchardPaths.WORKSPACE_DIR),
+        repositoryBindings,
         FileWorkflowMemoryStore(OrchardPaths.WORKSPACE_DIR),
         FileWorkDefinitionStore(OrchardPaths.WORKSPACE_DIR),
         FileDefinitionCollaborationStore(OrchardPaths.WORKSPACE_DIR),
@@ -117,10 +125,25 @@ fun main() {
         resourceController,
     )
     val genesisIntelligence = GenesisIntelligenceService(workspace, modelProvider, resourceController)
+    val companyControl = CompanyControlService(
+        workspace,
+        listOf(modelProvider),
+        FileCompanyControlStore(OrchardPaths.WORKSPACE_DIR),
+        repositoryBindings,
+    )
+    val companyCircuit = CompanyCircuitService(workspace, companyControl, OrchardPaths.LOCAL_REPOSITORIES_DIR)
     val codingWorker = CodingWorkerService(
         workspace,
         listOf(modelProvider),
         FileCodingWorkerStore(OrchardPaths.WORKSPACE_DIR),
+        LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR)),
+        resourceController,
+        companyControl = companyControl,
+    )
+    val companyAudit = CompanyAuditService(
+        workspace,
+        codingWorker,
+        companyControl,
         LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR)),
         resourceController,
     )
@@ -142,8 +165,25 @@ fun main() {
             }
         }
     }
+    val auditScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    auditScope.launch {
+        while (isActive) {
+            delay(AUDIT_INTERVAL_MILLIS)
+            runCatching { companyAudit.tick() }.onFailure { error ->
+                AUDIT_LOGGER.log(Level.WARNING, "Independent company audit tick failed", error)
+            }
+        }
+    }
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
-        workspaceApi(workspace, definitionIntelligence, circuitIntelligence, codingWorker, genesisIntelligence)
+        workspaceApi(
+            workspace,
+            definitionIntelligence,
+            circuitIntelligence,
+            codingWorker,
+            genesisIntelligence,
+            companyControl,
+            companyCircuit,
+        )
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
         architectApi(architect)
@@ -151,6 +191,7 @@ fun main() {
     Runtime.getRuntime().addShutdownHook(Thread {
         dispatchScope.cancel()
         codingScope.cancel()
+        auditScope.cancel()
         workspaceServer.stop()
         architectServer.stop()
         modelProvider.close()
@@ -165,11 +206,70 @@ fun Application.workspaceApi(
     circuitIntelligence: CircuitIntelligenceService? = null,
     codingWorker: CodingWorkerService? = null,
     genesisIntelligence: GenesisIntelligenceService? = null,
+    companyControl: CompanyControlService? = null,
+    companyCircuit: CompanyCircuitService? = null,
 ) {
     configureJson()
     routing {
         get("/api/workspace") {
             call.respond(workspace.snapshot(MESSAGE_READY))
+        }
+        get("/api/company/state") {
+            if (companyControl == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(workspaceResponse(workspace, companyControl))
+        }
+        get("/api/company") {
+            if (companyControl == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(companyControl.projectViews())
+        }
+        post("/api/projects/{projectId}/company/start") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0 || companyCircuit == null) {
+                call.respond(if (projectId == null || projectId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = runCatching { companyCircuit.start(projectId) }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val status = when (result.status) {
+                CompanyCircuitStatus.STARTED -> HttpStatusCode.Created
+                CompanyCircuitStatus.ALREADY_STARTED -> HttpStatusCode.OK
+                CompanyCircuitStatus.PROJECT_NOT_READY,
+                CompanyCircuitStatus.REPOSITORY_REQUIRED -> HttpStatusCode.Conflict
+                CompanyCircuitStatus.BLUEPRINT_UNSUPPORTED,
+                CompanyCircuitStatus.AUTHORITY_REJECTED -> HttpStatusCode.UnprocessableEntity
+                CompanyCircuitStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(
+                status,
+                CompanyWorkspaceResponse(
+                    workspace.snapshot(MESSAGE_READY),
+                    requireNotNull(companyControl).projectViews(),
+                    result.diagnostic,
+                ),
+            )
+        }
+        post("/api/company/runs/{runId}/promotion") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (runId == null || runId <= 0 || companyControl == null) {
+                call.respond(if (runId == null || runId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = companyControl.promote(runId)
+            val status = when (result.status) {
+                CompanyMutationStatus.RECORDED -> HttpStatusCode.OK
+                CompanyMutationStatus.RUN_NOT_FOUND -> HttpStatusCode.NotFound
+                CompanyMutationStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+                else -> HttpStatusCode.Conflict
+            }
+            call.respond(status, workspaceResponse(workspace, companyControl))
         }
         post("/api/projects/{projectId}/genesis") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
@@ -557,8 +657,25 @@ fun Application.workspaceApi(
 private const val MAX_STAGED_PLAN_REQUEST_BYTES = 64 * 1024
 private const val DISPATCH_INTERVAL_MILLIS = 1_000L
 private const val CODING_INTERVAL_MILLIS = 1_000L
+private const val AUDIT_INTERVAL_MILLIS = 1_000L
 private val DISPATCH_LOGGER: Logger = Logger.getLogger("com.orchard.backend.dispatch")
 private val CODING_LOGGER: Logger = Logger.getLogger("com.orchard.backend.coding")
+private val AUDIT_LOGGER: Logger = Logger.getLogger("com.orchard.backend.audit")
+
+@Serializable
+data class CompanyWorkspaceResponse(
+    val workspace: com.orchard.backend.workspace.WorkspaceSnapshot,
+    val companyProjects: List<CompanyProjectView> = emptyList(),
+    val companyDiagnostic: String = "",
+)
+
+private fun workspaceResponse(
+    workspace: WorkspaceStore,
+    companyControl: CompanyControlService?,
+): CompanyWorkspaceResponse = CompanyWorkspaceResponse(
+    workspace = workspace.snapshot(MESSAGE_READY),
+    companyProjects = companyControl?.projectViews().orEmpty(),
+)
 
 private fun workflowMutationStatus(status: WorkflowMutationStatus, success: HttpStatusCode): HttpStatusCode = when (status) {
     WorkflowMutationStatus.RECORDED -> success

@@ -1394,6 +1394,43 @@ class WorkspaceStore(
     }
 
     @Synchronized
+    fun requireAuditRepair(runId: Long, reason: String): WorkflowMutationResult {
+        val run = workflowRuns.firstOrNull { it.runId == runId }
+            ?: return workflowMutationFailure(WorkflowMutationStatus.RUN_NOT_FOUND, "The workflow run does not exist.")
+        val currentState = runState(runId)
+        if (currentState != RUN_STATE_DONE) return workflowMutationFailure(
+            WorkflowMutationStatus.INVALID_RECORD,
+            "Only completed work can be reopened by independent audit.",
+        )
+        val normalized = reason.trim()
+        if (normalized.isBlank() || normalized.length > MAX_EVIDENCE_SUMMARY) return workflowMutationFailure(
+            WorkflowMutationStatus.INVALID_RECORD,
+            "The audit repair mandate is invalid.",
+        )
+        val now = java.time.Instant.now().toString()
+        val event = WorkflowEvent(
+            eventId = nextEventId,
+            runId = runId,
+            decision = TransitionDecision(
+                decisionId = nextEventId,
+                fromState = currentState,
+                toState = RUN_STATE_EVIDENCE_BLOCKED,
+                accepted = false,
+                reason = normalized,
+                evidenceIds = eventsFor(runId).mapNotNull { it.evidence }.map { it.evidenceId },
+                decidedAt = now,
+                signal = SIGNAL_AUDIT_REPAIR_REQUIRED,
+            ),
+        )
+        if (!appendWorkflowEvent(event)) return workflowMutationFailure(
+            WorkflowMutationStatus.STORAGE_UNAVAILABLE,
+            "The audit repair mandate could not be saved.",
+        )
+        workflowMessage = "Independent audit reopened this work for repair."
+        return WorkflowMutationResult(WorkflowMutationStatus.RECORDED, snapshot(MESSAGE_WORKFLOW_EVENT))
+    }
+
+    @Synchronized
     fun snapshot(messageCode: Int): WorkspaceSnapshot {
         val resources = linkedMapOf<String, WorkspaceResource>()
         resources["focus"] = WorkspaceResource(
@@ -1853,9 +1890,16 @@ class WorkspaceStore(
                     "Workflow event ${event.eventId} starts from an invalid derived state"
                 }
                 val effectiveSignal = decision.signal.ifBlank { legacyDecisionSignal(decision) }
-                val declared = WorkflowStepEngine.resolveSignal(deliveryStep(run), effectiveSignal)
-                require(declared.target == decision.toState && declared.accepted == decision.accepted) {
-                    "Workflow event ${event.eventId} contains an invalid transition signal"
+                if (effectiveSignal == SIGNAL_AUDIT_REPAIR_REQUIRED) {
+                    require(
+                        decision.fromState == RUN_STATE_DONE && decision.toState == RUN_STATE_EVIDENCE_BLOCKED &&
+                            !decision.accepted && event.evidence == null && event.judgment == null
+                    ) { "Workflow event ${event.eventId} contains an invalid audit repair transition" }
+                } else {
+                    val declared = WorkflowStepEngine.resolveSignal(deliveryStep(run), effectiveSignal)
+                    require(declared.target == decision.toState && declared.accepted == decision.accepted) {
+                        "Workflow event ${event.eventId} contains an invalid transition signal"
+                    }
                 }
                 val availableEvidence = workflowEvents.filter { it.runId == run.runId }.mapNotNull { it.evidence } +
                     listOfNotNull(event.evidence)

@@ -30,11 +30,24 @@ data class RevisionValidation(
     val diffHash: String? = null,
 )
 
+data class LocalPromotionResult(
+    val baseRevision: String,
+    val candidateRevision: String,
+    val destinationRevision: String,
+    val diffHash: String,
+)
+
 interface RepositoryBindingStore {
     fun bind(projectId: Int, requestedPath: String)
     fun views(projectIds: Set<Int>): Map<Int, RepositoryView>
     fun resolveHead(projectId: Int): RepositoryHead?
     fun validateRevision(projectId: Int, baseRevision: String, targetRevision: String): RevisionValidation? = null
+    fun promoteLocal(
+        projectId: Int,
+        baseRevision: String,
+        candidateRevision: String,
+        expectedDiffHash: String,
+    ): LocalPromotionResult? = null
     fun reserveWorkspace(
         projectId: Int,
         dispatchId: Long,
@@ -124,6 +137,31 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
             diffHash = checksum(
                 "${baseRevision.lowercase()}\n${canonicalTarget.output.lowercase()}\n${canonicalDiff.output}"
             ),
+        )
+    }
+
+    @Synchronized
+    override fun promoteLocal(
+        projectId: Int,
+        baseRevision: String,
+        candidateRevision: String,
+        expectedDiffHash: String,
+    ): LocalPromotionResult? {
+        if (!expectedDiffHash.matches(SHA256)) return null
+        val head = resolveHead(projectId) ?: return null
+        if (!head.clean || !head.commitHash.equals(baseRevision, ignoreCase = true)) return null
+        val validation = validateRevision(projectId, baseRevision, candidateRevision) ?: return null
+        if (!validation.changedFromBase || validation.diffHash != expectedDiffHash) return null
+        val root = Path.of(head.path)
+        val merge = runGit(root, "merge", "--ff-only", validation.commitHash)
+        if (merge.exitCode != 0) return null
+        val destination = resolveHead(projectId) ?: return null
+        if (!destination.clean || destination.commitHash != validation.commitHash) return null
+        return LocalPromotionResult(
+            baseRevision = baseRevision.lowercase(),
+            candidateRevision = validation.commitHash,
+            destinationRevision = destination.commitHash,
+            diffHash = expectedDiffHash,
         )
     }
 
@@ -284,6 +322,7 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
         const val COMMAND_TIMEOUT_SECONDS = 5L
         val compactJson = Json { encodeDefaults = true }
         val GIT_HASH = Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+        val SHA256 = Regex("[0-9a-f]{64}")
     }
 }
 

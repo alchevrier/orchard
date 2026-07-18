@@ -67,6 +67,7 @@ import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.ProjectGenesisViewResponse
 import com.orchard.frontend.network.RepositoryBlueprintRequest
+import com.orchard.frontend.network.CompanyProjectResponse
 
 private const val GENESIS_CLASSIFICATION = "CLASSIFICATION"
 private const val GENESIS_EXPERIENCE = "EXPERIENCE"
@@ -108,6 +109,7 @@ internal fun GuidedGenesisWorkspace(
     isBindingRepository: Boolean,
     isGeneratingProposal: Boolean,
     proposal: GenesisProposalResponse?,
+    company: CompanyProjectResponse?,
     onCreateProject: (String) -> Unit,
     onCreateEpic: (String) -> Unit,
     onBindRepository: () -> Unit,
@@ -115,6 +117,8 @@ internal fun GuidedGenesisWorkspace(
     onApplyProposal: () -> Unit,
     onAdvance: (ProjectGenesisSubmissionRequest) -> Unit,
     onAdmit: () -> Unit,
+    onStartCompany: () -> Unit,
+    onPromote: (Long) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val phase = genesis?.phase ?: GENESIS_CLASSIFICATION
@@ -147,6 +151,7 @@ internal fun GuidedGenesisWorkspace(
                 isBindingRepository = isBindingRepository,
                 isGeneratingProposal = isGeneratingProposal,
                 proposal = proposal,
+                company = company,
                 onCreateProject = onCreateProject,
                 onCreateEpic = onCreateEpic,
                 onBindRepository = onBindRepository,
@@ -154,12 +159,15 @@ internal fun GuidedGenesisWorkspace(
                 onApplyProposal = onApplyProposal,
                 onAdvance = onAdvance,
                 onAdmit = onAdmit,
+                onStartCompany = onStartCompany,
+                onPromote = onPromote,
             )
             Divider(Modifier.fillMaxHeight().width(1.dp), color = GenesisLine)
             ProjectionSurface(
                 modifier = Modifier.weight(0.58f).fillMaxHeight(),
                 phase = phase,
                 genesis = genesis,
+                company = company,
             )
         }
     }
@@ -264,6 +272,7 @@ private fun ConversationSurface(
     isBindingRepository: Boolean,
     isGeneratingProposal: Boolean,
     proposal: GenesisProposalResponse?,
+    company: CompanyProjectResponse?,
     onCreateProject: (String) -> Unit,
     onCreateEpic: (String) -> Unit,
     onBindRepository: () -> Unit,
@@ -271,6 +280,8 @@ private fun ConversationSurface(
     onApplyProposal: () -> Unit,
     onAdvance: (ProjectGenesisSubmissionRequest) -> Unit,
     onAdmit: () -> Unit,
+    onStartCompany: () -> Unit,
+    onPromote: (Long) -> Unit,
 ) {
     Column(modifier.background(GenesisSurface).padding(30.dp)) {
         Text("ARCHITECT", color = GenesisGreen, fontWeight = FontWeight.Bold, fontSize = 10.sp)
@@ -335,7 +346,7 @@ private fun ConversationSurface(
                     )
                     targetPhase == GENESIS_BLUEPRINT -> BlueprintConversation(genesis, isSubmitting, onAdvance)
                     targetPhase == GENESIS_ADMISSION -> AdmissionConversation(genesis, isSubmitting, onAdmit)
-                    else -> ReadyConversation()
+                    else -> ReadyConversation(company, isSubmitting, onStartCompany, onPromote)
                 }
             }
         }
@@ -679,18 +690,61 @@ private fun AdmissionConversation(
 }
 
 @Composable
-private fun ReadyConversation() {
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+private fun ReadyConversation(
+    company: CompanyProjectResponse?,
+    isSubmitting: Boolean,
+    onStartCompany: () -> Unit,
+    onPromote: (Long) -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
         Box(Modifier.size(52.dp).background(GenesisGreenSoft, CircleShape), contentAlignment = Alignment.Center) {
             Icon(Icons.Default.Check, null, tint = GenesisGreen, modifier = Modifier.size(25.dp))
         }
-        Text("Implementation authority is open", Modifier.padding(top = 16.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         Text(
-            "Coding remains governed by the admitted design and compiled acceptance gates.",
+            company?.phase?.lowercase()?.replace('_', ' ')?.replaceFirstChar(Char::uppercase)
+                ?: "Company circuit is ready",
+            Modifier.padding(top = 16.dp),
+            color = GenesisInk,
+            fontFamily = FontFamily.Serif,
+            fontWeight = FontWeight.Bold,
+            fontSize = 21.sp,
+        )
+        Text(
+            company?.requiredDecision ?: "Orchard can now form the first governed delivery slice and staff it locally.",
             Modifier.padding(top = 7.dp),
             color = GenesisMuted,
             fontSize = 12.sp,
+            lineHeight = 18.sp,
         )
+        company?.assignments?.lastOrNull()?.let { assignment ->
+            Surface(
+                color = GenesisCanvas,
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 20.dp),
+            ) {
+                Column(Modifier.padding(15.dp)) {
+                    Text("CURRENT STAFFING", color = GenesisBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                    Text("${assignment.role.lowercase().replace('_', ' ')}  /  ${assignment.model}", Modifier.padding(top = 7.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text(assignment.rationale, Modifier.padding(top = 5.dp), color = GenesisMuted, fontSize = 10.sp, lineHeight = 15.sp)
+                }
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        val promotableRun = company?.acceptances?.lastOrNull { acceptance ->
+            company.promotions.none { it.runId == acceptance.runId }
+        }?.runId
+        if (promotableRun != null) {
+            PrimaryAction("Promote accepted candidate locally", isSubmitting, true) { onPromote(promotableRun) }
+        } else if (company == null || company.phase in setOf("PORTFOLIO_PLANNING", "DELIVERY_PLANNING", "STAFFING")) {
+            PrimaryAction("Start local company circuit", isSubmitting, true, onStartCompany)
+        } else {
+            Text(
+                "The company circuit is advancing under admitted authority. Refresh to inspect current evidence and decisions.",
+                color = GenesisMuted,
+                fontSize = 11.sp,
+                lineHeight = 17.sp,
+            )
+        }
     }
 }
 
@@ -699,6 +753,7 @@ private fun ProjectionSurface(
     modifier: Modifier,
     phase: String,
     genesis: ProjectGenesisViewResponse?,
+    company: CompanyProjectResponse?,
 ) {
     Column(modifier.background(GenesisCanvas).padding(32.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -718,9 +773,74 @@ private fun ProjectionSurface(
         ) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                 if (genesis?.revision == null) EmptyProjection()
+                else if (phase == GENESIS_READY && company != null) CompanyProjection(genesis, company)
                 else GenesisProjection(genesis)
             }
         }
+    }
+}
+
+@Composable
+private fun CompanyProjection(genesis: ProjectGenesisViewResponse, company: CompanyProjectResponse) {
+    ProjectionSection("COMPANY HEALTH") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(9.dp).background(
+                    when (company.health) {
+                        "AT_RISK" -> GenesisRed
+                        "DECISION_REQUIRED" -> GenesisAmber
+                        else -> GenesisGreen
+                    },
+                    CircleShape,
+                )
+            )
+            Text(company.health.replace('_', ' '), Modifier.padding(start = 8.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Text(company.phase.replace('_', ' '), Modifier.weight(1f), color = GenesisMuted, fontSize = 10.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
+        }
+        company.requiredDecision?.let { Text(it, Modifier.padding(top = 10.dp), color = GenesisAmber, fontSize = 11.sp, lineHeight = 17.sp) }
+    }
+    ProjectionSection("ACTIVE CIRCUIT") {
+        MetadataLine("Rules ${company.ruleSet?.rules?.size ?: 0}", "Assignments ${company.assignments.size}")
+        MetadataLine("Audits ${company.audits.size}", "Promotions ${company.promotions.size}")
+        company.assignments.takeLast(3).forEach { assignment ->
+            Text(assignment.role.replace('_', ' '), Modifier.padding(top = 10.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            Text("${assignment.model}  /  ${assignment.risk} risk  /  ${(assignment.confidence * 100).toInt()}% evidence confidence", color = GenesisMuted, fontSize = 9.sp)
+        }
+    }
+    company.ruleSet?.let { rules ->
+        ProjectionSection("ARCHITECTURE & COMPLIANCE") {
+            rules.rules.take(8).forEach { rule ->
+                Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.Top) {
+                    Box(Modifier.padding(top = 4.dp).size(7.dp).background(GenesisBlue, CircleShape))
+                    Column(Modifier.padding(start = 9.dp)) {
+                        Text(rule.ruleId, color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                        Text(rule.statement, color = GenesisMuted, fontSize = 10.sp, lineHeight = 15.sp)
+                    }
+                }
+            }
+        }
+    }
+    if (company.audits.isNotEmpty()) {
+        ProjectionSection("INDEPENDENT AUDIT") {
+            company.audits.takeLast(4).forEach { audit ->
+                val color = if (audit.status == "CONFORMING") GenesisGreen else GenesisRed
+                Row(Modifier.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(7.dp).background(color, CircleShape))
+                    Text(audit.role.replace('_', ' '), Modifier.padding(start = 8.dp).weight(1f), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Text(audit.status, color = color, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                }
+                Text(audit.rationale, color = GenesisMuted, fontSize = 10.sp, lineHeight = 15.sp)
+            }
+        }
+    }
+    ProjectionSection("ACCOUNTABILITY") {
+        company.accountability.takeLast(10).forEach { link ->
+            Text("${link.from}  ${link.relation.lowercase().replace('_', ' ')}  ${link.to}", Modifier.padding(vertical = 3.dp), color = GenesisMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, maxLines = 2)
+        }
+    }
+    ProjectionSection("ADMITTED PRODUCT") {
+        ProjectionText(requireNotNull(genesis.revision).experience.productPromise)
+        MetadataLine("Genesis ${genesis.revision.revision}", genesis.revision.hash.take(12))
     }
 }
 

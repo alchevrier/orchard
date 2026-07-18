@@ -80,10 +80,20 @@ object DefaultModelExecutionProfiles {
         requiredCapabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
     )
 
+    val boundedIndependentAudit = ModelExecutionProfile(
+        id = "bounded-independent-audit-v1",
+        version = 1,
+        reasoningClass = "BOUNDED_INDEPENDENT_AUDIT",
+        inputBudgetTokens = 64_000,
+        outputBudgetTokens = 4_000,
+        requiredCapabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+    )
+
     fun resolve(id: String): ModelExecutionProfile = when (id) {
         boundedDefinitionReasoning.id -> boundedDefinitionReasoning
         boundedCircuitSynthesis.id -> boundedCircuitSynthesis
         boundedCodingPatch.id -> boundedCodingPatch
+        boundedIndependentAudit.id -> boundedIndependentAudit
         else -> throw IllegalArgumentException("Unknown model execution profile $id")
     }
 
@@ -91,6 +101,7 @@ object DefaultModelExecutionProfiles {
         boundedDefinitionReasoning,
         boundedCircuitSynthesis,
         boundedCodingPatch,
+        boundedIndependentAudit,
     )
 }
 

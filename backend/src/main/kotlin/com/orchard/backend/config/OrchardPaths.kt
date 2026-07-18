@@ -13,6 +13,7 @@ object OrchardPaths {
     val DB_DIR: Path = BASE_DIR.resolve("db")
     val POLICY_PACKS_DIR: Path = BASE_DIR.resolve("policy-packs")
     val TOOLCHAIN_POLICY_PACKS_DIR: Path = POLICY_PACKS_DIR.resolve("toolchains")
+    val LOCAL_REPOSITORIES_DIR: Path = PROJECTS_DIR.resolve("repositories")
 
     fun initialize() {
         if (!BASE_DIR.exists()) BASE_DIR.createDirectories()
@@ -21,6 +22,7 @@ object OrchardPaths {
         if (!WORKSPACE_DIR.exists()) WORKSPACE_DIR.createDirectories()
         if (!DB_DIR.exists()) DB_DIR.createDirectories()
         if (!TOOLCHAIN_POLICY_PACKS_DIR.exists()) TOOLCHAIN_POLICY_PACKS_DIR.createDirectories()
+        if (!LOCAL_REPOSITORIES_DIR.exists()) LOCAL_REPOSITORIES_DIR.createDirectories()
         
         println("Orchard paths initialized at: $BASE_DIR")
     }
