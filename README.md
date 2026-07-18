@@ -618,10 +618,28 @@ See [docs/adrs](docs/adrs) for the decision history and proposed filesystem inte
 ## Requirements
 
 - Linux, macOS, or Windows with a Compose Desktop-compatible environment.
-- JDK 23 recommended. Kotlin `2.1.21` falls back to JVM target 23 when run with JDK 26.
+- JDK 21 or newer. The newcomer setup installs JDK 21 LTS when Java is absent.
 - `curl` for the combined launcher readiness check.
 - Git available on the local `PATH` for repository binding and inspection.
 - Ollama on `127.0.0.1:11434` with `phi3:mini` installed.
+
+## Newcomer Setup
+
+On macOS or Linux, install the complete default local stack and compile Orchard:
+
+```bash
+./setup_orchard.sh
+```
+
+The setup is safe to rerun. It installs or verifies JDK 21, Git, curl, Ollama, Linux desktop libraries, and the default `phi3:mini` model, then runs the complete Gradle build. On macOS it uses Homebrew, installing Homebrew first when necessary. On Linux it supports `apt`, `dnf`, `pacman`, and `zypper`.
+
+Check a machine without changing it:
+
+```bash
+./setup_orchard.sh --check
+```
+
+Use `--skip-ollama` when onboarding directly with LM Studio or a remote OpenAI-compatible endpoint. The provider can then be configured in Orchard's execution settings.
 
 ## Run
 
@@ -630,6 +648,8 @@ Launch the complete application:
 ```bash
 ./run_orchard.sh
 ```
+
+The launcher can be called from any directory. It starts Ollama and the backend when they are not already running, verifies the configured default model, launches the desktop application, and stops only the processes it started. Pass `--skip-ollama` or set `ORCHARD_SKIP_OLLAMA=1` when using LM Studio or a remote endpoint. Set `ORCHARD_MODEL` to override the default Ollama model.
 
 Or start each module separately.
 
