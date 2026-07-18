@@ -136,6 +136,7 @@ object ModelProfileResolver {
                 binding.contextWindowTokens >= profile.inputBudgetTokens + profile.outputBudgetTokens &&
                     binding.capabilities.containsAll(profile.requiredCapabilities)
             }
+                    .let(::applyProviderPolicy)
         if (compatible.isEmpty()) throw IllegalStateException("No installed model satisfies execution profile ${profile.id}")
         val proven = compatible.mapNotNull { provider ->
             evidence.singleOrNull {
@@ -156,6 +157,17 @@ object ModelProfileResolver {
 
     private const val MIN_ROUTING_SAMPLES = 3
     private const val MIN_SCHEMA_VALIDITY = 0.8
+
+    private fun applyProviderPolicy(providers: List<ModelProvider>): List<ModelProvider> {
+        val local = providers.filter { it.bindingProfile().configuration["locality"] == PROVIDER_LOCALITY_LOCAL }
+        val requiresLocalPreference = providers.any {
+            it.bindingProfile().configuration["providerPolicy"] in setOf(
+                PROVIDER_POLICY_LOCAL_PREFERRED,
+                PROVIDER_POLICY_CLOUD_ESCALATION_ONLY,
+            )
+        }
+        return if (requiresLocalPreference && local.isNotEmpty()) local else providers
+    }
 }
 
 fun estimateModelTokens(value: String): Int = value.encodeToByteArray().size

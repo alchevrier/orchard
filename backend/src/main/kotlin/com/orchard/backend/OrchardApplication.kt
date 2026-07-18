@@ -26,8 +26,10 @@ import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.CompanyProjectView
 import com.orchard.backend.company.FileCompanyControlStore
-import com.orchard.backend.vector.OllamaClient
+import com.orchard.backend.vector.FileModelProviderCatalogStore
 import com.orchard.backend.vector.FileModelProfileSettingsStore
+import com.orchard.backend.vector.ModelProviderCatalog
+import com.orchard.backend.vector.ModelProviderRegistry
 import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProfileUpdateStatus
 import com.orchard.backend.resource.FileMachineUsagePolicyStore
@@ -110,28 +112,29 @@ fun main() {
         FileProjectGenesisStore(OrchardPaths.WORKSPACE_DIR),
         enforceProjectGenesis = true,
     )
-    val modelProvider = OllamaClient()
+    val modelProviderRegistry = ModelProviderRegistry(FileModelProviderCatalogStore(OrchardPaths.WORKSPACE_DIR))
+    val modelProviders = modelProviderRegistry.providers()
     val resourceController = MachineResourceController(
         FileMachineUsagePolicyStore(OrchardPaths.WORKSPACE_DIR),
         SystemMachineCapacityMonitor(),
     )
-    val architect = ArchitectService(workspace, modelProvider, resourceController)
+    val architect = ArchitectService(workspace, modelProviderRegistry, resourceController)
     val definitionIntelligence = DefinitionIntelligenceService(
         workspace,
-        listOf(modelProvider),
+        modelProviders,
         FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
         resourceController,
     )
     val circuitIntelligence = CircuitIntelligenceService(
         workspace,
-        listOf(modelProvider),
+        modelProviders,
         FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
         resourceController,
     )
-    val genesisIntelligence = GenesisIntelligenceService(workspace, modelProvider, resourceController)
+    val genesisIntelligence = GenesisIntelligenceService(workspace, modelProviderRegistry, resourceController)
     val companyControl = CompanyControlService(
         workspace,
-        listOf(modelProvider),
+        modelProviders,
         FileCompanyControlStore(OrchardPaths.WORKSPACE_DIR),
         repositoryBindings,
     )
@@ -139,7 +142,7 @@ fun main() {
     val codingWorkspaceGateway = LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR))
     val repositoryAnalysis = RepositoryAnalysisService(
         workspace,
-        listOf(modelProvider),
+        modelProviders,
         FileRepositoryExecutionPlanStore(OrchardPaths.WORKSPACE_DIR),
         codingWorkspaceGateway,
         resourceController,
@@ -147,7 +150,7 @@ fun main() {
     )
     val codingWorker = CodingWorkerService(
         workspace,
-        listOf(modelProvider),
+        modelProviders,
         FileCodingWorkerStore(OrchardPaths.WORKSPACE_DIR),
         codingWorkspaceGateway,
         resourceController,
@@ -207,6 +210,7 @@ fun main() {
             companyControl,
             companyCircuit,
             repositoryAnalysis,
+            modelProviderRegistry,
         )
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
@@ -219,7 +223,7 @@ fun main() {
         auditScope.cancel()
         workspaceServer.stop()
         architectServer.stop()
-        modelProvider.close()
+        modelProviderRegistry.close()
     })
     workspaceServer.start(wait = false)
     architectServer.start(wait = true)
@@ -234,6 +238,7 @@ fun Application.workspaceApi(
     companyControl: CompanyControlService? = null,
     companyCircuit: CompanyCircuitService? = null,
     repositoryAnalysis: RepositoryAnalysisService? = null,
+    modelProviderRegistry: ModelProviderRegistry? = null,
 ) {
     configureJson()
     routing {
@@ -402,6 +407,46 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(configurations)
+        }
+        get("/api/model-providers") {
+            if (modelProviderRegistry == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val catalog = runCatching { modelProviderRegistry.catalog() }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(catalog)
+        }
+        put("/api/model-providers") {
+            if (modelProviderRegistry == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@put
+            }
+            val catalog = runCatching { call.receive<ModelProviderCatalog>() }.getOrNull()
+            if (catalog == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@put
+            }
+            val update = runCatching { modelProviderRegistry.update(catalog) }
+            if (update.isFailure) {
+                val status = if (update.exceptionOrNull() is IllegalArgumentException) {
+                    HttpStatusCode.UnprocessableEntity
+                } else {
+                    HttpStatusCode.ServiceUnavailable
+                }
+                call.respond(status)
+                return@put
+            }
+            call.respond(modelProviderRegistry.catalog())
+        }
+        get("/api/model-providers/inspection") {
+            if (modelProviderRegistry == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(modelProviderRegistry.inspect())
         }
         get("/api/machine-resources") {
             if (definitionIntelligence == null) {

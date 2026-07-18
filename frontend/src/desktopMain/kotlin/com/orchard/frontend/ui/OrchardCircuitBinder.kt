@@ -82,6 +82,8 @@ import com.orchard.frontend.network.DefinitionProposalViewResponse
 import com.orchard.frontend.network.ModelCapabilityProfileResponse
 import com.orchard.frontend.network.ModelProfileConfigurationResponse
 import com.orchard.frontend.network.ModelProfileOverrideRequest
+import com.orchard.frontend.network.ModelProviderCatalogResponse
+import com.orchard.frontend.network.ModelEndpointInspectionResponse
 import com.orchard.frontend.network.MachineResourceConfigurationResponse
 import com.orchard.frontend.network.MachineUsagePolicyRequest
 import com.orchard.frontend.network.StagedDeliveryPlanSubmissionRequest
@@ -273,10 +275,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var requestError by remember { mutableStateOf<String?>(null) }
         var showModelSettings by remember { mutableStateOf(false) }
         var modelProfileConfigurations by remember { mutableStateOf(emptyList<ModelProfileConfigurationResponse>()) }
+        var modelProviderCatalog by remember { mutableStateOf<ModelProviderCatalogResponse?>(null) }
+        var modelProviderInspections by remember { mutableStateOf(emptyList<ModelEndpointInspectionResponse>()) }
         var machineResourceConfiguration by remember { mutableStateOf<MachineResourceConfigurationResponse?>(null) }
         var isLoadingModelSettings by remember { mutableStateOf(false) }
         var isSavingModelSettings by remember { mutableStateOf(false) }
         var isSavingMachinePolicy by remember { mutableStateOf(false) }
+        var isSavingModelProvider by remember { mutableStateOf(false) }
+        var isInspectingModelProvider by remember { mutableStateOf(false) }
         var selectedProjectId by remember { mutableStateOf(0) }
         var selectedEpicId by remember { mutableStateOf(0) }
         var planningScopeId by remember { mutableStateOf(0) }
@@ -397,11 +403,16 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             isLoadingModelSettings = true
                             scope.launch {
                                 runCatching {
-                                    networkClient.getModelProfileConfigurations() to
-                                        networkClient.getMachineResourceConfiguration()
-                                }.onSuccess { (profiles, resources) ->
+                                    Triple(
+                                        networkClient.getModelProfileConfigurations(),
+                                        networkClient.getMachineResourceConfiguration(),
+                                        networkClient.getModelProviderCatalog(),
+                                    )
+                                }.onSuccess { (profiles, resources, providers) ->
                                         modelProfileConfigurations = profiles
                                         machineResourceConfiguration = resources
+                                        modelProviderCatalog = providers
+                                        modelProviderInspections = emptyList()
                                         showModelSettings = true
                                     }
                                     .onFailure { requestError = it.message ?: "Unable to load model settings." }
@@ -520,15 +531,44 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             }
             if (showModelSettings) {
                 val resourceConfiguration = machineResourceConfiguration
+                val providerCatalog = modelProviderCatalog
                 modelProfileConfigurations.firstOrNull()?.let { configuration ->
-                    if (resourceConfiguration == null) return@let
+                    if (resourceConfiguration == null || providerCatalog == null) return@let
                     ModelProfileSettingsDialog(
                         configuration = configuration,
                         resourceConfiguration = resourceConfiguration,
+                        providerCatalog = providerCatalog,
+                        providerInspections = modelProviderInspections,
                         isSaving = isSavingModelSettings,
                         isSavingMachinePolicy = isSavingMachinePolicy,
+                        isSavingModelProvider = isSavingModelProvider,
+                        isInspectingModelProvider = isInspectingModelProvider,
                         onDismiss = {
-                            if (!isSavingModelSettings && !isSavingMachinePolicy) showModelSettings = false
+                            if (!isSavingModelSettings && !isSavingMachinePolicy && !isSavingModelProvider) showModelSettings = false
+                        },
+                        onInspectModelProvider = {
+                            isInspectingModelProvider = true
+                            requestError = null
+                            scope.launch {
+                                runCatching { networkClient.inspectModelProviders() }
+                                    .onSuccess { modelProviderInspections = it }
+                                    .onFailure { requestError = it.message ?: "Unable to inspect model providers." }
+                                isInspectingModelProvider = false
+                            }
+                        },
+                        onSaveModelProvider = { catalog ->
+                            isSavingModelProvider = true
+                            requestError = null
+                            scope.launch {
+                                runCatching { networkClient.updateModelProviderCatalog(catalog) }
+                                    .onSuccess {
+                                        modelProviderCatalog = it
+                                        modelProfileConfigurations = networkClient.getModelProfileConfigurations()
+                                        modelProviderInspections = emptyList()
+                                    }
+                                    .onFailure { requestError = it.message ?: "Unable to save model provider." }
+                                isSavingModelProvider = false
+                            }
                         },
                         onSaveMachinePolicy = { policy ->
                             isSavingMachinePolicy = true
@@ -1588,12 +1628,30 @@ private fun TicketCard(
 private fun ModelProfileSettingsDialog(
     configuration: ModelProfileConfigurationResponse,
     resourceConfiguration: MachineResourceConfigurationResponse,
+    providerCatalog: ModelProviderCatalogResponse,
+    providerInspections: List<ModelEndpointInspectionResponse>,
     isSaving: Boolean,
     isSavingMachinePolicy: Boolean,
+    isSavingModelProvider: Boolean,
+    isInspectingModelProvider: Boolean,
     onDismiss: () -> Unit,
+    onInspectModelProvider: () -> Unit,
+    onSaveModelProvider: (ModelProviderCatalogResponse) -> Unit,
     onSaveMachinePolicy: (MachineUsagePolicyRequest) -> Unit,
     onSave: (ModelProfileOverrideRequest) -> Unit,
 ) {
+    val endpoint = providerCatalog.endpoints.first()
+    val binding = providerCatalog.bindings.first()
+    var providerPolicy by remember(providerCatalog.policy) { mutableStateOf(providerCatalog.policy) }
+    var protocol by remember(endpoint.protocol) { mutableStateOf(endpoint.protocol) }
+    var locality by remember(endpoint.locality) { mutableStateOf(endpoint.locality) }
+    var displayName by remember(endpoint.displayName) { mutableStateOf(endpoint.displayName) }
+    var baseUrl by remember(endpoint.baseUrl) { mutableStateOf(endpoint.baseUrl) }
+    var credentialReference by remember(endpoint.credentialReference) { mutableStateOf(endpoint.credentialReference.orEmpty()) }
+    var model by remember(binding.model) { mutableStateOf(binding.model) }
+    var contextWindow by remember(binding.contextWindowTokens) { mutableStateOf(binding.contextWindowTokens.toString()) }
+    var residentMemoryMiB by remember(binding.residentMemoryBytes) { mutableStateOf((binding.residentMemoryBytes / MEBIBYTE).toString()) }
+    var providerCpuUnits by remember(binding.cpuUnits) { mutableStateOf(binding.cpuUnits.toString()) }
     var inputBudget by remember(configuration.effectiveProfile.inputBudgetTokens) {
         mutableStateOf(configuration.effectiveProfile.inputBudgetTokens.toString())
     }
@@ -1631,6 +1689,16 @@ private fun ModelProfileSettingsDialog(
     val validResourcePolicy = minimumFreeBytes != null && minimumFreeBytes >= 0 &&
         minimumFreeBytes < resourceConfiguration.capacity.totalMemoryBytes &&
         maxConcurrent != null && maxConcurrent in 1..resourceConfiguration.capacity.logicalProcessors
+    val providerContext = contextWindow.toIntOrNull()
+    val providerMemoryMiB = residentMemoryMiB.toLongOrNull()
+    val providerMemoryBytes = providerMemoryMiB?.takeIf { it <= Long.MAX_VALUE / MEBIBYTE }?.times(MEBIBYTE)
+    val providerCpus = providerCpuUnits.toIntOrNull()
+    val validCredentialReference = credentialReference.isBlank() || Regex("env:[A-Z][A-Z0-9_]{1,127}").matches(credentialReference)
+    val validProvider = displayName.isNotBlank() && baseUrl.startsWith("http") && model.isNotBlank() &&
+        providerContext != null && providerContext in 2_048..1_000_000 && providerMemoryBytes != null &&
+        providerMemoryBytes >= 0 && providerCpus != null && providerCpus in 1..256 && validCredentialReference &&
+        !(providerPolicy == "LOCAL_ONLY" && locality == "REMOTE") && !(locality == "LOCAL" && credentialReference.isNotBlank())
+    val inspection = providerInspections.firstOrNull { it.endpointId == endpoint.endpointId }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1645,6 +1713,155 @@ private fun ModelProfileSettingsDialog(
                 modifier = Modifier.width(520.dp).heightIn(max = 680.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                Text("MODEL PROVIDER", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SettingsChoice(
+                        "Policy",
+                        providerPolicy,
+                        listOf("LOCAL_ONLY", "LOCAL_PREFERRED", "CLOUD_ALLOWED", "CLOUD_ESCALATION_ONLY"),
+                        { providerPolicy = it },
+                        !isSavingModelProvider,
+                        Modifier.weight(1f),
+                    )
+                    SettingsChoice(
+                        "Protocol",
+                        protocol,
+                        listOf("OLLAMA_NATIVE", "OPENAI_COMPATIBLE"),
+                        { protocol = it },
+                        !isSavingModelProvider,
+                        Modifier.weight(1f),
+                    )
+                    SettingsChoice(
+                        "Locality",
+                        locality,
+                        listOf("LOCAL", "REMOTE"),
+                        {
+                            locality = it
+                            if (it == "LOCAL") credentialReference = ""
+                        },
+                        !isSavingModelProvider,
+                        Modifier.weight(1f),
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = displayName,
+                        onValueChange = { displayName = it },
+                        enabled = !isSavingModelProvider,
+                        label = { Text("Endpoint name") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = baseUrl,
+                        onValueChange = { baseUrl = it },
+                        enabled = !isSavingModelProvider,
+                        label = { Text("Base URL") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = model,
+                        onValueChange = { model = it },
+                        enabled = !isSavingModelProvider,
+                        label = { Text("Model") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = contextWindow,
+                        onValueChange = { contextWindow = it.filter(Char::isDigit) },
+                        enabled = !isSavingModelProvider,
+                        label = { Text("Context tokens") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = residentMemoryMiB,
+                        onValueChange = { residentMemoryMiB = it.filter(Char::isDigit) },
+                        enabled = !isSavingModelProvider,
+                        label = { Text("Resident memory (MiB)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = providerCpuUnits,
+                        onValueChange = { providerCpuUnits = it.filter(Char::isDigit) },
+                        enabled = !isSavingModelProvider,
+                        label = { Text("CPU units") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (locality == "REMOTE") {
+                        OutlinedTextField(
+                            value = credentialReference,
+                            onValueChange = {
+                                credentialReference = if (it.startsWith("env:", ignoreCase = true)) {
+                                    "env:${it.substringAfter(':').uppercase()}"
+                                } else {
+                                    it.uppercase()
+                                }
+                            },
+                            enabled = !isSavingModelProvider,
+                            label = { Text("Credential (env:NAME)") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                inspection?.let {
+                    Text(
+                        if (it.reachable) "REACHABLE · ${it.discoveredModels.joinToString().ifBlank { "No models reported" }}"
+                        else "UNREACHABLE · ${it.diagnostic.ifBlank { "No diagnostic" }}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = if (it.reachable) OrchardColors.moss else OrchardColors.clay,
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(enabled = !isInspectingModelProvider && !isSavingModelProvider, onClick = onInspectModelProvider) {
+                        if (isInspectingModelProvider) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        else Text("Inspect endpoint")
+                    }
+                    TextButton(
+                        enabled = validProvider && !isSavingModelProvider,
+                        onClick = {
+                            onSaveModelProvider(
+                                providerCatalog.copy(
+                                    policy = providerPolicy,
+                                    endpoints = providerCatalog.endpoints.map {
+                                        if (it.endpointId != endpoint.endpointId) it else endpoint.copy(
+                                            displayName = displayName.trim(),
+                                            protocol = protocol,
+                                            baseUrl = baseUrl.trimEnd('/'),
+                                            locality = locality,
+                                            credentialReference = credentialReference.ifBlank { null },
+                                        )
+                                    },
+                                    bindings = providerCatalog.bindings.map {
+                                        if (it.bindingId != binding.bindingId) it else binding.copy(
+                                            model = model.trim(),
+                                            contextWindowTokens = requireNotNull(providerContext),
+                                            residentMemoryBytes = requireNotNull(providerMemoryBytes),
+                                            cpuUnits = requireNotNull(providerCpus),
+                                        )
+                                    },
+                                )
+                            )
+                        },
+                    ) {
+                        if (isSavingModelProvider) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        else Text("Save provider")
+                    }
+                }
+                Divider(color = OrchardColors.divider)
                 Text("MACHINE CAPACITY", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
                 Text(
                     "${formatGiB(resourceConfiguration.capacity.availableMemoryBytes)} available of " +
@@ -1798,6 +2015,34 @@ private fun ModelProfileSettingsDialog(
         shape = RoundedCornerShape(8.dp),
         backgroundColor = OrchardColors.surface,
     )
+}
+
+@Composable
+private fun SettingsChoice(
+    label: String,
+    value: String,
+    options: List<String>,
+    onSelected: (String) -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(modifier) {
+        Text(label, fontSize = 10.sp, color = OrchardColors.muted)
+        Box {
+            TextButton(onClick = { expanded = true }, enabled = enabled, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)) {
+                Text(value, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { option ->
+                    DropdownMenuItem(onClick = {
+                        onSelected(option)
+                        expanded = false
+                    }) { Text(option, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
+                }
+            }
+        }
+    }
 }
 
 private const val MEBIBYTE = 1_048_576L

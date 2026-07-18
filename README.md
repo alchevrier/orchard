@@ -2,9 +2,31 @@
 
 **Plant intent, harvest software.**
 
-Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
+Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 9.6 complete - Repository Analysis and Execution-Plan Compilation. Orchard now uses broad-context local analysis to discover existing implementation and compiles that design into exact, revision-bound work for a smaller coding model.
+> **Project status:** Milestone 9.7 complete - Provider-Neutral Model Runtime. Orchard now assigns role-specific execution profiles to user-configured Ollama, LM Studio/OpenAI-compatible, or explicitly permitted cloud endpoints without storing credential values.
+
+## Milestone 9.7: Provider-Neutral Model Runtime
+
+Model execution is now deployment-independent while remaining local-first. A durable catalog maps role-compatible model bindings to endpoint adapters, and the running company sees catalog replacement without a restart.
+
+Delivered and verified:
+
+- Native Ollama and OpenAI-compatible REST adapters with strict JSON requests, bounded responses, token accounting, timeouts, and redirect refusal.
+- Checksummed atomic provider configuration covering endpoints, bindings, context capacity, resource demand, and non-secret generation settings.
+- Server-enforced `LOCAL_ONLY`, `LOCAL_PREFERRED`, `CLOUD_ALLOWED`, and `CLOUD_ESCALATION_ONLY` policies.
+- Request-time bearer resolution from `env:NAME` references; API key values never enter Orchard persistence or provenance.
+- Live registry wiring for Architect, Genesis, work definition, circuit synthesis, repository analysis, coding, and company staffing.
+- Catalog retrieval/replacement and explicit model-discovery health APIs.
+- Cockpit configuration for Ollama, LM Studio, other OpenAI-compatible servers, and optional remote endpoints.
+- Deterministic tests for persistence recovery, secret rejection, remote-policy rejection, both transport protocols, discovery, bearer resolution, live API replacement, and local-preferred routing.
+
+Milestone 9.7 boundaries:
+
+- The cockpit edits one active endpoint and binding; the backend catalog already supports multiple entries for role-specialized deployment.
+- Cloud escalation is capability/context fallback, not automatic retry after a local generation failure.
+- Streaming, tool calling, multimodal requests, pricing, rate-limit scheduling, OAuth, and secret-manager integrations remain future adapters.
+- Default onboarding remains Ollama at `127.0.0.1:11434` with `phi3:mini`; LM Studio uses its OpenAI-compatible base URL, normally `127.0.0.1:1234`.
 
 ## Milestone 9.6: Repository Analysis and Execution-Plan Compilation
 

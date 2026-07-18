@@ -58,6 +58,18 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
             setBody(override)
         }.successBody()
 
+    suspend fun getModelProviderCatalog(): ModelProviderCatalogResponse =
+        client.get("http://127.0.0.1:8085/api/model-providers").successBody()
+
+    suspend fun updateModelProviderCatalog(catalog: ModelProviderCatalogResponse): ModelProviderCatalogResponse =
+        client.put("http://127.0.0.1:8085/api/model-providers") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(catalog)
+        }.successBody()
+
+    suspend fun inspectModelProviders(): List<ModelEndpointInspectionResponse> =
+        client.get("http://127.0.0.1:8085/api/model-providers/inspection").successBody()
+
     suspend fun getMachineResourceConfiguration(): MachineResourceConfigurationResponse =
         client.get("http://127.0.0.1:8085/api/machine-resources").successBody()
 
@@ -627,6 +639,45 @@ data class ModelProfileConfigurationResponse(
     val override: ModelProfileOverrideRequest? = null,
     val installedBindings: List<ModelBindingProfileResponse>,
     val compatibleBindingIds: List<String>,
+)
+
+@Serializable
+data class ModelProviderCatalogResponse(
+    val policy: String,
+    val endpoints: List<ModelEndpointDefinitionResponse>,
+    val bindings: List<CatalogModelBindingResponse>,
+)
+
+@Serializable
+data class ModelEndpointDefinitionResponse(
+    val endpointId: String,
+    val displayName: String,
+    val protocol: String,
+    val baseUrl: String,
+    val locality: String,
+    val credentialReference: String? = null,
+    val enabled: Boolean = true,
+)
+
+@Serializable
+data class CatalogModelBindingResponse(
+    val bindingId: String,
+    val endpointId: String,
+    val model: String,
+    val contextWindowTokens: Int,
+    val capabilities: Set<String> = setOf("STRICT_JSON"),
+    val modelDigest: String? = null,
+    val residentMemoryBytes: Long = 0,
+    val cpuUnits: Int = 1,
+    val configuration: Map<String, String> = emptyMap(),
+)
+
+@Serializable
+data class ModelEndpointInspectionResponse(
+    val endpointId: String,
+    val reachable: Boolean,
+    val discoveredModels: List<String> = emptyList(),
+    val diagnostic: String = "",
 )
 
 @Serializable
