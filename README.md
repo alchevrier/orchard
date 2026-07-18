@@ -4,7 +4,33 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and local inference through Ollama.
 
-> **Project status:** Milestone 9.3 complete - Runtime Toolchain Policy Packs. Community toolchains can now extend governed verification from validated local JSON without rebuilding or restarting Orchard.
+> **Project status:** Milestone 9.4 complete - Guided Product Genesis. Orchard now forces product experience, first-epic architecture, repository blueprint, and explicit admission before implementation authority opens.
+
+## Milestone 9.4: Guided Product Genesis
+
+The desktop application is now one state-driven Architect circuit rather than a freely navigable delivery dashboard. Conversation forms candidate structure while the backend determines the only legal next transition and the screen continuously projects durable product truth.
+
+Delivered and verified:
+
+- A guided `CLASSIFICATION -> EXPERIENCE -> ARCHITECTURE -> BLUEPRINT -> ADMISSION -> READY` circuit.
+- Greenfield-local, existing-local, and organization-governed project classification.
+- Existing-local repository binding inside the guided flow; organization-governed admission fails closed pending verified policy sources.
+- A structured Experience Contract covering audience, product promise, primary journey, interaction principles, emotional qualities, exclusions, and accessibility commitments.
+- First-epic selection as the experience-proving vertical slice before architecture and repository setup.
+- Structured components and ADR-like decisions correlated to requirements, dependencies, and repository paths.
+- A repository blueprint derived from design, including toolchain, modules, policy packs, and verification commands.
+- Bounded local-model genesis proposals that remain candidate data until explicit human application.
+- Checksummed append-only genesis revisions with stale-write rejection and exact restart recovery.
+- Production workflow admission that rejects manual and durable-dispatch starts until genesis is admitted.
+- A stable Compose workspace with a non-clickable progress spine, semantic phase transitions, conversational proposal review, precise fallback controls, and live architecture projection.
+- Adversarial tests proving a model cannot skip phases, forge revision authority, mutate state through proposal generation, or bypass the dispatch interlock.
+
+Milestone 9.4 boundaries:
+
+- The desktop shell projects one active local project; multi-client and remote Architect protocols remain later work.
+- Repository blueprints are admitted authority but are not yet materialized into new repositories.
+- Structured architectural decisions are not yet exported as repository Markdown ADRs.
+- Revising an admitted genesis and computing downstream invalidation remains a later conversational change circuit.
 
 ## Milestone 1: Local Architect MVP
 
@@ -568,15 +594,17 @@ Backend startup creates the directory structure:
 `-- rag-shared/
 ```
 
-These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Project bindings are stored in `repository-bindings.json`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt workspace journal tails are moved beside them as timestamped `workspace.journal.corrupt-*.jsonl` files.
+These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Guided product-genesis revisions append to `project-genesis.jsonl`. Project bindings are stored in `repository-bindings.json`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt journal tails are moved beside their source as timestamped `*.corrupt-*.jsonl` files.
 
 ## Next Milestones
 
+- Materialize admitted greenfield repository blueprints and add explicit local candidate promotion without remote pushes.
+- Add conversational successor revisions that explain and enforce downstream invalidation after admitted product changes.
+- Export structured architectural decisions as correlated repository ADRs while retaining Orchard authority identity.
 - Add verified external Git policy sources with allowlisted identity, signed revisions, manifests, freshness limits, and onboarding attestations.
 - Define an open policy-pack format so communities can publish engineering standards, assurance packs, inspectors, and acceptance templates that organizations compose with stricter private overlays.
 - Build source-bound local RAG only from verified policy commits; retrieval remains a disposable navigation projection and every passage retains repository, revision, path, range, and content-hash provenance.
 - Add an Investigation Center whose agents gather provenance-backed logs, diagnostics, reproductions, and requirement proposals for declared system-workflow phases.
-- Add governed implementation agents only after the accepted Work Definition fixes their behavioral target and evidence obligations.
 - Derive project observations, candidate practices, and executable project workflows from evidence.
 - Add review approval, cross-run supersession, repository instruction resolution, and evidence-based model routing.
 - Implement concrete classifier, chunker, embedder, and vector-index adapters.

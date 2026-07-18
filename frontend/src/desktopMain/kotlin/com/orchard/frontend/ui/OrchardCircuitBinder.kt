@@ -94,6 +94,8 @@ import com.orchard.frontend.network.StageExecutionWorkflowDefinitionResponse
 import com.orchard.frontend.network.CircuitProposalViewResponse
 import com.orchard.frontend.network.CircuitProposalReferenceRequest
 import com.orchard.frontend.network.CircuitDispatchViewResponse
+import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
+import com.orchard.frontend.network.GenesisProposalResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JFileChooser
@@ -149,6 +151,107 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
     @Composable
     fun render() {
+        var isSubmitting by remember { mutableStateOf(false) }
+        var isBindingRepository by remember { mutableStateOf(false) }
+        var isGeneratingProposal by remember { mutableStateOf(false) }
+        var genesisProposal by remember { mutableStateOf<GenesisProposalResponse?>(null) }
+        var requestError by remember { mutableStateOf<String?>(null) }
+        val scope = rememberCoroutineScope()
+
+        LaunchedEffect(Unit) {
+            refreshWorkspace().onFailure { requestError = it.message ?: "Unable to reach Orchard." }
+        }
+
+        val snapshot = remember(response) { readWorkspaceSnapshot(response) }
+        val projects = snapshot.entities.filter { it.type == PROJECT }
+        val project = projects.firstOrNull { it.id == projectForFocus(snapshot) } ?: projects.firstOrNull()
+        val projectId = project?.id ?: 0
+        val epics = snapshot.entities
+            .filter { it.type == EPIC && it.parentId == projectId }
+            .map { it.id to it.title }
+        val genesis = response.projectGenesis.singleOrNull { it.projectId == projectId }
+        val repository = snapshot.repositories[projectId]
+
+        LaunchedEffect(genesis?.phase, genesis?.revision?.hash) {
+            genesisProposal = null
+        }
+
+        fun runSubmission(operation: suspend () -> Result<Unit>) {
+            if (isSubmitting) return
+            isSubmitting = true
+            requestError = null
+            scope.launch {
+                operation().onFailure { requestError = it.message ?: "Orchard could not advance this decision." }
+                isSubmitting = false
+            }
+        }
+
+        OrchardTheme {
+            GuidedGenesisWorkspace(
+                projectId = projectId,
+                projectTitle = project?.title.orEmpty(),
+                epics = epics,
+                genesis = genesis,
+                repositoryPath = repository?.path,
+                repositoryAvailable = repository?.available == true,
+                message = requestError ?: snapshot.message,
+                isSubmitting = isSubmitting,
+                isBindingRepository = isBindingRepository,
+                isGeneratingProposal = isGeneratingProposal,
+                proposal = genesisProposal,
+                onCreateProject = { name ->
+                    runSubmission { sendArchitectPrompt("Create a project named \"$name\".") }
+                },
+                onCreateEpic = { title ->
+                    runSubmission {
+                        sendArchitectPrompt("Create an epic named \"$title\" in project ID $projectId.")
+                    }
+                },
+                onBindRepository = {
+                    val selectedPath = chooseRepositoryDirectory(repository?.path)
+                    if (projectId != 0 && selectedPath != null && !isBindingRepository) {
+                        isBindingRepository = true
+                        requestError = null
+                        scope.launch {
+                            bindRepository(projectId, selectedPath)
+                                .onFailure { requestError = it.message ?: "Unable to bind the repository." }
+                            isBindingRepository = false
+                        }
+                    }
+                },
+                onGenerateProposal = { prompt ->
+                    if (!isGeneratingProposal && prompt.isNotBlank()) {
+                        isGeneratingProposal = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.proposeProjectGenesis(projectId, prompt) }
+                                .onSuccess { genesisProposal = it }
+                                .onFailure { requestError = it.message ?: "The Genesis Architect could not form a proposal." }
+                            isGeneratingProposal = false
+                        }
+                    }
+                },
+                onApplyProposal = {
+                    genesisProposal?.let { candidate ->
+                        runSubmission { advanceProjectGenesis(projectId, candidate.submission) }
+                    }
+                },
+                onAdvance = { submission -> runSubmission { advanceProjectGenesis(projectId, submission) } },
+                onAdmit = { runSubmission { admitProjectGenesis(projectId) } },
+                onRefresh = {
+                    if (!isSubmitting) {
+                        scope.launch {
+                            requestError = null
+                            refreshWorkspace().onFailure { requestError = it.message ?: "Unable to refresh Orchard." }
+                        }
+                    }
+                },
+            )
+        }
+    }
+
+    @Composable
+    private fun renderLegacyWorkspace() {
         var prompt by remember { mutableStateOf("") }
         var isSubmitting by remember { mutableStateOf(false) }
         var isBindingRepository by remember { mutableStateOf(false) }
@@ -452,6 +555,17 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
     private suspend fun sendArchitectPrompt(prompt: String): Result<Unit> = executeRequest {
         networkClient.submitArchitectPrompt(prompt)
+    }
+
+    private suspend fun advanceProjectGenesis(
+        projectId: Int,
+        submission: ProjectGenesisSubmissionRequest,
+    ): Result<Unit> = executeRequest {
+        networkClient.advanceProjectGenesis(projectId, submission)
+    }
+
+    private suspend fun admitProjectGenesis(projectId: Int): Result<Unit> = executeRequest {
+        networkClient.admitProjectGenesis(projectId)
     }
 
     private suspend fun bindRepository(projectId: Int, path: String): Result<Unit> = executeRequest {

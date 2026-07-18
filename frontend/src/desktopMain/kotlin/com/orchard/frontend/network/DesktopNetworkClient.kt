@@ -23,6 +23,23 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun getWorkspace(): WorkspaceSnapshotResponse =
         client.get("http://127.0.0.1:8085/api/workspace").body()
 
+    suspend fun advanceProjectGenesis(
+        projectId: Int,
+        submission: ProjectGenesisSubmissionRequest,
+    ): WorkspaceSnapshotResponse = client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(submission)
+    }.successBody()
+
+    suspend fun admitProjectGenesis(projectId: Int): WorkspaceSnapshotResponse =
+        client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis/admission").successBody()
+
+    suspend fun proposeProjectGenesis(projectId: Int, prompt: String): GenesisProposalResponse =
+        client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis/proposal") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(GenesisProposalRequest(prompt))
+        }.successBody()
+
     suspend fun getModelProfileConfigurations(): List<ModelProfileConfigurationResponse> =
         client.get("http://127.0.0.1:8085/api/model-profiles").successBody()
 
@@ -153,6 +170,107 @@ data class WorkspaceSnapshotResponse(
     val circuitProposals: List<CircuitProposalViewResponse> = emptyList(),
     val stageWorkflows: List<StageExecutionWorkflowDefinitionResponse> = emptyList(),
     val circuitDispatches: List<CircuitDispatchViewResponse> = emptyList(),
+    val projectGenesis: List<ProjectGenesisViewResponse> = emptyList(),
+)
+
+@Serializable
+data class ExperienceContractRequest(
+    val audience: String = "",
+    val productPromise: String = "",
+    val primaryJourney: List<String> = emptyList(),
+    val interactionPrinciples: List<String> = emptyList(),
+    val emotionalQualities: List<String> = emptyList(),
+    val mustNotFeelLike: List<String> = emptyList(),
+    val accessibility: List<String> = emptyList(),
+)
+
+@Serializable
+data class ArchitectureComponentRequest(
+    val componentId: String,
+    val name: String,
+    val responsibility: String,
+    val dependsOn: List<String> = emptyList(),
+    val requirementIds: List<String> = emptyList(),
+    val repositoryPaths: List<String> = emptyList(),
+)
+
+@Serializable
+data class ArchitectureDecisionRequest(
+    val decisionId: String,
+    val title: String,
+    val status: String = "CANDIDATE",
+    val context: String,
+    val decision: String,
+    val consequences: List<String> = emptyList(),
+    val componentIds: List<String> = emptyList(),
+    val requirementIds: List<String> = emptyList(),
+)
+
+@Serializable
+data class RepositoryBlueprintRequest(
+    val rootName: String = "",
+    val toolchain: String = "",
+    val modules: List<String> = emptyList(),
+    val verificationCommands: List<String> = emptyList(),
+    val policyPackIds: List<String> = emptyList(),
+)
+
+@Serializable
+data class ProjectGenesisSubmissionRequest(
+    val classification: String? = null,
+    val productIntent: String? = null,
+    val experience: ExperienceContractRequest? = null,
+    val components: List<ArchitectureComponentRequest>? = null,
+    val decisions: List<ArchitectureDecisionRequest>? = null,
+    val firstEpicId: Int? = null,
+    val blueprint: RepositoryBlueprintRequest? = null,
+    val baseRevision: Int,
+    val baseHash: String? = null,
+)
+
+@Serializable
+data class ProjectGenesisRevisionResponse(
+    val genesisId: Long,
+    val projectId: Int,
+    val revision: Int,
+    val phase: String,
+    val classification: String? = null,
+    val productIntent: String = "",
+    val experience: ExperienceContractRequest = ExperienceContractRequest(),
+    val components: List<ArchitectureComponentRequest> = emptyList(),
+    val decisions: List<ArchitectureDecisionRequest> = emptyList(),
+    val firstEpicId: Int? = null,
+    val blueprint: RepositoryBlueprintRequest? = null,
+    val admitted: Boolean = false,
+    val actor: String,
+    val createdAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class ProjectGenesisViewResponse(
+    val projectId: Int,
+    val phase: String,
+    val revision: ProjectGenesisRevisionResponse? = null,
+    val progress: Int,
+    val nextQuestion: String,
+    val permittedAction: String,
+    val blockingReason: String? = null,
+)
+
+@Serializable
+private data class GenesisProposalRequest(val prompt: String)
+
+@Serializable
+data class GenesisProposalResponse(
+    val projectId: Int,
+    val phase: String,
+    val baseRevision: Int,
+    val baseHash: String? = null,
+    val submission: ProjectGenesisSubmissionRequest,
+    val observations: List<String> = emptyList(),
+    val unresolvedQuestions: List<String> = emptyList(),
+    val model: String,
 )
 
 @Serializable

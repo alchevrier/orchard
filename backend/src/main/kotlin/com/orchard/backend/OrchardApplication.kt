@@ -7,6 +7,9 @@ import com.orchard.backend.agent.ProposalGenerationStatus
 import com.orchard.backend.agent.CircuitIntelligenceService
 import com.orchard.backend.agent.CircuitGenerationStatus
 import com.orchard.backend.agent.CodingWorkerService
+import com.orchard.backend.agent.GenesisIntelligenceService
+import com.orchard.backend.agent.GenesisProposalRequest
+import com.orchard.backend.agent.GenesisProposalStatus
 import com.orchard.backend.agent.CodingWorkerTickStatus
 import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
@@ -32,7 +35,10 @@ import com.orchard.backend.workspace.FileStagedDeliveryPlanStore
 import com.orchard.backend.workspace.FileCircuitProposalStore
 import com.orchard.backend.workspace.FileCircuitDispatchStore
 import com.orchard.backend.workspace.FileDesignGovernanceStore
+import com.orchard.backend.workspace.FileProjectGenesisStore
 import com.orchard.backend.workspace.DesignGovernanceStatus
+import com.orchard.backend.workspace.ProjectGenesisStatus
+import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.DesignSubmission
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
@@ -89,6 +95,8 @@ fun main() {
         FileCircuitProposalStore(OrchardPaths.WORKSPACE_DIR),
         FileCircuitDispatchStore(OrchardPaths.WORKSPACE_DIR),
         FileDesignGovernanceStore(OrchardPaths.WORKSPACE_DIR),
+        FileProjectGenesisStore(OrchardPaths.WORKSPACE_DIR),
+        enforceProjectGenesis = true,
     )
     val modelProvider = OllamaClient()
     val resourceController = MachineResourceController(
@@ -108,6 +116,7 @@ fun main() {
         FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
         resourceController,
     )
+    val genesisIntelligence = GenesisIntelligenceService(workspace, modelProvider, resourceController)
     val codingWorker = CodingWorkerService(
         workspace,
         listOf(modelProvider),
@@ -134,7 +143,7 @@ fun main() {
         }
     }
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
-        workspaceApi(workspace, definitionIntelligence, circuitIntelligence, codingWorker)
+        workspaceApi(workspace, definitionIntelligence, circuitIntelligence, codingWorker, genesisIntelligence)
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
         architectApi(architect)
@@ -155,11 +164,47 @@ fun Application.workspaceApi(
     definitionIntelligence: DefinitionIntelligenceService? = null,
     circuitIntelligence: CircuitIntelligenceService? = null,
     codingWorker: CodingWorkerService? = null,
+    genesisIntelligence: GenesisIntelligenceService? = null,
 ) {
     configureJson()
     routing {
         get("/api/workspace") {
             call.respond(workspace.snapshot(MESSAGE_READY))
+        }
+        post("/api/projects/{projectId}/genesis") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val request = runCatching { call.receive<ProjectGenesisSubmission>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.advanceProjectGenesis(projectId, request)
+            call.respond(projectGenesisStatus(result.status), result.snapshot)
+        }
+        post("/api/projects/{projectId}/genesis/admission") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.admitProjectGenesis(projectId)
+            call.respond(projectGenesisStatus(result.status), result.snapshot)
+        }
+        post("/api/projects/{projectId}/genesis/proposal") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val request = runCatching { call.receive<GenesisProposalRequest>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            if (genesisIntelligence == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = genesisIntelligence.propose(projectId, request)
+            val proposal = result.proposal
+            if (proposal == null) call.respond(genesisProposalStatus(result.status))
+            else call.respond(genesisProposalStatus(result.status), proposal)
         }
         post("/api/projects/{projectId}/design-governance") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
@@ -354,7 +399,8 @@ fun Application.workspaceApi(
                 WorkflowStartStatus.REPOSITORY_DIRTY,
                 WorkflowStartStatus.WORK_DEFINITION_NOT_READY -> HttpStatusCode.UnprocessableEntity
                 WorkflowStartStatus.STAGED_PLAN_BLOCKED,
-                WorkflowStartStatus.DESIGN_NOT_ADMITTED -> HttpStatusCode.Conflict
+                WorkflowStartStatus.DESIGN_NOT_ADMITTED,
+                WorkflowStartStatus.PROJECT_GENESIS_NOT_ADMITTED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.ALREADY_STARTED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
@@ -545,6 +591,28 @@ private fun designGovernanceStatus(status: DesignGovernanceStatus): HttpStatusCo
     DesignGovernanceStatus.GOVERNANCE_ALREADY_ACTIVE,
     DesignGovernanceStatus.WORKFLOW_ALREADY_STARTED -> HttpStatusCode.Conflict
     DesignGovernanceStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+}
+
+private fun projectGenesisStatus(status: ProjectGenesisStatus): HttpStatusCode = when (status) {
+    ProjectGenesisStatus.RECORDED -> HttpStatusCode.Created
+    ProjectGenesisStatus.ADMITTED -> HttpStatusCode.OK
+    ProjectGenesisStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+    ProjectGenesisStatus.STALE_REVISION,
+    ProjectGenesisStatus.ORGANIZATION_POLICY_REQUIRED -> HttpStatusCode.Conflict
+    ProjectGenesisStatus.INVALID_TRANSITION -> HttpStatusCode.UnprocessableEntity
+    ProjectGenesisStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+}
+
+private fun genesisProposalStatus(status: GenesisProposalStatus): HttpStatusCode = when (status) {
+    GenesisProposalStatus.CREATED -> HttpStatusCode.OK
+    GenesisProposalStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+    GenesisProposalStatus.PHASE_NOT_PROPOSABLE,
+    GenesisProposalStatus.INVALID_OUTPUT,
+    GenesisProposalStatus.CONTEXT_BUDGET_EXCEEDED -> HttpStatusCode.UnprocessableEntity
+    GenesisProposalStatus.BUSY -> HttpStatusCode.Conflict
+    GenesisProposalStatus.MODEL_UNAVAILABLE,
+    GenesisProposalStatus.RESOURCE_CAPACITY_UNAVAILABLE,
+    GenesisProposalStatus.RESOURCE_TELEMETRY_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
 }
 
 @Serializable

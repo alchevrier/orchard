@@ -19,6 +19,107 @@ import kotlin.test.assertTrue
 
 class DesktopNetworkClientTest {
     @Test
+    fun requestsNonAuthoritativeGenesisProposal() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/projects/4/genesis/proposal", request.url.toString())
+            assertTrue(request.body.toByteArray().decodeToString().contains("Make it feel calm and continuous"))
+            respond(
+                content = """{
+                    "projectId":4,
+                    "phase":"EXPERIENCE",
+                    "baseRevision":2,
+                    "baseHash":"${"a".repeat(64)}",
+                    "submission":{
+                        "experience":{
+                            "audience":"Local developers",
+                            "productPromise":"Intent becomes visible state.",
+                            "primaryJourney":["Describe","Resolve","Admit"],
+                            "interactionPrinciples":["Show the next valid decision"],
+                            "emotionalQualities":["Calm"],
+                            "mustNotFeelLike":["A dashboard"]
+                        },
+                        "baseRevision":2,
+                        "baseHash":"${"a".repeat(64)}"
+                    },
+                    "observations":["Continuity is a product constraint."],
+                    "unresolvedQuestions":[],
+                    "model":"phi3:mini"
+                }""".trimIndent(),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val proposal = client.proposeProjectGenesis(4, "Make it feel calm and continuous")
+
+        assertEquals("EXPERIENCE", proposal.phase)
+        assertEquals("Calm", proposal.submission.experience?.emotionalQualities?.single())
+        client.close()
+    }
+
+    @Test
+    fun advancesGenesisWithPinnedRevisionAndDecodesProjection() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/projects/4/genesis", request.url.toString())
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"classification\":\"GREENFIELD_LOCAL\""))
+            assertTrue(body.contains("\"baseRevision\":2"))
+            assertTrue(body.contains("\"baseHash\":\"${"a".repeat(64)}\""))
+            respond(
+                content = """{
+                    "resources":{},
+                    "projectGenesis":[{
+                        "projectId":4,
+                        "phase":"EXPERIENCE",
+                        "revision":{
+                            "genesisId":3,
+                            "projectId":4,
+                            "revision":3,
+                            "phase":"EXPERIENCE",
+                            "classification":"GREENFIELD_LOCAL",
+                            "productIntent":"A guided local product.",
+                            "actor":"HUMAN",
+                            "createdAt":"2026-07-18T00:00:00Z",
+                            "hash":"${"b".repeat(64)}"
+                        },
+                        "progress":20,
+                        "nextQuestion":"Who is this for?",
+                        "permittedAction":"ADVANCE"
+                    }]
+                }""".trimIndent(),
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val result = client.advanceProjectGenesis(
+            4,
+            ProjectGenesisSubmissionRequest(
+                classification = "GREENFIELD_LOCAL",
+                productIntent = "A guided local product.",
+                baseRevision = 2,
+                baseHash = "a".repeat(64),
+            ),
+        )
+
+        assertEquals("EXPERIENCE", result.projectGenesis.single().phase)
+        assertEquals(3, result.projectGenesis.single().revision?.revision)
+        client.close()
+    }
+
+    @Test
     fun acceptsTypedStagedDeliveryCircuit() = runBlocking {
         val engine = MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)

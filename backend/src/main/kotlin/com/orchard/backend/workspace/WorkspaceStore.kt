@@ -54,6 +54,7 @@ data class WorkspaceSnapshot(
     val circuitDispatches: List<CircuitDispatchView> = emptyList(),
     val designRevisions: List<DesignRevisionView> = emptyList(),
     val projectGovernance: List<ProjectGovernanceView> = emptyList(),
+    val projectGenesis: List<ProjectGenesisView> = emptyList(),
 )
 
 enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
@@ -70,6 +71,7 @@ enum class WorkflowStartStatus {
     WORK_DEFINITION_NOT_READY,
     STAGED_PLAN_BLOCKED,
     DESIGN_NOT_ADMITTED,
+    PROJECT_GENESIS_NOT_ADMITTED,
     STORAGE_UNAVAILABLE,
 }
 
@@ -119,6 +121,8 @@ class WorkspaceStore(
     private val circuitProposalStore: CircuitProposalStore = TransientCircuitProposalStore(),
     private val circuitDispatchStore: CircuitDispatchStore = TransientCircuitDispatchStore(),
     private val designGovernanceStore: DesignGovernanceStore = TransientDesignGovernanceStore(),
+    private val projectGenesisStore: ProjectGenesisStore = TransientProjectGenesisStore(),
+    private val enforceProjectGenesis: Boolean = false,
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -159,6 +163,7 @@ class WorkspaceStore(
     private val circuitProposals = mutableListOf<CircuitProposal>()
     private val circuitDispatches = mutableListOf<CircuitDispatch>()
     private val designGovernanceEvents = mutableListOf<DesignGovernanceEvent>()
+    private val projectGenesisEvents = mutableListOf<ProjectGenesisEvent>()
     private var nextRunId = 1L
     private var nextEventId = 1L
     private var nextDefinitionId = 1L
@@ -172,6 +177,8 @@ class WorkspaceStore(
     private var nextDesignDecisionId = 1L
     private var nextAcceptanceContractId = 1L
     private var nextGovernanceActivationId = 1L
+    private var nextGenesisEventId = 1L
+    private var nextGenesisId = 1L
     private var stagedPlanMessage = ""
 
     init {
@@ -180,6 +187,7 @@ class WorkspaceStore(
         restoreCollaboration(collaborationStore.loadEvents())
         restoreDefinitions(definitionStore.load())
         restoreDesignGovernance(designGovernanceStore.loadEvents())
+        restoreProjectGenesis(projectGenesisStore.loadEvents())
         restoreRuns(workflowMemory.loadRuns())
         restoreEvents(workflowMemory.loadEvents())
         validateRunReplacements()
@@ -298,6 +306,65 @@ class WorkspaceStore(
         }
         if (status == RepositoryBindStatus.BOUND) tryAdvanceCircuitDispatches()
         return RepositoryBindResult(status, snapshot(MESSAGE_REPOSITORY_BINDING))
+    }
+
+    @Synchronized
+    fun advanceProjectGenesis(projectId: Int, submission: ProjectGenesisSubmission): ProjectGenesisResult {
+        val project = committedEntity(projectId, ENTITY_PROJECT)
+            ?: return projectGenesisFailure(ProjectGenesisStatus.PROJECT_NOT_FOUND)
+        val current = currentProjectGenesis(project.id)
+        if (submission.baseRevision != (current?.revision ?: 0) || submission.baseHash != current?.hash) {
+            return projectGenesisFailure(ProjectGenesisStatus.STALE_REVISION)
+        }
+        val next = when (current?.phase ?: GENESIS_CLASSIFICATION) {
+            GENESIS_CLASSIFICATION -> classifyProjectGenesis(project.id, submission)
+            GENESIS_EXPERIENCE -> defineProjectExperience(project.id, requireNotNull(current), submission)
+            GENESIS_ARCHITECTURE -> defineProjectArchitecture(project.id, requireNotNull(current), submission)
+            GENESIS_BLUEPRINT -> defineRepositoryBlueprint(project.id, requireNotNull(current), submission)
+            else -> null
+        } ?: return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        if (!appendProjectGenesisRevision(next)) {
+            return projectGenesisFailure(ProjectGenesisStatus.STORAGE_UNAVAILABLE)
+        }
+        return ProjectGenesisResult(ProjectGenesisStatus.RECORDED, snapshot(MESSAGE_READY))
+    }
+
+    @Synchronized
+    fun admitProjectGenesis(projectId: Int): ProjectGenesisResult {
+        val project = committedEntity(projectId, ENTITY_PROJECT)
+            ?: return projectGenesisFailure(ProjectGenesisStatus.PROJECT_NOT_FOUND)
+        val current = currentProjectGenesis(project.id)
+            ?: return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        if (current.classification == PROJECT_ORGANIZATION_GOVERNED) {
+            return projectGenesisFailure(ProjectGenesisStatus.ORGANIZATION_POLICY_REQUIRED)
+        }
+        if (current.phase != GENESIS_ADMISSION || current.blueprint == null || current.firstEpicId == null) {
+            return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        }
+        if (committedEntity(current.firstEpicId, ENTITY_EPIC)?.parentId != project.id) {
+            return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        }
+        if (current.classification == PROJECT_EXISTING_LOCAL && repositoryBindings.views(setOf(project.id))[project.id] == null) {
+            return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        }
+        val admitted = newProjectGenesisRevision(
+            projectId = project.id,
+            phase = GENESIS_READY,
+            classification = current.classification,
+            productIntent = current.productIntent,
+            experience = current.experience,
+            components = current.components,
+            decisions = current.decisions.map { it.copy(status = DESIGN_STATUS_ADMITTED) },
+            firstEpicId = current.firstEpicId,
+            blueprint = current.blueprint,
+            admitted = true,
+            previous = current,
+        )
+        if (!appendProjectGenesisRevision(admitted)) {
+            return projectGenesisFailure(ProjectGenesisStatus.STORAGE_UNAVAILABLE)
+        }
+        tryAdvanceCircuitDispatches()
+        return ProjectGenesisResult(ProjectGenesisStatus.ADMITTED, snapshot(MESSAGE_READY))
     }
 
     @Synchronized
@@ -942,6 +1009,12 @@ class WorkspaceStore(
             ?: return workflowFailure(WorkflowStartStatus.WORK_ITEM_NOT_FOUND, "The work item hierarchy is incomplete.")
         val project = committedEntity(epic.parentId, ENTITY_PROJECT)
             ?: return workflowFailure(WorkflowStartStatus.WORK_ITEM_NOT_FOUND, "The work item hierarchy is incomplete.")
+        if (enforceProjectGenesis && currentProjectGenesis(project.id)?.takeIf { it.phase == GENESIS_READY && it.admitted } == null) {
+            return workflowFailure(
+                WorkflowStartStatus.PROJECT_GENESIS_NOT_ADMITTED,
+                "Complete and admit the guided product genesis before starting implementation.",
+            )
+        }
         val acceptanceContract = if (governanceActivation(project.id) == null) null else {
             currentAcceptanceContract(workItem) ?: return workflowFailure(
                 WorkflowStartStatus.DESIGN_NOT_ADMITTED,
@@ -1362,6 +1435,7 @@ class WorkspaceStore(
             circuitDispatchViews(),
             designRevisionViews(),
             projectGovernanceViews(),
+            projectGenesisViews(projectIds),
         )
     }
 
@@ -1923,6 +1997,254 @@ class WorkspaceStore(
         false
     }
 
+    private fun restoreProjectGenesis(restoredEvents: List<ProjectGenesisEvent>) {
+        restoredEvents.forEach { event ->
+            require(event.eventId == nextGenesisEventId)
+            val previous = currentProjectGenesis(event.revision.projectId)
+            require(event.revision.revision == (previous?.revision ?: 0) + 1)
+            require(event.revision.genesisId == nextGenesisId)
+            require(event.revision.hash == projectGenesisHash(event.revision.copy(hash = "")))
+            projectGenesisEvents += event
+            nextGenesisEventId++
+            nextGenesisId++
+        }
+    }
+
+    private fun appendProjectGenesisRevision(revision: ProjectGenesisRevision): Boolean = try {
+        val event = ProjectGenesisEvent(nextGenesisEventId, revision)
+        projectGenesisStore.append(event)
+        projectGenesisEvents += event
+        nextGenesisEventId++
+        nextGenesisId++
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun classifyProjectGenesis(projectId: Int, submission: ProjectGenesisSubmission): ProjectGenesisRevision? {
+        if (
+            submission.classification !in setOf(
+                PROJECT_GREENFIELD_LOCAL,
+                PROJECT_EXISTING_LOCAL,
+                PROJECT_ORGANIZATION_GOVERNED,
+            ) || submission.experience != null || submission.components != null || submission.decisions != null ||
+            submission.firstEpicId != null || submission.blueprint != null
+        ) return null
+        val intent = submission.productIntent?.trim().orEmpty()
+        if (intent.isEmpty()) return null
+        return newProjectGenesisRevision(
+            projectId = projectId,
+            phase = GENESIS_EXPERIENCE,
+            classification = submission.classification,
+            productIntent = intent,
+        )
+    }
+
+    private fun defineProjectExperience(
+        projectId: Int,
+        current: ProjectGenesisRevision,
+        submission: ProjectGenesisSubmission,
+    ): ProjectGenesisRevision? {
+        if (
+            submission.classification != null || submission.components != null || submission.decisions != null ||
+            submission.firstEpicId != null || submission.blueprint != null
+        ) return null
+        val experience = submission.experience ?: return null
+        val intent = submission.productIntent?.trim()?.takeIf(String::isNotEmpty) ?: current.productIntent
+        if (
+            experience.audience.isBlank() || experience.productPromise.isBlank() ||
+            experience.primaryJourney.isEmpty() || experience.interactionPrinciples.isEmpty() ||
+            experience.emotionalQualities.isEmpty() || experience.mustNotFeelLike.isEmpty()
+        ) return null
+        return newProjectGenesisRevision(
+            projectId = projectId,
+            phase = GENESIS_ARCHITECTURE,
+            classification = current.classification,
+            productIntent = intent,
+            experience = experience.normalized(),
+            previous = current,
+        )
+    }
+
+    private fun defineProjectArchitecture(
+        projectId: Int,
+        current: ProjectGenesisRevision,
+        submission: ProjectGenesisSubmission,
+    ): ProjectGenesisRevision? {
+        if (
+            submission.classification != null || submission.productIntent != null || submission.experience != null ||
+            submission.blueprint != null
+        ) return null
+        val components = submission.components?.map { component ->
+            component.copy(
+                componentId = component.componentId.trim(),
+                name = component.name.trim(),
+                responsibility = component.responsibility.trim(),
+                dependsOn = component.dependsOn.map(String::trim).filter(String::isNotEmpty).distinct(),
+                requirementIds = component.requirementIds.map(String::trim).filter(String::isNotEmpty).distinct(),
+                repositoryPaths = component.repositoryPaths.map(String::trim).filter(String::isNotEmpty).distinct(),
+            )
+        } ?: return null
+        val decisions = submission.decisions?.map { decision ->
+            decision.copy(
+                decisionId = decision.decisionId.trim(),
+                title = decision.title.trim(),
+                status = DESIGN_STATUS_CANDIDATE,
+                context = decision.context.trim(),
+                decision = decision.decision.trim(),
+                consequences = decision.consequences.map(String::trim).filter(String::isNotEmpty).distinct(),
+                componentIds = decision.componentIds.map(String::trim).filter(String::isNotEmpty).distinct(),
+                requirementIds = decision.requirementIds.map(String::trim).filter(String::isNotEmpty).distinct(),
+            )
+        } ?: return null
+        val componentIds = components.map { it.componentId }
+        if (
+            components.isEmpty() || components.any { it.componentId.isEmpty() || it.name.isEmpty() || it.responsibility.isEmpty() } ||
+            componentIds.distinct().size != componentIds.size || components.any { component -> component.dependsOn.any { it !in componentIds } } ||
+            decisions.isEmpty() || decisions.any {
+                it.decisionId.isEmpty() || it.title.isEmpty() || it.context.isEmpty() || it.decision.isEmpty() ||
+                    it.componentIds.any { componentId -> componentId !in componentIds }
+            } || decisions.map { it.decisionId }.distinct().size != decisions.size ||
+            committedEntity(submission.firstEpicId ?: 0, ENTITY_EPIC)?.parentId != projectId
+        ) return null
+        return newProjectGenesisRevision(
+            projectId = projectId,
+            phase = GENESIS_BLUEPRINT,
+            classification = current.classification,
+            productIntent = current.productIntent,
+            experience = current.experience,
+            components = components,
+            decisions = decisions,
+            firstEpicId = submission.firstEpicId,
+            previous = current,
+        )
+    }
+
+    private fun defineRepositoryBlueprint(
+        projectId: Int,
+        current: ProjectGenesisRevision,
+        submission: ProjectGenesisSubmission,
+    ): ProjectGenesisRevision? {
+        if (
+            submission.classification != null || submission.productIntent != null || submission.experience != null ||
+            submission.components != null || submission.decisions != null || submission.firstEpicId != null
+        ) return null
+        val blueprint = submission.blueprint?.normalized() ?: return null
+        if (
+            blueprint.rootName.isEmpty() || blueprint.toolchain.isEmpty() || blueprint.modules.isEmpty() ||
+            blueprint.verificationCommands.isEmpty()
+        ) return null
+        return newProjectGenesisRevision(
+            projectId = projectId,
+            phase = GENESIS_ADMISSION,
+            classification = current.classification,
+            productIntent = current.productIntent,
+            experience = current.experience,
+            components = current.components,
+            decisions = current.decisions,
+            firstEpicId = current.firstEpicId,
+            blueprint = blueprint,
+            previous = current,
+        )
+    }
+
+    private fun newProjectGenesisRevision(
+        projectId: Int,
+        phase: String,
+        classification: String?,
+        productIntent: String,
+        experience: ExperienceContract = ExperienceContract(),
+        components: List<ArchitectureComponent> = emptyList(),
+        decisions: List<ArchitectureDecision> = emptyList(),
+        firstEpicId: Int? = null,
+        blueprint: RepositoryBlueprint? = null,
+        admitted: Boolean = false,
+        previous: ProjectGenesisRevision? = null,
+    ): ProjectGenesisRevision {
+        val unsigned = ProjectGenesisRevision(
+            genesisId = nextGenesisId,
+            projectId = projectId,
+            revision = (previous?.revision ?: 0) + 1,
+            phase = phase,
+            classification = classification,
+            productIntent = productIntent,
+            experience = experience,
+            components = components,
+            decisions = decisions,
+            firstEpicId = firstEpicId,
+            blueprint = blueprint,
+            admitted = admitted,
+            actor = COLLABORATOR_HUMAN,
+            hash = "",
+        )
+        return unsigned.copy(hash = projectGenesisHash(unsigned))
+    }
+
+    private fun ExperienceContract.normalized(): ExperienceContract = copy(
+        audience = audience.trim(),
+        productPromise = productPromise.trim(),
+        primaryJourney = primaryJourney.map(String::trim).filter(String::isNotEmpty).distinct(),
+        interactionPrinciples = interactionPrinciples.map(String::trim).filter(String::isNotEmpty).distinct(),
+        emotionalQualities = emotionalQualities.map(String::trim).filter(String::isNotEmpty).distinct(),
+        mustNotFeelLike = mustNotFeelLike.map(String::trim).filter(String::isNotEmpty).distinct(),
+        accessibility = accessibility.map(String::trim).filter(String::isNotEmpty).distinct(),
+    )
+
+    private fun RepositoryBlueprint.normalized(): RepositoryBlueprint = copy(
+        rootName = rootName.trim(),
+        toolchain = toolchain.trim(),
+        modules = modules.map(String::trim).filter(String::isNotEmpty).distinct(),
+        verificationCommands = verificationCommands.map(String::trim).filter(String::isNotEmpty).distinct(),
+        policyPackIds = policyPackIds.map(String::trim).filter(String::isNotEmpty).distinct(),
+    )
+
+    private fun projectGenesisHash(revision: ProjectGenesisRevision): String =
+        stagedPlanHash(Json.encodeToString(revision.copy(hash = "")))
+
+    private fun currentProjectGenesis(projectId: Int): ProjectGenesisRevision? =
+        projectGenesisEvents.lastOrNull { it.revision.projectId == projectId }?.revision
+
+    private fun projectGenesisViews(projectIds: Set<Int>): List<ProjectGenesisView> = projectIds.sorted().map { projectId ->
+        val revision = currentProjectGenesis(projectId)
+        val phase = revision?.phase ?: GENESIS_CLASSIFICATION
+        val organizationBlocked = revision?.classification == PROJECT_ORGANIZATION_GOVERNED
+        val repositoryRequired = revision?.classification == PROJECT_EXISTING_LOCAL &&
+            repositoryBindings.views(setOf(projectId))[projectId] == null
+        ProjectGenesisView(
+            projectId = projectId,
+            phase = phase,
+            revision = revision,
+            progress = when (phase) {
+                GENESIS_CLASSIFICATION -> 0
+                GENESIS_EXPERIENCE -> 20
+                GENESIS_ARCHITECTURE -> 40
+                GENESIS_BLUEPRINT -> 60
+                GENESIS_ADMISSION -> 80
+                else -> 100
+            },
+            nextQuestion = when (phase) {
+                GENESIS_CLASSIFICATION -> "Is this a new local product, existing local work, or organization-governed work?"
+                GENESIS_EXPERIENCE -> "Who is this for, and what should the primary journey feel like?"
+                GENESIS_ARCHITECTURE -> "What is the first vertical slice, and which decisions make that experience possible?"
+                GENESIS_BLUEPRINT -> "Which repository shape and verification commands realize the admitted design?"
+                GENESIS_ADMISSION -> "Review the complete product genesis and admit it as implementation authority."
+                else -> "The product genesis is admitted. Implementation may proceed under this authority."
+            },
+            permittedAction = when (phase) {
+                GENESIS_ADMISSION -> "ADMIT"
+                GENESIS_READY -> "INSPECT"
+                else -> "ADVANCE"
+            },
+            blockingReason = when {
+                organizationBlocked ->
+                    "Verified organizational policy sources are required before this project can be admitted."
+                repositoryRequired ->
+                    "Bind the existing local Git repository before admitting this product genesis."
+                else -> null
+            },
+        )
+    }
+
     private fun normalizeDesignSubmission(submission: DesignSubmission): DesignSubmission? {
         fun normalizeList(values: List<String>): List<String>? {
             if (values.size > MAX_DESIGN_ENTRIES) return null
@@ -2191,6 +2513,9 @@ class WorkspaceStore(
 
     private fun designGovernanceFailure(status: DesignGovernanceStatus): DesignGovernanceResult =
         DesignGovernanceResult(status, snapshot(MESSAGE_READY))
+
+    private fun projectGenesisFailure(status: ProjectGenesisStatus): ProjectGenesisResult =
+        ProjectGenesisResult(status, snapshot(MESSAGE_READY))
 
     private fun validateRunReplacements() {
         workflowRuns.groupBy { it.context.workItemId }.values.forEach { runs ->
