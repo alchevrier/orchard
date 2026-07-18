@@ -228,13 +228,11 @@ class RemediationCampaignService(
     }
 
     private fun compileNextSlice(campaign: RemediationCampaign): String? {
-        val scan = standardsStore.scans().single { it.scanId == campaign.seedScanId && it.hash == campaign.seedScanHash }
-        val admission = standardsStore.admissions().single { it.admissionId == campaign.seedAdmissionId }
-        val entityByNode = if (admission.admittedNodes.isNotEmpty()) {
-            admission.admittedNodes.associate { it.nodeId to it.entityId }
-        } else scan.proposedBacklog.map { it.nodeId }.zip(admission.admittedEntityIds).toMap()
+        val source = workSource(campaign)
+        val scan = source.scan
+        val entityByNode = source.entityByNode
         val entities = (0 until workspace.entityCount).map(workspace::entityAt).associateBy { it.id }
-        val leafNodes = scan.proposedBacklog.filter { node -> node.type in setOf(BACKLOG_TASK, BACKLOG_BUG, BACKLOG_INVESTIGATION) }
+        val leafNodes = source.backlog.filter { node -> node.type in setOf(BACKLOG_TASK, BACKLOG_BUG, BACKLOG_INVESTIGATION) }
         val snapshot = workspace.snapshot(MESSAGE_READY)
         val linkedEntityIds = leafNodes.mapNotNull { entityByNode[it.nodeId] }.toSet()
         val linkedRuns = snapshot.workflowRuns.filter { it.context.workItemId in linkedEntityIds }
@@ -269,7 +267,7 @@ class RemediationCampaignService(
         if (workspace.submitWorkDefinition(entity.id, definition).status != WorkDefinitionStatus.RECORDED) {
             return "The next remediation work definition was rejected."
         }
-        ensurePlans(campaign, scan, entityByNode, entities)?.let { return it }
+        ensurePlans(campaign, source.backlog, entityByNode, entities)?.let { return it }
         if (company.compileRules(campaign.projectId).status !in setOf(
                 CompanyMutationStatus.RECORDED,
                 CompanyMutationStatus.PROJECT_NOT_READY,
@@ -332,15 +330,15 @@ class RemediationCampaignService(
 
     private fun ensurePlans(
         campaign: RemediationCampaign,
-        scan: RepositoryConformanceScan,
+        backlog: List<BacklogProposalNode>,
         entityByNode: Map<String, Int>,
         entities: Map<Int, WorkspaceEntity>,
     ): String? {
-        val scopes = scan.proposedBacklog.filter { it.type in setOf(BACKLOG_EPIC, BACKLOG_STORY) }
+        val scopes = backlog.filter { it.type in setOf(BACKLOG_EPIC, BACKLOG_STORY) }
         scopes.forEach { scopeNode ->
             val scopeId = requireNotNull(entityByNode[scopeNode.nodeId])
             if (workspace.snapshot(MESSAGE_READY).stagedPlans.any { it.plan.scopeId == scopeId }) return@forEach
-            val children = scan.proposedBacklog.filter { it.parentNodeId == scopeNode.nodeId }
+            val children = backlog.filter { it.parentNodeId == scopeNode.nodeId }
             val stages = children.mapIndexed { index, child ->
                 val childId = requireNotNull(entityByNode[child.nodeId])
                 StagedPlanStageSubmission(
@@ -383,15 +381,43 @@ class RemediationCampaignService(
     }
 
     private fun hasUncompiledLeaves(campaign: RemediationCampaign): Boolean {
-        val scan = standardsStore.scans().single { it.scanId == campaign.seedScanId }
-        val admission = standardsStore.admissions().single { it.admissionId == campaign.seedAdmissionId }
-        val entityByNode = if (admission.admittedNodes.isNotEmpty()) {
-            admission.admittedNodes.associate { it.nodeId to it.entityId }
-        } else scan.proposedBacklog.map { it.nodeId }.zip(admission.admittedEntityIds).toMap()
+        val source = workSource(campaign)
         val defined = workspace.snapshot(MESSAGE_READY).workDefinitions.mapTo(hashSetOf()) { it.workItemId }
-        return scan.proposedBacklog.any {
-            it.type in setOf(BACKLOG_TASK, BACKLOG_BUG, BACKLOG_INVESTIGATION) && entityByNode[it.nodeId] !in defined
+        return source.backlog.any {
+            it.type in setOf(BACKLOG_TASK, BACKLOG_BUG, BACKLOG_INVESTIGATION) && source.entityByNode[it.nodeId] !in defined
         }
+    }
+
+    private fun workSource(campaign: RemediationCampaign): CampaignWorkSource {
+        val scan = standardsStore.scans().single { it.scanId == campaign.seedScanId && it.hash == campaign.seedScanHash }
+        val successor = campaign.successorSource
+        if (successor != null) {
+            val findingIdsByPractice = scan.findings.associate { it.practiceId to it.findingId }
+            return CampaignWorkSource(
+                scan = scan,
+                backlog = successor.backlog.map { node ->
+                    BacklogProposalNode(
+                        nodeId = node.nodeId,
+                        parentNodeId = node.parentNodeId,
+                        type = node.type,
+                        title = node.title,
+                        description = node.description,
+                        findingIds = node.practiceIds.map { requireNotNull(findingIdsByPractice[it]) },
+                        acceptanceCriteria = node.acceptanceCriteria,
+                        verificationCommands = node.verificationCommands,
+                    )
+                },
+                entityByNode = successor.admittedNodes.associate { it.nodeId to it.entityId },
+            )
+        }
+        val admission = standardsStore.admissions().single { it.admissionId == campaign.seedAdmissionId }
+        return CampaignWorkSource(
+            scan = scan,
+            backlog = scan.proposedBacklog,
+            entityByNode = if (admission.admittedNodes.isNotEmpty()) {
+                admission.admittedNodes.associate { it.nodeId to it.entityId }
+            } else scan.proposedBacklog.map { it.nodeId }.zip(admission.admittedEntityIds).toMap(),
+        )
     }
 
     private fun actionable(finding: ConformanceFinding): Boolean = finding.disposition in setOf(
@@ -404,4 +430,10 @@ class RemediationCampaignService(
     private companion object {
         val RESOLVED = setOf(CONFORMANCE_CONFORMING, CONFORMANCE_NOT_APPLICABLE, CONFORMANCE_EXCEPTION_ACTIVE)
     }
+
+    private data class CampaignWorkSource(
+        val scan: RepositoryConformanceScan,
+        val backlog: List<BacklogProposalNode>,
+        val entityByNode: Map<String, Int>,
+    )
 }

@@ -52,6 +52,15 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun getRemediationCampaigns(projectId: Int): List<RemediationCampaignViewResponse> =
         client.get("http://127.0.0.1:8085/api/projects/$projectId/remediation-campaigns").successBody()
 
+    suspend fun getCampaignResolutions(projectId: Int): List<CampaignResolutionViewResponse> =
+        client.get("http://127.0.0.1:8085/api/projects/$projectId/campaign-resolutions").successBody()
+
+    suspend fun proposeCampaignResolution(caseId: Long): CampaignResolutionProposalResultResponse =
+        client.post("http://127.0.0.1:8085/api/campaign-resolution-cases/$caseId/proposals").successBody()
+
+    suspend fun admitCampaignResolution(proposalId: Long): CampaignResolutionAdmissionResultResponse =
+        client.post("http://127.0.0.1:8085/api/campaign-resolution-proposals/$proposalId/admission").successBody()
+
     suspend fun advanceProjectGenesis(
         projectId: Int,
         submission: ProjectGenesisSubmissionRequest,
@@ -372,6 +381,7 @@ data class RemediationCampaignResponse(
     val seedRepositoryRevision: String,
     val seedPractices: List<CampaignSeedPracticeResponse>,
     val links: List<CampaignPracticeLinkResponse>,
+    val successorSource: CampaignSuccessorSourceResponse? = null,
     val createdAt: String,
     val hash: String,
 )
@@ -405,6 +415,102 @@ data class RemediationCampaignViewResponse(
     val campaign: RemediationCampaignResponse,
     val evaluations: List<RemediationCampaignEvaluationResponse>,
     val state: String,
+)
+
+@Serializable
+data class CampaignSuccessorSourceResponse(
+    val predecessorCampaignId: Long,
+    val resolutionCaseId: Long,
+    val resolutionProposalId: Long,
+    val resolutionProposalHash: String,
+    val resolutionAdmissionId: Long,
+    val resolutionAdmissionHash: String,
+    val backlog: List<CampaignResolutionBacklogNodeResponse>,
+    val admittedNodes: List<AdmittedBacklogNodeResponse>,
+)
+
+@Serializable
+data class AdmittedBacklogNodeResponse(
+    val nodeId: String,
+    val entityId: Int,
+)
+
+@Serializable
+data class CampaignResolutionBacklogNodeResponse(
+    val nodeId: String,
+    val parentNodeId: String? = null,
+    val type: String,
+    val title: String,
+    val description: String,
+    val practiceIds: List<String>,
+    val acceptanceCriteria: List<String> = emptyList(),
+    val verificationCommands: List<String> = emptyList(),
+)
+
+@Serializable
+data class CampaignResolutionCaseResponse(
+    val caseId: Long,
+    val campaignId: Long,
+    val projectId: Int,
+    val evaluationId: Long,
+    val evaluationHash: String,
+    val repositoryRevision: String,
+    val cause: String,
+    val practiceIds: List<String>,
+    val openedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class CampaignResolutionProposalResponse(
+    val proposalId: Long,
+    val caseId: Long,
+    val evaluationHash: String,
+    val action: String,
+    val rationale: String,
+    val practiceIds: List<String>,
+    val instructions: String,
+    val proposedBacklog: List<CampaignResolutionBacklogNodeResponse> = emptyList(),
+    val actor: String,
+    val modelBindingFingerprint: String? = null,
+    val promptHash: String? = null,
+    val outputHash: String? = null,
+    val proposedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class CampaignResolutionAdmissionResponse(
+    val admissionId: Long,
+    val caseId: Long,
+    val proposalId: Long,
+    val proposalHash: String,
+    val actor: String,
+    val admittedAt: String,
+    val admittedNodes: List<AdmittedBacklogNodeResponse> = emptyList(),
+    val hash: String,
+)
+
+@Serializable
+data class CampaignResolutionViewResponse(
+    val case: CampaignResolutionCaseResponse,
+    val proposals: List<CampaignResolutionProposalResponse>,
+    val admission: CampaignResolutionAdmissionResponse? = null,
+)
+
+@Serializable
+data class CampaignResolutionProposalResultResponse(
+    val status: String,
+    val proposal: CampaignResolutionProposalResponse? = null,
+    val diagnostic: String = "",
+)
+
+@Serializable
+data class CampaignResolutionAdmissionResultResponse(
+    val status: String,
+    val admission: CampaignResolutionAdmissionResponse? = null,
+    val successorCampaign: RemediationCampaignResponse? = null,
+    val diagnostic: String = "",
 )
 
 @Serializable

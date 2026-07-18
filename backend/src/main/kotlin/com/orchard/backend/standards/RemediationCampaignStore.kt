@@ -7,6 +7,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -34,6 +36,19 @@ data class CampaignSeedPractice(
 )
 
 @Serializable
+data class CampaignSuccessorSource(
+    val predecessorCampaignId: Long,
+    val resolutionCaseId: Long,
+    val resolutionProposalId: Long,
+    val resolutionProposalHash: String,
+    val resolutionAdmissionId: Long,
+    val resolutionAdmissionHash: String,
+    val backlog: List<CampaignResolutionBacklogNode>,
+    val admittedNodes: List<AdmittedBacklogNode>,
+)
+
+@Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class RemediationCampaign(
     val campaignId: Long,
     val projectId: Int,
@@ -47,6 +62,8 @@ data class RemediationCampaign(
     val seedRepositoryRevision: String,
     val seedPractices: List<CampaignSeedPractice>,
     val links: List<CampaignPracticeLink>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val successorSource: CampaignSuccessorSource? = null,
     val createdAt: String,
     val hash: String,
 )
@@ -207,7 +224,11 @@ private fun validateCampaignAppend(existing: List<RemediationCampaign>, campaign
     require(campaign.seedScanId > 0 && campaign.seedAdmissionId > 0 && campaign.createdAt.isNotBlank()) {
         "Remediation campaign source is invalid"
     }
-    require(existing.none { it.seedAdmissionId == campaign.seedAdmissionId || it.campaignId == campaign.campaignId }) {
+    require(existing.none {
+        it.campaignId == campaign.campaignId ||
+            (campaign.successorSource == null && it.successorSource == null && it.seedAdmissionId == campaign.seedAdmissionId) ||
+            (campaign.successorSource != null && it.successorSource?.resolutionAdmissionId == campaign.successorSource.resolutionAdmissionId)
+    }) {
         "Remediation campaign already exists"
     }
     require(campaign.links.isNotEmpty() && campaign.links.map { it.practiceId }.distinct().size == campaign.links.size &&
@@ -219,6 +240,15 @@ private fun validateCampaignAppend(existing: List<RemediationCampaign>, campaign
                 it.disposition in CONFORMANCE_DISPOSITIONS
         } && campaign.links.all { link -> campaign.seedPractices.any { it.practiceId == link.practiceId } }) {
         "Remediation campaign seed practices are invalid"
+    }
+    campaign.successorSource?.let { source ->
+        require(source.predecessorCampaignId > 0 && source.resolutionCaseId > 0 && source.resolutionProposalId > 0 &&
+            source.resolutionAdmissionId > 0 && source.resolutionProposalHash.matches(SHA256) &&
+            source.resolutionAdmissionHash.matches(SHA256) && source.backlog.isNotEmpty() &&
+            source.admittedNodes.map { it.nodeId } == source.backlog.map { it.nodeId } &&
+            source.admittedNodes.map { it.entityId }.distinct().size == source.admittedNodes.size) {
+            "Remediation campaign successor source is invalid"
+        }
     }
     require(campaign.hash == remediationCampaignHash(campaign.copy(hash = ""))) { "Remediation campaign hash is invalid" }
 }

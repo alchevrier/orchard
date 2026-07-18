@@ -38,10 +38,14 @@ import com.orchard.backend.resource.MachineUsagePolicy
 import com.orchard.backend.resource.MachineUsagePolicyUpdateStatus
 import com.orchard.backend.resource.SystemMachineCapacityMonitor
 import com.orchard.backend.standards.BacklogAdmissionStatus
+import com.orchard.backend.standards.CampaignResolutionAdmissionStatus
+import com.orchard.backend.standards.CampaignResolutionProposalStatus
+import com.orchard.backend.standards.CampaignResolutionService
 import com.orchard.backend.standards.ConformanceScanStatus
 import com.orchard.backend.standards.EngineeringStandardSubmission
 import com.orchard.backend.standards.EngineeringStandardsService
 import com.orchard.backend.standards.FileEngineeringStandardsStore
+import com.orchard.backend.standards.FileCampaignResolutionStore
 import com.orchard.backend.standards.FileRemediationCampaignStore
 import com.orchard.backend.standards.RemediationCampaignService
 import com.orchard.backend.standards.StandardUpdateStatus
@@ -165,13 +169,23 @@ fun main() {
         codingWorkspaceGateway,
         resourceController,
     )
+    val remediationCampaignStore = FileRemediationCampaignStore(OrchardPaths.WORKSPACE_DIR)
     val remediationCampaigns = RemediationCampaignService(
         workspace,
         repositoryBindings,
         engineeringStandardsStore,
         engineeringStandards,
         companyControl,
-        FileRemediationCampaignStore(OrchardPaths.WORKSPACE_DIR),
+        remediationCampaignStore,
+    )
+    val campaignResolutions = CampaignResolutionService(
+        workspace,
+        repositoryBindings,
+        engineeringStandardsStore,
+        remediationCampaignStore,
+        modelProviders,
+        FileCampaignResolutionStore(OrchardPaths.WORKSPACE_DIR),
+        resourceController,
     )
     val codingWorker = CodingWorkerService(
         workspace,
@@ -232,6 +246,12 @@ fun main() {
             runCatching { remediationCampaigns.tick() }.onFailure { error ->
                 CAMPAIGN_LOGGER.log(Level.WARNING, "Remediation campaign tick failed", error)
             }
+            runCatching {
+                campaignResolutions.reconcileCases()
+                campaignResolutions.reconcileSuccessors()
+            }.onFailure { error ->
+                CAMPAIGN_LOGGER.log(Level.WARNING, "Campaign resolution reconciliation failed", error)
+            }
         }
     }
     val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
@@ -247,6 +267,7 @@ fun main() {
             modelProviderRegistry,
             engineeringStandards,
             remediationCampaigns,
+            campaignResolutions,
         )
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
@@ -278,6 +299,7 @@ fun Application.workspaceApi(
     modelProviderRegistry: ModelProviderRegistry? = null,
     engineeringStandards: EngineeringStandardsService? = null,
     remediationCampaigns: RemediationCampaignService? = null,
+    campaignResolutions: CampaignResolutionService? = null,
 ) {
     configureJson()
     routing {
@@ -413,6 +435,55 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(remediationCampaigns.views(projectId))
+        }
+        get("/api/projects/{projectId}/campaign-resolutions") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0 || campaignResolutions == null) {
+                call.respond(if (projectId == null || projectId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            campaignResolutions.reconcileCases()
+            call.respond(campaignResolutions.views(projectId))
+        }
+        post("/api/campaign-resolution-cases/{caseId}/proposals") {
+            val caseId = call.parameters["caseId"]?.toLongOrNull()
+            if (caseId == null || caseId <= 0 || campaignResolutions == null) {
+                call.respond(if (caseId == null || caseId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = campaignResolutions.propose(caseId)
+            val status = when (result.status) {
+                CampaignResolutionProposalStatus.CREATED -> HttpStatusCode.Created
+                CampaignResolutionProposalStatus.CASE_NOT_FOUND -> HttpStatusCode.NotFound
+                CampaignResolutionProposalStatus.CASE_RESOLVED,
+                CampaignResolutionProposalStatus.STALE_EVALUATION -> HttpStatusCode.Conflict
+                CampaignResolutionProposalStatus.CONTEXT_BUDGET_EXCEEDED,
+                CampaignResolutionProposalStatus.INVALID_OUTPUT -> HttpStatusCode.UnprocessableEntity
+                CampaignResolutionProposalStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
+                CampaignResolutionProposalStatus.NO_COMPATIBLE_MODEL,
+                CampaignResolutionProposalStatus.MODEL_FAILED,
+                CampaignResolutionProposalStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
+        post("/api/campaign-resolution-proposals/{proposalId}/admission") {
+            val proposalId = call.parameters["proposalId"]?.toLongOrNull()
+            if (proposalId == null || proposalId <= 0 || campaignResolutions == null) {
+                call.respond(if (proposalId == null || proposalId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = campaignResolutions.admit(proposalId)
+            val status = when (result.status) {
+                CampaignResolutionAdmissionStatus.ADMITTED -> HttpStatusCode.Created
+                CampaignResolutionAdmissionStatus.PROPOSAL_NOT_FOUND -> HttpStatusCode.NotFound
+                CampaignResolutionAdmissionStatus.CASE_RESOLVED,
+                CampaignResolutionAdmissionStatus.STALE_EVALUATION,
+                CampaignResolutionAdmissionStatus.REPOSITORY_DRIFTED -> HttpStatusCode.Conflict
+                CampaignResolutionAdmissionStatus.CAPACITY_EXCEEDED,
+                CampaignResolutionAdmissionStatus.INVALID_BACKLOG -> HttpStatusCode.UnprocessableEntity
+                CampaignResolutionAdmissionStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
         }
         post("/api/remediation-campaigns/tick") {
             if (remediationCampaigns == null) {

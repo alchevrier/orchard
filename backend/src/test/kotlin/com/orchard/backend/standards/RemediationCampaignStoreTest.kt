@@ -21,7 +21,9 @@ class RemediationCampaignStoreTest {
         assertEquals(listOf(campaign), replayed.campaigns())
         assertEquals(listOf(evaluation), replayed.evaluations())
         assertEquals(CAMPAIGN_CLOSED, remediationCampaignViews(replayed).single().state)
-        assertEquals(2, Files.readAllLines(directory.resolve("remediation-campaigns.jsonl")).size)
+        val lines = Files.readAllLines(directory.resolve("remediation-campaigns.jsonl"))
+        assertEquals(2, lines.size)
+        assertEquals(false, lines.first().contains("successorSource"))
     }
 
     @Test

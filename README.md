@@ -4,7 +4,35 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 9.9 complete - Closed-Loop Conformance Remediation. Orchard now carries admitted engineering findings through bounded implementation, verification, independent audit, local promotion, and revision-pinned follow-up scans before declaring them resolved.
+> **Project status:** Milestone 10.0 complete - Campaign Resolution and Successor Governance. Orchard now turns blocked or escalated remediation into immutable, evidence-pinned decision cases whose Architect proposals require explicit admission before any successor work or campaign authority exists.
+
+## Milestone 10.0: Campaign Resolution and Successor Governance
+
+Terminal campaigns are now governed decision points rather than dead ends. Orchard distinguishes exhausted remediation, conflicting or unknown evidence, and regressions; asks the Architect for one bounded candidate response; and preserves the human admission boundary before reopening delivery authority.
+
+Delivered and verified:
+
+- Checksummed append-only resolution cases, proposals, and admissions with restart replay and one admitted decision per terminal evaluation.
+- Automatic case reconciliation for `BLOCKED` and `ESCALATED` campaigns, pinned to exact evaluation hashes and promoted repository revisions.
+- Deterministic causes for remediation exhaustion, evidence conflict, evidence uncertainty, and regression.
+- Provider-neutral broad-analysis Architect proposals with strict JSON, resource admission, content-hashed model provenance, and a closed action vocabulary.
+- Candidate actions for additional remediation, investigation, rescan, exception request, standard clarification, and abandonment.
+- Structural validation that delivery proposals cover selected practices through one valid Epic/Story/leaf hierarchy and use only admitted verification commands.
+- Explicit admission with stale-evaluation and clean-repository revision checks before any workspace mutation.
+- Atomic workspace creation and exact proposal-node/entity mappings for admitted remediation and investigation decisions.
+- New successor campaigns pinned to predecessor campaign, resolution case, proposal, admission, terminal scan, and created entities.
+- Idempotent recovery when workspace creation succeeds but resolution persistence is interrupted.
+- Durable non-delivery decisions that create no repository entities and cannot impersonate exception, standard, or scan authority.
+- Typed APIs and cockpit controls for resolution generation, rationale review, explicit admission, terminal causes, and successor lineage.
+- Backward-compatible Milestone 9.9 campaign serialization with unchanged legacy hashes and checksums.
+
+Milestone 10.0 boundaries:
+
+- Rescan admission records the decision but does not yet schedule the scan automatically.
+- Exception requests and standard clarifications do not grant exceptions or mutate standards; those require dedicated policy authorities.
+- One admitted decision resolves a case; revisioned supersession is future work.
+- Authentication, organizational roles, quorum, signatures, and organization/module policy overlays remain future milestones.
+- Successor delivery remains bounded by the existing 32-entity workspace capacity.
 
 ## Milestone 9.9: Closed-Loop Conformance Remediation
 

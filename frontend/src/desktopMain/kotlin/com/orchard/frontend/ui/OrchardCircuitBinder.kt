@@ -102,6 +102,7 @@ import com.orchard.frontend.network.CompanyProjectResponse
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
 import com.orchard.frontend.network.RemediationCampaignViewResponse
+import com.orchard.frontend.network.CampaignResolutionViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
@@ -165,9 +166,11 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var isGeneratingProposal by remember { mutableStateOf(false) }
         var engineeringStandards by remember { mutableStateOf<EngineeringStandardsViewResponse?>(null) }
         var remediationCampaigns by remember { mutableStateOf(emptyList<RemediationCampaignViewResponse>()) }
+        var campaignResolutions by remember { mutableStateOf(emptyList<CampaignResolutionViewResponse>()) }
         var isSavingStandard by remember { mutableStateOf(false) }
         var isScanningConformance by remember { mutableStateOf(false) }
         var isAdmittingConformance by remember { mutableStateOf(false) }
+        var isResolvingCampaign by remember { mutableStateOf(false) }
         var genesisProposal by remember { mutableStateOf<GenesisProposalResponse?>(null) }
         var requestError by remember { mutableStateOf<String?>(null) }
         val scope = rememberCoroutineScope()
@@ -193,10 +196,12 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 runCatching {
                     engineeringStandards = networkClient.getEngineeringStandards(projectId)
                     remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
+                    campaignResolutions = networkClient.getCampaignResolutions(projectId)
                 }.onFailure { requestError = it.message ?: "Unable to load engineering standards." }
             } else {
                 engineeringStandards = null
                 remediationCampaigns = emptyList()
+                campaignResolutions = emptyList()
             }
         }
 
@@ -231,9 +236,11 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 executionPlan = executionPlan,
                 engineeringStandards = engineeringStandards,
                 remediationCampaigns = remediationCampaigns,
+                campaignResolutions = campaignResolutions,
                 isSavingStandard = isSavingStandard,
                 isScanningConformance = isScanningConformance,
                 isAdmittingConformance = isAdmittingConformance,
+                isResolvingCampaign = isResolvingCampaign,
                 onCreateProject = { name ->
                     runSubmission { sendArchitectPrompt("Create a project named \"$name\".") }
                 },
@@ -315,6 +322,34 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                         }
                     }
                 },
+                onProposeCampaignResolution = { caseId ->
+                    if (!isResolvingCampaign) {
+                        isResolvingCampaign = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.proposeCampaignResolution(caseId) }
+                                .onSuccess { campaignResolutions = networkClient.getCampaignResolutions(projectId) }
+                                .onFailure { requestError = it.message ?: "The Architect could not propose campaign recovery." }
+                            isResolvingCampaign = false
+                        }
+                    }
+                },
+                onAdmitCampaignResolution = { proposalId ->
+                    if (!isResolvingCampaign) {
+                        isResolvingCampaign = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.admitCampaignResolution(proposalId) }
+                                .onSuccess {
+                                    campaignResolutions = networkClient.getCampaignResolutions(projectId)
+                                    remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
+                                    refreshWorkspace().getOrThrow()
+                                }
+                                .onFailure { requestError = it.message ?: "Unable to admit the campaign resolution." }
+                            isResolvingCampaign = false
+                        }
+                    }
+                },
                 onRefresh = {
                     if (!isSubmitting) {
                         scope.launch {
@@ -324,6 +359,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                                 if (projectId > 0 && repository?.available == true) {
                                     engineeringStandards = networkClient.getEngineeringStandards(projectId)
                                     remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
+                                    campaignResolutions = networkClient.getCampaignResolutions(projectId)
                                 }
                             }.onFailure { requestError = it.message ?: "Unable to refresh Orchard." }
                         }

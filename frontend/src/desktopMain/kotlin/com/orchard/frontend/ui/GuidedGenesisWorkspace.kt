@@ -73,6 +73,7 @@ import com.orchard.frontend.network.EngineeringPracticeResponse
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
 import com.orchard.frontend.network.RemediationCampaignViewResponse
+import com.orchard.frontend.network.CampaignResolutionViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 
 private const val GENESIS_CLASSIFICATION = "CLASSIFICATION"
@@ -119,9 +120,11 @@ internal fun GuidedGenesisWorkspace(
     executionPlan: RepositoryExecutionPlanResponse?,
     engineeringStandards: EngineeringStandardsViewResponse?,
     remediationCampaigns: List<RemediationCampaignViewResponse>,
+    campaignResolutions: List<CampaignResolutionViewResponse>,
     isSavingStandard: Boolean,
     isScanningConformance: Boolean,
     isAdmittingConformance: Boolean,
+    isResolvingCampaign: Boolean,
     onCreateProject: (String) -> Unit,
     onCreateEpic: (String) -> Unit,
     onBindRepository: () -> Unit,
@@ -134,6 +137,8 @@ internal fun GuidedGenesisWorkspace(
     onSaveStandard: (EngineeringStandardSubmissionRequest) -> Unit,
     onScanConformance: () -> Unit,
     onAdmitConformance: (Long) -> Unit,
+    onProposeCampaignResolution: (Long) -> Unit,
+    onAdmitCampaignResolution: (Long) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val phase = genesis?.phase ?: GENESIS_CLASSIFICATION
@@ -187,12 +192,16 @@ internal fun GuidedGenesisWorkspace(
                 executionPlan = executionPlan,
                 engineeringStandards = engineeringStandards,
                 remediationCampaigns = remediationCampaigns,
+                campaignResolutions = campaignResolutions,
                 isSavingStandard = isSavingStandard,
                 isScanningConformance = isScanningConformance,
                 isAdmittingConformance = isAdmittingConformance,
+                isResolvingCampaign = isResolvingCampaign,
                 onSaveStandard = onSaveStandard,
                 onScanConformance = onScanConformance,
                 onAdmitConformance = onAdmitConformance,
+                onProposeCampaignResolution = onProposeCampaignResolution,
+                onAdmitCampaignResolution = onAdmitCampaignResolution,
             )
         }
     }
@@ -783,12 +792,16 @@ private fun ProjectionSurface(
     executionPlan: RepositoryExecutionPlanResponse?,
     engineeringStandards: EngineeringStandardsViewResponse?,
     remediationCampaigns: List<RemediationCampaignViewResponse>,
+    campaignResolutions: List<CampaignResolutionViewResponse>,
     isSavingStandard: Boolean,
     isScanningConformance: Boolean,
     isAdmittingConformance: Boolean,
+    isResolvingCampaign: Boolean,
     onSaveStandard: (EngineeringStandardSubmissionRequest) -> Unit,
     onScanConformance: () -> Unit,
     onAdmitConformance: (Long) -> Unit,
+    onProposeCampaignResolution: (Long) -> Unit,
+    onAdmitCampaignResolution: (Long) -> Unit,
 ) {
     Column(modifier.background(GenesisCanvas).padding(32.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -821,14 +834,28 @@ private fun ProjectionSurface(
                         onAdmit = onAdmitConformance,
                     )
                 }
-                remediationCampaigns.forEach { campaign -> RemediationCampaignProjection(campaign) }
+                remediationCampaigns.forEach { campaign ->
+                    RemediationCampaignProjection(
+                        campaign,
+                        campaignResolutions.singleOrNull { it.case.campaignId == campaign.campaign.campaignId },
+                        isResolvingCampaign,
+                        onProposeCampaignResolution,
+                        onAdmitCampaignResolution,
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun RemediationCampaignProjection(view: RemediationCampaignViewResponse) {
+private fun RemediationCampaignProjection(
+    view: RemediationCampaignViewResponse,
+    resolution: CampaignResolutionViewResponse?,
+    isResolving: Boolean,
+    onPropose: (Long) -> Unit,
+    onAdmit: (Long) -> Unit,
+) {
     val color = when (view.state) {
         "CLOSED" -> GenesisGreen
         "BLOCKED", "ESCALATED" -> GenesisRed
@@ -848,6 +875,9 @@ private fun RemediationCampaignProjection(view: RemediationCampaignViewResponse)
             Text("Standard ${view.campaign.standardRevision}", color = GenesisMuted, fontSize = 9.sp)
         }
         MetadataLine("Seed scan ${view.campaign.seedScanId}", view.campaign.seedRepositoryRevision.take(12))
+        view.campaign.successorSource?.let { source ->
+            MetadataLine("Successor to campaign ${source.predecessorCampaignId}", "Case ${source.resolutionCaseId}")
+        }
         view.campaign.links.forEach { link ->
             Text(link.practiceId, Modifier.padding(top = 8.dp), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 10.sp)
             Text(
@@ -890,6 +920,47 @@ private fun RemediationCampaignProjection(view: RemediationCampaignViewResponse)
             fontSize = 9.sp,
             lineHeight = 14.sp,
         )
+        resolution?.let { caseView ->
+            Divider(Modifier.padding(vertical = 10.dp), color = GenesisLine)
+            Text("RESOLUTION CASE ${caseView.case.caseId}", color = GenesisRed, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+            Text(
+                caseView.case.cause.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase),
+                Modifier.padding(top = 5.dp),
+                color = GenesisInk,
+                fontSize = 10.sp,
+            )
+            Text(
+                caseView.case.practiceIds.joinToString(),
+                Modifier.padding(top = 4.dp),
+                color = GenesisMuted,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 8.sp,
+            )
+            val proposal = caseView.proposals.lastOrNull()
+            if (proposal == null) {
+                TextButton(onClick = { onPropose(caseView.case.caseId) }, enabled = !isResolving) {
+                    Text(if (isResolving) "Architect reasoning..." else "Ask Architect for resolution")
+                }
+            } else {
+                Text(proposal.action.replace('_', ' '), Modifier.padding(top = 8.dp), color = GenesisBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                Text(proposal.rationale, Modifier.padding(top = 4.dp), color = GenesisInk, fontSize = 9.sp, lineHeight = 13.sp)
+                Text(proposal.instructions, Modifier.padding(top = 4.dp), color = GenesisMuted, fontSize = 9.sp, lineHeight = 13.sp)
+                if (caseView.admission == null) {
+                    TextButton(onClick = { onAdmit(proposal.proposalId) }, enabled = !isResolving) {
+                        Text(if (isResolving) "Admitting..." else "Admit resolution decision")
+                    }
+                } else {
+                    Text(
+                        if (caseView.admission.admittedNodes.isEmpty()) "Decision admitted without repository mutation"
+                        else "Decision admitted  /  ${caseView.admission.admittedNodes.size} governed work nodes",
+                        Modifier.padding(top = 8.dp),
+                        color = GenesisGreen,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                    )
+                }
+            }
+        }
     }
 }
 
