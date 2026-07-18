@@ -302,7 +302,8 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
     }
 
     private fun detectBuildSystem(root: Path): String = when {
-        Files.exists(root.resolve("settings.gradle.kts")) || Files.exists(root.resolve("settings.gradle")) -> "Gradle"
+        Files.exists(root.resolve("settings.gradle.kts")) || Files.exists(root.resolve("settings.gradle")) ||
+            Files.exists(root.resolve("build.gradle.kts")) || Files.exists(root.resolve("build.gradle")) -> "Gradle"
         Files.exists(root.resolve("pom.xml")) -> "Maven"
         Files.exists(root.resolve("meson.build")) -> "Meson"
         Files.exists(root.resolve("CMakeLists.txt")) -> "CMake"

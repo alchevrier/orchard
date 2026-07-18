@@ -32,6 +32,23 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun promoteCompanyRun(runId: Long): CompanyWorkspaceResponse =
         client.post("http://127.0.0.1:8085/api/company/runs/$runId/promotion").successBody()
 
+    suspend fun getEngineeringStandards(projectId: Int): EngineeringStandardsViewResponse =
+        client.get("http://127.0.0.1:8085/api/projects/$projectId/engineering-standards").successBody()
+
+    suspend fun updateEngineeringStandard(
+        projectId: Int,
+        submission: EngineeringStandardSubmissionRequest,
+    ): StandardUpdateResultResponse = client.put("http://127.0.0.1:8085/api/projects/$projectId/engineering-standards") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(submission)
+    }.successBody()
+
+    suspend fun runConformanceScan(projectId: Int): ConformanceScanResultResponse =
+        client.post("http://127.0.0.1:8085/api/projects/$projectId/conformance-scans").successBody()
+
+    suspend fun admitConformanceBacklog(scanId: Long): BacklogAdmissionResultResponse =
+        client.post("http://127.0.0.1:8085/api/conformance-scans/$scanId/admission").successBody()
+
     suspend fun advanceProjectGenesis(
         projectId: Int,
         submission: ProjectGenesisSubmissionRequest,
@@ -200,6 +217,127 @@ data class CompanyWorkspaceResponse(
     val companyProjects: List<CompanyProjectResponse> = emptyList(),
     val executionPlans: List<RepositoryExecutionPlanResponse> = emptyList(),
     val companyDiagnostic: String = "",
+)
+
+@Serializable
+data class EngineeringPracticeResponse(
+    val practiceId: String,
+    val title: String,
+    val category: String,
+    val severity: String,
+    val applicability: String,
+    val requirement: String,
+    val requiredEvidence: List<String>,
+    val remediation: String,
+    val enabled: Boolean = true,
+)
+
+@Serializable
+data class EngineeringStandardSubmissionRequest(
+    val name: String,
+    val practices: List<EngineeringPracticeResponse>,
+    val actor: String = "HUMAN",
+)
+
+@Serializable
+data class EngineeringStandardRevisionResponse(
+    val standardId: Long,
+    val projectId: Int,
+    val revision: Int,
+    val name: String,
+    val practices: List<EngineeringPracticeResponse>,
+    val actor: String,
+    val createdAt: String,
+    val previousHash: String? = null,
+    val hash: String,
+)
+
+@Serializable
+data class ConformanceCitationResponse(val path: String, val contentHash: String, val observation: String)
+
+@Serializable
+data class ConformanceFindingResponse(
+    val findingId: String,
+    val practiceId: String,
+    val disposition: String,
+    val summary: String,
+    val citations: List<ConformanceCitationResponse>,
+    val affectedPaths: List<String>,
+    val acceptanceCriteria: List<String>,
+    val verificationCommands: List<String>,
+    val confidence: Double,
+)
+
+@Serializable
+data class BacklogProposalNodeResponse(
+    val nodeId: String,
+    val parentNodeId: String? = null,
+    val type: String,
+    val title: String,
+    val description: String,
+    val findingIds: List<String>,
+    val acceptanceCriteria: List<String> = emptyList(),
+    val verificationCommands: List<String> = emptyList(),
+)
+
+@Serializable
+data class RepositoryConformanceScanResponse(
+    val scanId: Long,
+    val projectId: Int,
+    val standardId: Long,
+    val standardRevision: Int,
+    val standardHash: String,
+    val repositoryRevision: String,
+    val findings: List<ConformanceFindingResponse>,
+    val proposedBacklog: List<BacklogProposalNodeResponse>,
+    val modelBindingFingerprint: String,
+    val promptHash: String,
+    val contextHash: String,
+    val outputHash: String,
+    val createdAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class ConformanceBacklogAdmissionResponse(
+    val admissionId: Long,
+    val scanId: Long,
+    val scanHash: String,
+    val projectId: Int,
+    val repositoryRevision: String,
+    val admittedEntityIds: List<Int>,
+    val actor: String,
+    val admittedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class EngineeringStandardsViewResponse(
+    val baseline: List<EngineeringPracticeResponse> = emptyList(),
+    val standards: List<EngineeringStandardRevisionResponse> = emptyList(),
+    val scans: List<RepositoryConformanceScanResponse> = emptyList(),
+    val admissions: List<ConformanceBacklogAdmissionResponse> = emptyList(),
+)
+
+@Serializable
+data class StandardUpdateResultResponse(
+    val status: String,
+    val standard: EngineeringStandardRevisionResponse? = null,
+    val diagnostic: String = "",
+)
+
+@Serializable
+data class ConformanceScanResultResponse(
+    val status: String,
+    val scan: RepositoryConformanceScanResponse? = null,
+    val diagnostic: String = "",
+)
+
+@Serializable
+data class BacklogAdmissionResultResponse(
+    val status: String,
+    val admission: ConformanceBacklogAdmissionResponse? = null,
+    val diagnostic: String = "",
 )
 
 @Serializable

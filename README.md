@@ -4,7 +4,32 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 9.7 complete - Provider-Neutral Model Runtime. Orchard now assigns role-specific execution profiles to user-configured Ollama, LM Studio/OpenAI-compatible, or explicitly permitted cloud endpoints without storing credential values.
+> **Project status:** Milestone 9.8 complete - Engineering Standards Authority and Repository Conformance Compiler. Orchard now correlates adjustable engineering policy, ADRs, source, tests, and configuration into citation-backed candidate delivery work that requires explicit admission.
+
+## Milestone 9.8: Engineering Standards Authority and Repository Conformance Compiler
+
+Orchard now has an explicit, versioned answer to what good engineering means for a project. Standards are independent from architectural decisions and repository implementation, allowing the local company to identify drift without converting current defects into policy.
+
+Delivered and verified:
+
+- A built-in adjustable baseline for durable authority, model-output admission, evidence-bound delivery, secret custody, and ADR-to-implementation correlation.
+- Immutable project standard revisions with stable practice IDs, required/advisory severity, applicability, evidence requirements, remediation, enablement, and hash chaining.
+- Full clean-HEAD repository scans through the 88K broad analysis profile, with exact content-hash citations across ADRs, source, tests, and configuration.
+- Seven explicit dispositions: conforming, nonconforming, partial, not applicable, unknown, conflicting, and active exception.
+- Deterministic rejection of invented practices, evidence, paths, commands, incomplete required remediation, omitted actionable findings, invalid hierarchy, oversized proposals, and repository drift.
+- Semantic candidate compilation into one `Epic -> Story -> Task/Bug/Investigation` hierarchy without mutating workspace authority.
+- Explicit atomic backlog admission with revision revalidation, capacity preflight, duplicate rejection, and retry-safe admission journaling.
+- Checksummed append-only persistence for standards, scans, and admission events with full standard/repository/model/prompt/context/output provenance.
+- Typed Ktor APIs and a cockpit authority panel for editing standards, running scans, reviewing findings and citations, inspecting candidate work, and admitting it.
+- Real-Git tests proving scans are non-mutating, citations are revision-bound, invented evidence is rejected, and admission creates the exact hierarchy once.
+
+Milestone 9.8 boundaries:
+
+- The first authority layer is project-scoped; organization, module, and explicit scoped-exception overlays remain future work.
+- Evidence selection is bounded tracked-file retrieval rather than complete language-server or vector-symbol indexing.
+- Conformance scans propose admitted build-system commands but do not execute verification during classification.
+- Candidate admission remains subject to the current 32-entity workspace capacity.
+- Orchard can self-scan by binding an Orchard project to this checkout, adopting the baseline, and running the same operator flow used for any repository.
 
 ## Milestone 9.7: Provider-Neutral Model Runtime
 

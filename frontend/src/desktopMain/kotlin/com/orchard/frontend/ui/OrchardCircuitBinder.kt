@@ -99,6 +99,8 @@ import com.orchard.frontend.network.CircuitDispatchViewResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.CompanyProjectResponse
+import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
+import com.orchard.frontend.network.EngineeringStandardsViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
@@ -160,6 +162,10 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var isSubmitting by remember { mutableStateOf(false) }
         var isBindingRepository by remember { mutableStateOf(false) }
         var isGeneratingProposal by remember { mutableStateOf(false) }
+        var engineeringStandards by remember { mutableStateOf<EngineeringStandardsViewResponse?>(null) }
+        var isSavingStandard by remember { mutableStateOf(false) }
+        var isScanningConformance by remember { mutableStateOf(false) }
+        var isAdmittingConformance by remember { mutableStateOf(false) }
         var genesisProposal by remember { mutableStateOf<GenesisProposalResponse?>(null) }
         var requestError by remember { mutableStateOf<String?>(null) }
         val scope = rememberCoroutineScope()
@@ -179,6 +185,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         val repository = snapshot.repositories[projectId]
         val company = companyProjects.singleOrNull { it.projectId == projectId }
         val executionPlan = executionPlans.filter { it.projectId == projectId }.maxByOrNull { it.planId }
+
+        LaunchedEffect(projectId, repository?.available) {
+            engineeringStandards = if (projectId > 0 && repository?.available == true) {
+                runCatching { networkClient.getEngineeringStandards(projectId) }
+                    .onFailure { requestError = it.message ?: "Unable to load engineering standards." }
+                    .getOrNull()
+            } else null
+        }
 
         LaunchedEffect(genesis?.phase, genesis?.revision?.hash) {
             genesisProposal = null
@@ -209,6 +223,10 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 proposal = genesisProposal,
                 company = company,
                 executionPlan = executionPlan,
+                engineeringStandards = engineeringStandards,
+                isSavingStandard = isSavingStandard,
+                isScanningConformance = isScanningConformance,
+                isAdmittingConformance = isAdmittingConformance,
                 onCreateProject = { name ->
                     runSubmission { sendArchitectPrompt("Create a project named \"$name\".") }
                 },
@@ -250,6 +268,45 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 onAdmit = { runSubmission { admitProjectGenesis(projectId) } },
                 onStartCompany = { runSubmission { startCompany(projectId) } },
                 onPromote = { runId -> runSubmission { promoteCompanyRun(runId) } },
+                onSaveStandard = { submission ->
+                    if (!isSavingStandard) {
+                        isSavingStandard = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.updateEngineeringStandard(projectId, submission) }
+                                .onSuccess { engineeringStandards = networkClient.getEngineeringStandards(projectId) }
+                                .onFailure { requestError = it.message ?: "Unable to save engineering standard." }
+                            isSavingStandard = false
+                        }
+                    }
+                },
+                onScanConformance = {
+                    if (!isScanningConformance) {
+                        isScanningConformance = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.runConformanceScan(projectId) }
+                                .onSuccess { engineeringStandards = networkClient.getEngineeringStandards(projectId) }
+                                .onFailure { requestError = it.message ?: "Unable to scan repository conformance." }
+                            isScanningConformance = false
+                        }
+                    }
+                },
+                onAdmitConformance = { scanId ->
+                    if (!isAdmittingConformance) {
+                        isAdmittingConformance = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.admitConformanceBacklog(scanId) }
+                                .onSuccess {
+                                    engineeringStandards = networkClient.getEngineeringStandards(projectId)
+                                    refreshWorkspace().getOrThrow()
+                                }
+                                .onFailure { requestError = it.message ?: "Unable to admit the conformance backlog." }
+                            isAdmittingConformance = false
+                        }
+                    }
+                },
                 onRefresh = {
                     if (!isSubmitting) {
                         scope.launch {

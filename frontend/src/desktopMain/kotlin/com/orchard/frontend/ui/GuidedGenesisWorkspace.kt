@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.ButtonDefaults
+import androidx.compose.material.Checkbox
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Divider
 import androidx.compose.material.Icon
@@ -68,6 +69,9 @@ import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.ProjectGenesisViewResponse
 import com.orchard.frontend.network.RepositoryBlueprintRequest
 import com.orchard.frontend.network.CompanyProjectResponse
+import com.orchard.frontend.network.EngineeringPracticeResponse
+import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
+import com.orchard.frontend.network.EngineeringStandardsViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
 
 private const val GENESIS_CLASSIFICATION = "CLASSIFICATION"
@@ -112,6 +116,10 @@ internal fun GuidedGenesisWorkspace(
     proposal: GenesisProposalResponse?,
     company: CompanyProjectResponse?,
     executionPlan: RepositoryExecutionPlanResponse?,
+    engineeringStandards: EngineeringStandardsViewResponse?,
+    isSavingStandard: Boolean,
+    isScanningConformance: Boolean,
+    isAdmittingConformance: Boolean,
     onCreateProject: (String) -> Unit,
     onCreateEpic: (String) -> Unit,
     onBindRepository: () -> Unit,
@@ -121,6 +129,9 @@ internal fun GuidedGenesisWorkspace(
     onAdmit: () -> Unit,
     onStartCompany: () -> Unit,
     onPromote: (Long) -> Unit,
+    onSaveStandard: (EngineeringStandardSubmissionRequest) -> Unit,
+    onScanConformance: () -> Unit,
+    onAdmitConformance: (Long) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val phase = genesis?.phase ?: GENESIS_CLASSIFICATION
@@ -172,6 +183,13 @@ internal fun GuidedGenesisWorkspace(
                 genesis = genesis,
                 company = company,
                 executionPlan = executionPlan,
+                engineeringStandards = engineeringStandards,
+                isSavingStandard = isSavingStandard,
+                isScanningConformance = isScanningConformance,
+                isAdmittingConformance = isAdmittingConformance,
+                onSaveStandard = onSaveStandard,
+                onScanConformance = onScanConformance,
+                onAdmitConformance = onAdmitConformance,
             )
         }
     }
@@ -760,6 +778,13 @@ private fun ProjectionSurface(
     genesis: ProjectGenesisViewResponse?,
     company: CompanyProjectResponse?,
     executionPlan: RepositoryExecutionPlanResponse?,
+    engineeringStandards: EngineeringStandardsViewResponse?,
+    isSavingStandard: Boolean,
+    isScanningConformance: Boolean,
+    isAdmittingConformance: Boolean,
+    onSaveStandard: (EngineeringStandardSubmissionRequest) -> Unit,
+    onScanConformance: () -> Unit,
+    onAdmitConformance: (Long) -> Unit,
 ) {
     Column(modifier.background(GenesisCanvas).padding(32.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -781,6 +806,155 @@ private fun ProjectionSurface(
                 if (genesis?.revision == null) EmptyProjection()
                 else if (phase == GENESIS_READY && company != null) CompanyProjection(genesis, company, executionPlan)
                 else GenesisProjection(genesis)
+                engineeringStandards?.let {
+                    EngineeringStandardsProjection(
+                        standards = it,
+                        isSaving = isSavingStandard,
+                        isScanning = isScanningConformance,
+                        isAdmitting = isAdmittingConformance,
+                        onSave = onSaveStandard,
+                        onScan = onScanConformance,
+                        onAdmit = onAdmitConformance,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EngineeringStandardsProjection(
+    standards: EngineeringStandardsViewResponse,
+    isSaving: Boolean,
+    isScanning: Boolean,
+    isAdmitting: Boolean,
+    onSave: (EngineeringStandardSubmissionRequest) -> Unit,
+    onScan: () -> Unit,
+    onAdmit: (Long) -> Unit,
+) {
+    val current = standards.standards.maxByOrNull { it.revision }
+    var name by remember(current?.hash) { mutableStateOf(current?.name ?: "Project engineering standard") }
+    var practices by remember(current?.hash, standards.baseline) {
+        mutableStateOf(current?.practices ?: standards.baseline)
+    }
+    val latestScan = standards.scans.maxByOrNull { it.scanId }
+    val admitted = latestScan?.let { scan -> standards.admissions.any { it.scanId == scan.scanId } } == true
+
+    ProjectionSection("ENGINEERING STANDARDS") {
+        MetadataLine(
+            if (current == null) "BUILT-IN BASELINE" else "REVISION ${current.revision}",
+            "${practices.count { it.enabled }} enabled",
+        )
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            enabled = !isSaving,
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            singleLine = true,
+            label = { Text("Standard name") },
+        )
+        practices.forEachIndexed { index, practice ->
+            PracticeEditor(
+                practice,
+                !isSaving,
+                onChange = { updated -> practices = practices.toMutableList().also { it[index] = updated } },
+            )
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(
+                enabled = name.isNotBlank() && practices.any { it.enabled } && !isSaving,
+                onClick = { onSave(EngineeringStandardSubmissionRequest(name.trim(), practices)) },
+                colors = ButtonDefaults.textButtonColors(contentColor = GenesisGreen),
+            ) {
+                if (isSaving) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                else Text(if (current == null) "Adopt baseline" else "Save revision")
+            }
+            TextButton(
+                enabled = current != null && !isScanning,
+                onClick = onScan,
+                colors = ButtonDefaults.textButtonColors(contentColor = GenesisBlue),
+            ) {
+                if (isScanning) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                else Text("Run full scan")
+            }
+        }
+    }
+
+    latestScan?.let { scan ->
+        ProjectionSection("REPOSITORY CONFORMANCE") {
+            MetadataLine("SCAN ${scan.scanId}", scan.repositoryRevision.take(12))
+            scan.findings.forEach { finding ->
+                val color = when (finding.disposition) {
+                    "CONFORMING", "NOT_APPLICABLE", "EXCEPTION_ACTIVE" -> GenesisGreen
+                    "PARTIAL", "UNKNOWN", "CONFLICTING" -> GenesisAmber
+                    else -> GenesisRed
+                }
+                Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(7.dp).background(color, CircleShape))
+                    Text(finding.practiceId, Modifier.padding(start = 8.dp).weight(1f), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Text(finding.disposition.replace('_', ' '), color = color, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                }
+                Text(finding.summary, Modifier.padding(top = 4.dp), color = GenesisMuted, fontSize = 10.sp, lineHeight = 15.sp)
+                finding.citations.forEach { citation ->
+                    Text(
+                        "${citation.path}  ${citation.contentHash.take(10)}",
+                        Modifier.padding(top = 4.dp),
+                        color = GenesisBlue,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                    )
+                    Text(citation.observation, color = GenesisMuted, fontSize = 9.sp, lineHeight = 13.sp)
+                }
+            }
+            if (scan.proposedBacklog.isNotEmpty()) {
+                Text("CANDIDATE BACKLOG", Modifier.padding(top = 14.dp), color = GenesisBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                scan.proposedBacklog.forEach { node ->
+                    val indent = when (node.type) { "STORY" -> 10.dp; "EPIC" -> 0.dp; else -> 20.dp }
+                    Text(
+                        "${node.type}  ${node.title}",
+                        Modifier.padding(start = indent, top = 6.dp),
+                        color = GenesisInk,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                    )
+                }
+                TextButton(
+                    enabled = !admitted && !isAdmitting,
+                    onClick = { onAdmit(scan.scanId) },
+                    colors = ButtonDefaults.textButtonColors(contentColor = GenesisGreen),
+                    modifier = Modifier.padding(top = 8.dp),
+                ) {
+                    if (isAdmitting) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    else Text(if (admitted) "Backlog admitted" else "Admit candidate backlog")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PracticeEditor(
+    practice: EngineeringPracticeResponse,
+    enabled: Boolean,
+    onChange: (EngineeringPracticeResponse) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Top) {
+        Checkbox(
+            checked = practice.enabled,
+            onCheckedChange = { onChange(practice.copy(enabled = it)) },
+            enabled = enabled,
+        )
+        Column(Modifier.weight(1f).padding(top = 3.dp)) {
+            Text(practice.title, color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+            Text(practice.requirement, color = GenesisMuted, fontSize = 9.sp, lineHeight = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            TextButton(
+                enabled = enabled && practice.enabled,
+                onClick = {
+                    onChange(practice.copy(severity = if (practice.severity == "REQUIRED") "ADVISORY" else "REQUIRED"))
+                },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            ) {
+                Text(practice.severity, color = if (practice.severity == "REQUIRED") GenesisRed else GenesisMuted, fontSize = 9.sp)
             }
         }
     }

@@ -37,6 +37,12 @@ import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.MachineUsagePolicy
 import com.orchard.backend.resource.MachineUsagePolicyUpdateStatus
 import com.orchard.backend.resource.SystemMachineCapacityMonitor
+import com.orchard.backend.standards.BacklogAdmissionStatus
+import com.orchard.backend.standards.ConformanceScanStatus
+import com.orchard.backend.standards.EngineeringStandardSubmission
+import com.orchard.backend.standards.EngineeringStandardsService
+import com.orchard.backend.standards.FileEngineeringStandardsStore
+import com.orchard.backend.standards.StandardUpdateStatus
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
@@ -148,6 +154,14 @@ fun main() {
         resourceController,
         companyControl = companyControl,
     )
+    val engineeringStandards = EngineeringStandardsService(
+        workspace,
+        repositoryBindings,
+        modelProviders,
+        FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR),
+        codingWorkspaceGateway,
+        resourceController,
+    )
     val codingWorker = CodingWorkerService(
         workspace,
         modelProviders,
@@ -211,6 +225,7 @@ fun main() {
             companyCircuit,
             repositoryAnalysis,
             modelProviderRegistry,
+            engineeringStandards,
         )
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
@@ -239,6 +254,7 @@ fun Application.workspaceApi(
     companyCircuit: CompanyCircuitService? = null,
     repositoryAnalysis: RepositoryAnalysisService? = null,
     modelProviderRegistry: ModelProviderRegistry? = null,
+    engineeringStandards: EngineeringStandardsService? = null,
 ) {
     configureJson()
     routing {
@@ -288,6 +304,79 @@ fun Application.workspaceApi(
                 RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL,
                 RepositoryAnalysisTickStatus.MODEL_FAILED,
                 RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
+        get("/api/projects/{projectId}/engineering-standards") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0 || engineeringStandards == null) {
+                call.respond(if (projectId == null || projectId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(engineeringStandards.view(projectId))
+        }
+        put("/api/projects/{projectId}/engineering-standards") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val submission = runCatching { call.receive<EngineeringStandardSubmission>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || submission == null || engineeringStandards == null) {
+                val invalid = projectId == null || projectId <= 0 || submission == null
+                call.respond(if (invalid) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@put
+            }
+            val result = engineeringStandards.updateStandard(projectId, submission)
+            val status = when (result.status) {
+                StandardUpdateStatus.UPDATED -> HttpStatusCode.Created
+                StandardUpdateStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+                StandardUpdateStatus.INVALID_STANDARD -> HttpStatusCode.UnprocessableEntity
+                StandardUpdateStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
+        post("/api/projects/{projectId}/conformance-scans") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0 || engineeringStandards == null) {
+                call.respond(if (projectId == null || projectId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = engineeringStandards.scan(projectId)
+            val status = when (result.status) {
+                ConformanceScanStatus.CREATED -> HttpStatusCode.Created
+                ConformanceScanStatus.PROJECT_NOT_FOUND,
+                ConformanceScanStatus.STANDARD_NOT_FOUND,
+                ConformanceScanStatus.REPOSITORY_UNAVAILABLE -> HttpStatusCode.NotFound
+                ConformanceScanStatus.BUSY,
+                ConformanceScanStatus.REPOSITORY_DIRTY,
+                ConformanceScanStatus.ALREADY_SCANNED,
+                ConformanceScanStatus.REPOSITORY_DRIFTED -> HttpStatusCode.Conflict
+                ConformanceScanStatus.CONTEXT_BUDGET_EXCEEDED,
+                ConformanceScanStatus.INVALID_OUTPUT -> HttpStatusCode.UnprocessableEntity
+                ConformanceScanStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
+                ConformanceScanStatus.CONTEXT_UNAVAILABLE,
+                ConformanceScanStatus.NO_COMPATIBLE_MODEL,
+                ConformanceScanStatus.MODEL_FAILED,
+                ConformanceScanStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
+        post("/api/conformance-scans/{scanId}/admission") {
+            val scanId = call.parameters["scanId"]?.toLongOrNull()
+            if (scanId == null || scanId <= 0 || engineeringStandards == null) {
+                call.respond(if (scanId == null || scanId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = runCatching { engineeringStandards.admitBacklog(scanId) }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val status = when (result.status) {
+                BacklogAdmissionStatus.ADMITTED -> HttpStatusCode.Created
+                BacklogAdmissionStatus.SCAN_NOT_FOUND -> HttpStatusCode.NotFound
+                BacklogAdmissionStatus.ALREADY_ADMITTED,
+                BacklogAdmissionStatus.REPOSITORY_DRIFTED -> HttpStatusCode.Conflict
+                BacklogAdmissionStatus.EMPTY_BACKLOG,
+                BacklogAdmissionStatus.CAPACITY_EXCEEDED,
+                BacklogAdmissionStatus.INVALID_BACKLOG -> HttpStatusCode.UnprocessableEntity
+                BacklogAdmissionStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
             call.respond(status, result)
         }
