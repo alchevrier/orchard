@@ -4,9 +4,9 @@
 
 Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 10.0 complete - Campaign Resolution and Successor Governance. Orchard now turns blocked or escalated remediation into immutable, evidence-pinned decision cases whose Architect proposals require explicit admission before any successor work or campaign authority exists.
+> **Project status:** Milestone 10.1 complete - Scoped Standards Overlays and Exception Authority. Orchard now composes effective engineering policy across organization, project, module, and work-item scopes, protects mandatory floors, and applies only admitted, evidence-bound, expiring exceptions.
 
-> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The single next milestone is 10.1: Scoped Standards Overlays and Exception Authority.
+> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The single next milestone is 10.2: Identity, Delegation, Quorum, and Signed Decisions.
 
 ## Documentation
 
@@ -15,6 +15,31 @@ Orchard is a local-first engineering workspace for turning natural-language inte
 - [Architecture Decision Records](docs/adrs): accepted decisions and their consequences.
 - [Documentation Portal](docs/README.md): documentation authority and maintenance rules.
 - [Roadmap](ROADMAP.md): dependency-ordered product intent and exit evidence.
+
+## Milestone 10.1: Scoped Standards Overlays and Exception Authority
+
+Engineering policy now composes deterministically instead of relying on a single project-wide document or informal team memory. Exceptions are separate, explicit authority: a request remains a candidate until admitted, and continued effect depends on scope, policy, Git ancestry, time, revocation, and unchanged compensating-control evidence.
+
+Delivered and verified:
+
+- Immutable organization, project, module, and work-item overlay revisions in a checksummed append-only policy ledger.
+- Deterministic scope precedence, nested module specificity, cumulative same-scope revisions, and explicit composition conflicts.
+- Add, tighten, and disable operations with mandatory floors that narrower scopes cannot weaken.
+- Hash-pinned effective standards persisted with conformance scans for historical explanation and replay.
+- Evidence-bound exception proposals with explicit admissions, bounded activation and expiry, revocation, supersession, and invalidation states.
+- Deterministic `EXCEPTION_ACTIVE` validation restricted to applicable admitted practices while still permitting independently conforming evidence.
+- Policy-aware scan and campaign identities, allowing reevaluation at unchanged Git HEAD after exception admission, expiry, revocation, or evidence drift.
+- Idempotent conversion of admitted campaign `EXCEPTION_REQUEST` decisions into candidate exception proposals without automatic grant.
+- Typed backend APIs, desktop client contracts, and cockpit projection for effective practices, floors, conflicts, exception state, expiry, and resolution lineage.
+- Backward-compatible standards and campaign serialization with legacy canonical hashes unchanged when new authority fields are absent.
+
+Milestone 10.1 boundaries:
+
+- Actor and grantor values remain attributable strings, not authenticated identities; roles, delegation, quorum, and signatures are Milestone 10.2.
+- Organization overlays are local authority, not verified external policy sources.
+- Compensating-control evidence proves unchanged repository bytes, not real-world process effectiveness.
+- The cockpit focuses authoring on project policy; typed APIs expose all supported scopes.
+- Historical scans and campaign evaluations remain immutable when policy authority later changes.
 
 ## Milestone 10.0: Campaign Resolution and Successor Governance
 

@@ -6,6 +6,7 @@ import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
+import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
@@ -35,6 +36,15 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun getEngineeringStandards(projectId: Int): EngineeringStandardsViewResponse =
         client.get("http://127.0.0.1:8085/api/projects/$projectId/engineering-standards").successBody()
 
+    suspend fun getStandardsPolicy(
+        projectId: Int,
+        modulePath: String? = null,
+        workItemId: Int? = null,
+    ): StandardsPolicyViewResponse = client.get("http://127.0.0.1:8085/api/projects/$projectId/standards-policy") {
+        modulePath?.let { parameter("modulePath", it) }
+        workItemId?.let { parameter("workItemId", it) }
+    }.successBody()
+
     suspend fun updateEngineeringStandard(
         projectId: Int,
         submission: EngineeringStandardSubmissionRequest,
@@ -43,8 +53,46 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
         setBody(submission)
     }.successBody()
 
-    suspend fun runConformanceScan(projectId: Int): ConformanceScanResultResponse =
-        client.post("http://127.0.0.1:8085/api/projects/$projectId/conformance-scans").successBody()
+    suspend fun runConformanceScan(
+        projectId: Int,
+        modulePath: String? = null,
+        workItemId: Int? = null,
+    ): ConformanceScanResultResponse = client.post("http://127.0.0.1:8085/api/projects/$projectId/conformance-scans") {
+        modulePath?.let { parameter("modulePath", it) }
+        workItemId?.let { parameter("workItemId", it) }
+    }.successBody()
+
+    suspend fun appendStandardsOverlay(
+        projectId: Int,
+        submission: StandardOverlaySubmissionRequest,
+    ): StandardsPolicyMutationResultResponse = client.post("http://127.0.0.1:8085/api/projects/$projectId/standards-overlays") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(submission)
+    }.successBody()
+
+    suspend fun proposeStandardsException(
+        projectId: Int,
+        submission: StandardsExceptionProposalSubmissionRequest,
+    ): StandardsPolicyMutationResultResponse = client.post("http://127.0.0.1:8085/api/projects/$projectId/standards-exception-proposals") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(submission)
+    }.successBody()
+
+    suspend fun admitStandardsException(
+        proposalId: Long,
+        submission: StandardsExceptionAdmissionSubmissionRequest,
+    ): StandardsPolicyMutationResultResponse = client.post("http://127.0.0.1:8085/api/standards-exception-proposals/$proposalId/admission") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(submission)
+    }.successBody()
+
+    suspend fun revokeStandardsException(
+        admissionId: Long,
+        submission: StandardsExceptionRevocationSubmissionRequest,
+    ): StandardsPolicyMutationResultResponse = client.post("http://127.0.0.1:8085/api/standards-exception-admissions/$admissionId/revocation") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(submission)
+    }.successBody()
 
     suspend fun admitConformanceBacklog(scanId: Long): BacklogAdmissionResultResponse =
         client.post("http://127.0.0.1:8085/api/conformance-scans/$scanId/admission").successBody()
@@ -265,6 +313,183 @@ data class EngineeringStandardRevisionResponse(
 )
 
 @Serializable
+data class StandardPolicyScopeResponse(
+    val type: String,
+    val projectId: Int? = null,
+    val modulePath: String? = null,
+    val workItemId: Int? = null,
+)
+
+@Serializable
+data class StandardOverlayAdjustmentRequest(
+    val operation: String,
+    val practiceId: String,
+    val addedPractice: EngineeringPracticeResponse? = null,
+    val additionalRequirement: String? = null,
+    val additionalEvidence: List<String> = emptyList(),
+    val additionalRemediation: String? = null,
+    val elevateToRequired: Boolean = false,
+    val mandatoryFloor: Boolean = false,
+)
+
+@Serializable
+data class StandardOverlaySubmissionRequest(
+    val scope: StandardPolicyScopeResponse,
+    val name: String,
+    val adjustments: List<StandardOverlayAdjustmentRequest>,
+    val actor: String = "HUMAN",
+)
+
+@Serializable
+data class StandardOverlayRevisionResponse(
+    val overlayId: Long,
+    val revision: Int,
+    val scope: StandardPolicyScopeResponse,
+    val name: String,
+    val adjustments: List<StandardOverlayAdjustmentRequest>,
+    val actor: String,
+    val createdAt: String,
+    val previousHash: String? = null,
+    val hash: String,
+)
+
+@Serializable
+data class EffectivePracticeResponse(
+    val practice: EngineeringPracticeResponse,
+    val mandatoryFloor: Boolean,
+    val sourceOverlayIds: List<Long> = emptyList(),
+)
+
+@Serializable
+data class StandardCompositionConflictResponse(
+    val overlayId: Long,
+    val practiceId: String,
+    val diagnostic: String,
+)
+
+@Serializable
+data class EffectiveEngineeringStandardResponse(
+    val projectId: Int,
+    val baseStandardId: Long,
+    val baseStandardRevision: Int,
+    val baseStandardHash: String,
+    val targetScope: StandardPolicyScopeResponse,
+    val practices: List<EffectivePracticeResponse>,
+    val overlayHashes: List<String>,
+    val conflicts: List<StandardCompositionConflictResponse>,
+    val hash: String,
+)
+
+@Serializable
+data class ExceptionControlEvidenceRequest(
+    val path: String,
+    val contentHash: String,
+    val description: String,
+)
+
+@Serializable
+data class StandardsExceptionProposalSubmissionRequest(
+    val scope: StandardPolicyScopeResponse,
+    val practiceIds: List<String>,
+    val rationale: String,
+    val compensatingControls: List<String>,
+    val controlEvidence: List<ExceptionControlEvidenceRequest>,
+    val requestedFrom: String,
+    val requestedUntil: String,
+    val actor: String = "HUMAN",
+)
+
+@Serializable
+data class StandardsExceptionProposalResponse(
+    val proposalId: Long,
+    val projectId: Int,
+    val scope: StandardPolicyScopeResponse,
+    val effectiveStandardHash: String,
+    val repositoryRevision: String,
+    val practiceIds: List<String>,
+    val rationale: String,
+    val compensatingControls: List<String>,
+    val controlEvidence: List<ExceptionControlEvidenceRequest>,
+    val requestedFrom: String,
+    val requestedUntil: String,
+    val sourceResolutionCaseId: Long? = null,
+    val sourceResolutionAdmissionId: Long? = null,
+    val actor: String,
+    val proposedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class StandardsExceptionAdmissionSubmissionRequest(
+    val grantor: String,
+    val activeFrom: String,
+    val expiresAt: String,
+)
+
+@Serializable
+data class StandardsExceptionAdmissionResponse(
+    val admissionId: Long,
+    val proposalId: Long,
+    val proposalHash: String,
+    val grantor: String,
+    val activeFrom: String,
+    val expiresAt: String,
+    val admittedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class StandardsExceptionRevocationSubmissionRequest(val actor: String, val reason: String)
+
+@Serializable
+data class StandardsExceptionRevocationResponse(
+    val revocationId: Long,
+    val admissionId: Long,
+    val admissionHash: String,
+    val actor: String,
+    val reason: String,
+    val revokedAt: String,
+    val hash: String,
+)
+
+@Serializable
+data class StandardsExceptionViewResponse(
+    val proposal: StandardsExceptionProposalResponse,
+    val admission: StandardsExceptionAdmissionResponse? = null,
+    val revocation: StandardsExceptionRevocationResponse? = null,
+    val state: String,
+)
+
+@Serializable
+data class StandardsPolicyViewResponse(
+    val effectiveStandard: EffectiveEngineeringStandardResponse? = null,
+    val overlays: List<StandardOverlayRevisionResponse> = emptyList(),
+    val exceptions: List<StandardsExceptionViewResponse> = emptyList(),
+)
+
+@Serializable
+data class StandardsPolicyMutationResultResponse(
+    val status: String,
+    val overlay: StandardOverlayRevisionResponse? = null,
+    val proposal: StandardsExceptionProposalResponse? = null,
+    val admission: StandardsExceptionAdmissionResponse? = null,
+    val revocation: StandardsExceptionRevocationResponse? = null,
+    val diagnostic: String = "",
+)
+
+@Serializable
+data class AppliedStandardsExceptionResponse(
+    val admissionId: Long,
+    val admissionHash: String,
+    val proposalId: Long,
+    val proposalHash: String,
+    val scope: StandardPolicyScopeResponse,
+    val practiceIds: List<String>,
+    val activeFrom: String,
+    val expiresAt: String,
+)
+
+@Serializable
 data class ConformanceCitationResponse(val path: String, val contentHash: String, val observation: String)
 
 @Serializable
@@ -307,6 +532,8 @@ data class RepositoryConformanceScanResponse(
     val contextHash: String,
     val outputHash: String,
     val createdAt: String,
+    val effectiveStandard: EffectiveEngineeringStandardResponse? = null,
+    val appliedExceptions: List<AppliedStandardsExceptionResponse> = emptyList(),
     val hash: String,
 )
 

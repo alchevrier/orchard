@@ -78,6 +78,7 @@ data class CampaignPracticeEvaluation(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class RemediationCampaignEvaluation(
     val evaluationId: Long,
     val campaignId: Long,
@@ -90,6 +91,8 @@ data class RemediationCampaignEvaluation(
     val idempotencyKey: String,
     val recordedAt: String,
     val hash: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val policyAuthorityHash: String? = null,
 )
 
 @Serializable
@@ -264,7 +267,9 @@ private fun validateEvaluationAppend(
         evaluation.repositoryRevision.matches(GIT_REVISION) && evaluation.recordedAt.isNotBlank()) {
         "Remediation evaluation identity is invalid"
     }
-    require(evaluation.state in CAMPAIGN_STATES && evaluation.idempotencyKey == campaignIdempotencyKey(campaign.campaignId, evaluation.repositoryRevision)) {
+    require(evaluation.state in CAMPAIGN_STATES && evaluation.idempotencyKey == campaignIdempotencyKey(
+        campaign.campaignId, evaluation.repositoryRevision, evaluation.policyAuthorityHash,
+    )) {
         "Remediation evaluation state or idempotency key is invalid"
     }
     require(existing.none { it.idempotencyKey == evaluation.idempotencyKey || it.evaluationId == evaluation.evaluationId }) {
@@ -303,7 +308,8 @@ private fun validPracticeEvaluation(evaluation: CampaignPracticeEvaluation): Boo
         evaluation.resolved == (evaluation.currentDisposition in RESOLVED_DISPOSITIONS) &&
         (!evaluation.regressed || evaluation.priorDisposition in RESOLVED_DISPOSITIONS && evaluation.currentDisposition !in RESOLVED_DISPOSITIONS)
 
-fun campaignIdempotencyKey(campaignId: Long, repositoryRevision: String): String = sha256("$campaignId:$repositoryRevision")
+fun campaignIdempotencyKey(campaignId: Long, repositoryRevision: String, policyAuthorityHash: String? = null): String =
+    sha256(listOfNotNull(campaignId.toString(), repositoryRevision, policyAuthorityHash).joinToString(":"))
 
 private fun remediationCampaignHash(campaign: RemediationCampaign): String = sha256(Json.encodeToString(campaign))
 private fun remediationCampaignEvaluationHash(evaluation: RemediationCampaignEvaluation): String = sha256(Json.encodeToString(evaluation))

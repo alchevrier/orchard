@@ -41,7 +41,16 @@ Most workflow authorities use checksummed JSONL, including:
 - staged plans, proposals, and dispatches;
 - repository analysis and coding execution;
 - company control;
-- engineering standards, remediation campaigns, and campaign resolutions.
+- engineering standards, scoped standards policy, remediation campaigns, and campaign resolutions.
+
+The standards family uses separate ledgers under the workspace authority root:
+
+- `engineering-standards.jsonl` for base standard revisions, scans, and backlog admissions;
+- `standards-policy.jsonl` for overlay revisions and exception proposals, admissions, and revocations;
+- `remediation-campaigns.jsonl` for campaigns and policy-aware evaluations; and
+- `campaign-resolutions.jsonl` for terminal cases, proposals, and admissions.
+
+`standards-policy.jsonl` is protected by `standards-policy.lock` and recoverable final-append replay. Overlay revisions and exception lifecycle events are append-only. Effective standards and exception states are projections, not mutable records.
 
 Stores validate record sequence, payload checksum, business keys, and cross-record invariants during replay.
 
@@ -77,6 +86,8 @@ Serialized authority is a compatibility surface.
 - Do not rename enum values, record types, or existing fields without a migration and compatibility tests.
 - Preserve hash inputs exactly. A logically equivalent reserialization can still invalidate a stored checksum or proposal hash.
 - Keep historical records immutable; represent new meaning with successor records or revisions.
+
+Milestone 10.1 preserves old standards and campaign hashes by appending optional effective-policy, applied-exception, and policy-authority fields with `EncodeDefault.Mode.NEVER`. Do not make those defaults eagerly encoded: historical checksum replay depends on their absence.
 
 A store change is incomplete without a test that loads records written by the prior schema when compatibility is required.
 

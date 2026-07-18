@@ -92,6 +92,7 @@ class CampaignResolutionService(
     private val modelProviders: List<ModelProvider>,
     private val store: CampaignResolutionStore = TransientCampaignResolutionStore(),
     private val resourceController: MachineResourceController = MachineResourceController.unrestricted(),
+    private val standardsPolicy: StandardsPolicyService? = null,
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
     private val systemPrompt: String = loadPrompt(),
 ) {
@@ -187,6 +188,21 @@ class CampaignResolutionService(
         return created
     }
 
+    @Synchronized
+    fun reconcileExceptionRequests(): Int {
+        val policy = standardsPolicy ?: return 0
+        var created = 0
+        store.admissions().sortedBy { it.admissionId }.forEach { admission ->
+            val proposal = store.proposals().single { it.proposalId == admission.proposalId }
+            if (proposal.action != RESOLUTION_ACTION_EXCEPTION_REQUEST) return@forEach
+            val case = store.cases().single { it.caseId == admission.caseId }
+            val evaluation = campaignStore.evaluations().single { it.evaluationId == case.evaluationId && it.hash == case.evaluationHash }
+            val scan = standardsStore.scans().single { it.scanId == evaluation.scanId && it.hash == evaluation.scanHash }
+            if (policy.seedExceptionRequest(case, proposal, admission, scan).status == StandardsPolicyMutationStatus.RECORDED) created++
+        }
+        return created
+    }
+
     suspend fun propose(caseId: Long): CampaignResolutionProposalResult {
         if (!proposalMutex.tryLock()) return CampaignResolutionProposalResult(
             CampaignResolutionProposalStatus.MODEL_FAILED,
@@ -236,6 +252,7 @@ class CampaignResolutionService(
         return runCatching {
             store.appendAdmission(admission)
             reconcileSuccessors()
+            reconcileExceptionRequests()
             val successor = campaignStore.campaigns().singleOrNull {
                 it.successorSource?.resolutionAdmissionId == admission.admissionId
             }

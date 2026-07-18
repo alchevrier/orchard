@@ -41,6 +41,12 @@ data class EngineeringStandardsView(
     val admissions: List<ConformanceBacklogAdmission>,
 )
 
+@Serializable
+data class ConformanceScanSubmission(
+    val modulePath: String? = null,
+    val workItemId: Int? = null,
+)
+
 enum class StandardUpdateStatus { UPDATED, PROJECT_NOT_FOUND, INVALID_STANDARD, STORAGE_UNAVAILABLE }
 
 @Serializable
@@ -64,6 +70,7 @@ enum class ConformanceScanStatus {
     RESOURCE_BLOCKED,
     MODEL_FAILED,
     INVALID_OUTPUT,
+    POLICY_CONFLICT,
     REPOSITORY_DRIFTED,
     STORAGE_UNAVAILABLE,
 }
@@ -96,6 +103,8 @@ data class BacklogAdmissionResult(
 @Serializable
 private data class ConformanceAnalysisEnvelope(
     val standard: EngineeringStandardRevision,
+    val effectiveStandard: EffectiveEngineeringStandard? = null,
+    val activeExceptions: List<AppliedStandardsException> = emptyList(),
     val repositoryRevision: String,
     val repositoryContext: CodingRepositoryContext,
     val allowedVerificationCommands: List<String>,
@@ -116,6 +125,7 @@ class EngineeringStandardsService(
     private val store: EngineeringStandardsStore = TransientEngineeringStandardsStore(),
     private val workspaceGateway: CodingWorkspaceGateway = LocalCodingWorkspaceGateway(),
     private val resourceController: MachineResourceController = MachineResourceController.unrestricted(),
+    private val standardsPolicy: StandardsPolicyService? = null,
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
     private val systemPrompt: String = loadPrompt(),
 ) {
@@ -150,10 +160,20 @@ class EngineeringStandardsService(
         )
     }
 
-    suspend fun scan(projectId: Int): ConformanceScanResult {
+    suspend fun scan(projectId: Int, submission: ConformanceScanSubmission = ConformanceScanSubmission()): ConformanceScanResult {
         if (!scanMutex.tryLock()) return ConformanceScanResult(ConformanceScanStatus.BUSY)
         return try {
-            scanLocked(projectId, null)
+            val targetScope = when {
+                submission.workItemId != null ->
+                    StandardPolicyScope(STANDARD_SCOPE_WORK_ITEM, projectId, submission.modulePath, submission.workItemId)
+                submission.modulePath != null ->
+                    StandardPolicyScope(STANDARD_SCOPE_MODULE, projectId, submission.modulePath)
+                else -> StandardPolicyScope(STANDARD_SCOPE_PROJECT, projectId)
+            }
+            if (!validPolicyScope(targetScope)) {
+                return ConformanceScanResult(ConformanceScanStatus.POLICY_CONFLICT, diagnostic = "The conformance scan target scope is invalid.")
+            }
+            scanLocked(projectId, null, targetScope)
         } finally {
             scanMutex.unlock()
         }
@@ -162,13 +182,26 @@ class EngineeringStandardsService(
     internal suspend fun scanRevision(
         projectId: Int,
         standard: EngineeringStandardRevision,
+        targetScope: StandardPolicyScope = StandardPolicyScope(STANDARD_SCOPE_PROJECT, projectId),
     ): ConformanceScanResult {
         if (!scanMutex.tryLock()) return ConformanceScanResult(ConformanceScanStatus.BUSY)
         return try {
-            scanLocked(projectId, standard)
+            scanLocked(projectId, standard, targetScope)
         } finally {
             scanMutex.unlock()
         }
+    }
+
+    internal fun currentAuthorityHash(
+        projectId: Int,
+        standard: EngineeringStandardRevision,
+        targetScope: StandardPolicyScope,
+    ): String? {
+        val head = repositoryBindings.resolveHead(projectId) ?: return null
+        val effective = standardsPolicy?.effectiveStandard(standard, targetScope)
+        if (effective?.conflicts?.isNotEmpty() == true) return null
+        val exceptions = effective?.let { standardsPolicy.activeExceptions(it, head.path, head.commitHash) }.orEmpty()
+        return conformanceAuthorityHash(standard.hash, effective, exceptions)
     }
 
     @Synchronized
@@ -249,6 +282,7 @@ class EngineeringStandardsService(
     private suspend fun scanLocked(
         projectId: Int,
         requestedStandard: EngineeringStandardRevision?,
+        targetScope: StandardPolicyScope,
     ): ConformanceScanResult {
         if (!projectExists(projectId)) return ConformanceScanResult(ConformanceScanStatus.PROJECT_NOT_FOUND)
         val standard = requestedStandard?.takeIf { candidate ->
@@ -257,13 +291,22 @@ class EngineeringStandardsService(
             store.standards().filter { it.projectId == projectId }.maxByOrNull { it.revision }
         } else null
         if (standard == null) return ConformanceScanResult(ConformanceScanStatus.STANDARD_NOT_FOUND)
+        val effective = standardsPolicy?.effectiveStandard(standard, targetScope)
+        if (effective?.conflicts?.isNotEmpty() == true) {
+            return ConformanceScanResult(ConformanceScanStatus.POLICY_CONFLICT, diagnostic = effective.conflicts.joinToString { it.diagnostic })
+        }
         val head = repositoryBindings.resolveHead(projectId)
             ?: return ConformanceScanResult(ConformanceScanStatus.REPOSITORY_UNAVAILABLE)
         if (!head.clean) return ConformanceScanResult(ConformanceScanStatus.REPOSITORY_DIRTY)
-        if (store.scans().any { it.projectId == projectId && it.standardHash == standard.hash && it.repositoryRevision == head.commitHash }) {
+        val activeExceptions = effective?.let { standardsPolicy.activeExceptions(it, head.path, head.commitHash) }.orEmpty()
+        val authorityHash = conformanceAuthorityHash(standard.hash, effective, activeExceptions)
+        if (store.scans().any { it.projectId == projectId &&
+            conformanceAuthorityHash(it.standardHash, it.effectiveStandard, it.appliedExceptions) == authorityHash &&
+                it.repositoryRevision == head.commitHash }) {
             return ConformanceScanResult(ConformanceScanStatus.ALREADY_SCANNED)
         }
-        val query = standard.practices.filter { it.enabled }.joinToString("\n") {
+        val scanPractices = effective?.practices?.map { it.practice } ?: standard.practices
+        val query = scanPractices.filter { it.enabled }.joinToString("\n") {
             "${it.practiceId} ${it.title} ${it.category} ${it.applicability} ${it.requirement} ${it.requiredEvidence.joinToString(" ")}"
         }
         val context = runCatching { workspaceGateway.collectAnalysisContext(head.path, query) }.getOrElse {
@@ -271,7 +314,7 @@ class EngineeringStandardsService(
         }
         if (context.files.isEmpty()) return ConformanceScanResult(ConformanceScanStatus.CONTEXT_UNAVAILABLE, diagnostic = "No repository evidence was selected.")
         val commands = verificationCommands(repositoryBindings.views(setOf(projectId))[projectId]?.buildSystem.orEmpty())
-        val envelope = ConformanceAnalysisEnvelope(standard, head.commitHash, context, commands, MAX_BACKLOG_NODES)
+        val envelope = ConformanceAnalysisEnvelope(standard, effective, activeExceptions, head.commitHash, context, commands, MAX_BACKLOG_NODES)
         val envelopeJson = json.encodeToString(envelope)
         val prompt = "$systemPrompt\n\nAuthoritative conformance envelope:\n$envelopeJson"
         val profile = DefaultModelExecutionProfiles.broadRepositoryAnalysis
@@ -292,7 +335,7 @@ class EngineeringStandardsService(
                 estimateModelTokens(it.text) <= profile.outputBudgetTokens
         }?.let { runCatching { json.decodeFromString<ConformanceAnalysisOutput>(it.text) }.getOrNull() }
             ?: return ConformanceScanResult(ConformanceScanStatus.INVALID_OUTPUT, diagnostic = "The model did not return valid strict JSON.")
-        val invalid = validateOutput(standard, context, commands, output)
+        val invalid = validateOutput(standard, effective, activeExceptions, context, commands, output)
         if (invalid != null) return ConformanceScanResult(ConformanceScanStatus.INVALID_OUTPUT, diagnostic = invalid)
         if (workspaceGateway.currentRevision(head.path) != head.commitHash) return ConformanceScanResult(ConformanceScanStatus.REPOSITORY_DRIFTED)
         val binding = provider.bindingProfile()
@@ -311,6 +354,8 @@ class EngineeringStandardsService(
                 contextHash = sha256(envelopeJson),
                 outputHash = sha256(generation.text),
                 createdAt = Instant.now().toString(),
+                effectiveStandard = effective,
+                appliedExceptions = activeExceptions,
                 hash = "",
             )
         )
@@ -322,11 +367,14 @@ class EngineeringStandardsService(
 
     private fun validateOutput(
         standard: EngineeringStandardRevision,
+        effective: EffectiveEngineeringStandard?,
+        activeExceptions: List<AppliedStandardsException>,
         context: CodingRepositoryContext,
         commands: List<String>,
         output: ConformanceAnalysisOutput,
     ): String? {
-        val enabled = standard.practices.filter { it.enabled }.map { it.practiceId }.toSet()
+        val practices = effective?.practices?.map { it.practice } ?: standard.practices
+        val enabled = practices.filter { it.enabled }.map { it.practiceId }.toSet()
         if (output.findings.map { it.practiceId }.toSet() != enabled || output.findings.size != enabled.size) {
             return "The scan must return exactly one finding for every enabled practice."
         }
@@ -336,10 +384,14 @@ class EngineeringStandardsService(
         }
         if (output.findings.flatMap { it.affectedPaths }.any { it !in files }) return "A finding targets an unobserved repository path."
         if (output.findings.flatMap { it.verificationCommands }.any { it !in commands }) return "A finding invented a verification command."
+        val excepted = activeExceptions.flatMap { it.practiceIds }.toSet()
+        if (output.findings.any { it.disposition == CONFORMANCE_EXCEPTION_ACTIVE && it.practiceId !in excepted }) {
+            return "EXCEPTION_ACTIVE requires exact deterministic exception authority supplied in the envelope."
+        }
         val actionable = output.findings.filter {
             it.disposition in setOf(CONFORMANCE_NONCONFORMING, CONFORMANCE_PARTIAL, CONFORMANCE_UNKNOWN, CONFORMANCE_CONFLICTING)
         }.map { it.findingId }.toSet()
-        val requiredPracticeIds = standard.practices.filter { it.enabled && it.severity == PRACTICE_SEVERITY_REQUIRED }
+        val requiredPracticeIds = practices.filter { it.enabled && it.severity == PRACTICE_SEVERITY_REQUIRED }
             .map { it.practiceId }.toSet()
         if (output.findings.any {
                 it.practiceId in requiredPracticeIds && it.findingId in actionable &&

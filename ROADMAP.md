@@ -5,11 +5,11 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `1` |
+| Version | `2` |
 | Status | `ACTIVE` |
 | Updated | `2026-07-18` |
-| Delivered baseline | Milestone 10.0 at commit `4f95ac5` |
-| Next milestone | `10.1` Scoped Standards Overlays and Exception Authority |
+| Delivered baseline | Milestone 10.1 |
+| Next milestone | `10.2` Identity, Delegation, Quorum, and Signed Decisions |
 | Canonical path | `ROADMAP.md` |
 
 ## How To Use This Roadmap
@@ -69,9 +69,9 @@ Every roadmap milestone must preserve these constraints:
 
 ### Milestone 10.1: Scoped Standards Overlays and Exception Authority
 
-- State: `NEXT`
+- State: `COMPLETE`
 - Depends on: `9.8`, `9.9`, `10.0`
-- Governing ADRs: ADR 040, ADR 041, ADR 042; a new ADR is required before completion.
+- Governing ADRs: ADR 040, ADR 041, ADR 042, ADR 043.
 
 Goal: make effective engineering policy composable by scope and make `EXCEPTION_ACTIVE` a truthful, evidence-backed conformance disposition.
 
@@ -105,7 +105,7 @@ Non-goals:
 
 ### Milestone 10.2: Identity, Delegation, Quorum, and Signed Decisions
 
-- State: `PLANNED`
+- State: `NEXT`
 - Depends on: `10.1`
 
 Goal: replace caller-asserted actor strings with verifiable local authority for sensitive policy and acceptance decisions.
@@ -327,6 +327,7 @@ The README contains the detailed delivered history. The current architectural li
 | 9.8 | Engineering Standards and Conformance Compiler | `COMPLETE` |
 | 9.9 | Closed-Loop Conformance Remediation | `COMPLETE` |
 | 10.0 | Campaign Resolution and Successor Governance | `COMPLETE` |
+| 10.1 | Scoped Standards Overlays and Exception Authority | `COMPLETE` |
 
 Earlier milestones established the workspace, deterministic workflows, durable evidence, work definitions, staged circuits, requirement authority, contract-compiled gates, governed coding, toolchain policy, and product/company foundations required by this line.
 
@@ -347,4 +348,5 @@ Update this file in the same change that alters roadmap intent.
 
 | Date | Version | Change |
 | --- | --- | --- |
+| 2026-07-18 | 2 | Completed scoped standards overlays and exception authority; selected identity, delegation, quorum, and signed decisions as Milestone 10.2. |
 | 2026-07-18 | 1 | Established the canonical roadmap after Milestone 10.0; selected scoped standards overlays and exception authority as Milestone 10.1. |

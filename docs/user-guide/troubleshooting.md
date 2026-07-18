@@ -91,6 +91,12 @@ Promotion requires accepted evidence and audits, a clean destination, exact ance
 
 The bound repository must be clean. The scan, standard revision, and later backlog admission all pin exact revisions and hashes. If HEAD changed after scanning, run a fresh scan rather than admitting stale candidate work.
 
+A `POLICY_CONFLICT` means applicable overlays could not compose, commonly because a narrower scope tried to disable a mandatory floor. Inspect effective policy and record a successor overlay; do not edit the ledger.
+
+### An Exception Is Not Active
+
+Inspect its projected state. `PENDING` has not been admitted or has not reached activation. `EXPIRED` and `REVOKED` no longer authorize findings. `SUPERSEDED` pins an older effective standard, while `INVALIDATED` means Git ancestry or content-hashed compensating-control evidence changed. Submit a new evidence-bound proposal when current authority genuinely requires one; do not extend or rewrite the historical record.
+
 ### Campaign Is Blocked or Escalated
 
 Open its resolution case. `BLOCKED` means the admitted leaves are exhausted without complete resolution. `ESCALATED` indicates unknown/conflicting evidence or regression. Ask the Architect for a proposal, inspect it, and admit only the action you intend.

@@ -42,13 +42,25 @@ import com.orchard.backend.standards.CampaignResolutionAdmissionStatus
 import com.orchard.backend.standards.CampaignResolutionProposalStatus
 import com.orchard.backend.standards.CampaignResolutionService
 import com.orchard.backend.standards.ConformanceScanStatus
+import com.orchard.backend.standards.ConformanceScanSubmission
 import com.orchard.backend.standards.EngineeringStandardSubmission
 import com.orchard.backend.standards.EngineeringStandardsService
 import com.orchard.backend.standards.FileEngineeringStandardsStore
+import com.orchard.backend.standards.FileStandardsPolicyStore
 import com.orchard.backend.standards.FileCampaignResolutionStore
 import com.orchard.backend.standards.FileRemediationCampaignStore
 import com.orchard.backend.standards.RemediationCampaignService
+import com.orchard.backend.standards.StandardOverlaySubmission
+import com.orchard.backend.standards.StandardPolicyScope
 import com.orchard.backend.standards.StandardUpdateStatus
+import com.orchard.backend.standards.StandardsExceptionAdmissionSubmission
+import com.orchard.backend.standards.StandardsExceptionProposalSubmission
+import com.orchard.backend.standards.StandardsExceptionRevocationSubmission
+import com.orchard.backend.standards.StandardsPolicyMutationStatus
+import com.orchard.backend.standards.StandardsPolicyService
+import com.orchard.backend.standards.STANDARD_SCOPE_MODULE
+import com.orchard.backend.standards.STANDARD_SCOPE_PROJECT
+import com.orchard.backend.standards.STANDARD_SCOPE_WORK_ITEM
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
@@ -161,6 +173,11 @@ fun main() {
         companyControl = companyControl,
     )
     val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
+    val standardsPolicy = StandardsPolicyService(
+        engineeringStandardsStore,
+        repositoryBindings,
+        FileStandardsPolicyStore(OrchardPaths.WORKSPACE_DIR),
+    )
     val engineeringStandards = EngineeringStandardsService(
         workspace,
         repositoryBindings,
@@ -168,6 +185,7 @@ fun main() {
         engineeringStandardsStore,
         codingWorkspaceGateway,
         resourceController,
+        standardsPolicy,
     )
     val remediationCampaignStore = FileRemediationCampaignStore(OrchardPaths.WORKSPACE_DIR)
     val remediationCampaigns = RemediationCampaignService(
@@ -178,14 +196,16 @@ fun main() {
         companyControl,
         remediationCampaignStore,
     )
+    val campaignResolutionStore = FileCampaignResolutionStore(OrchardPaths.WORKSPACE_DIR)
     val campaignResolutions = CampaignResolutionService(
         workspace,
         repositoryBindings,
         engineeringStandardsStore,
         remediationCampaignStore,
         modelProviders,
-        FileCampaignResolutionStore(OrchardPaths.WORKSPACE_DIR),
+        campaignResolutionStore,
         resourceController,
+        standardsPolicy,
     )
     val codingWorker = CodingWorkerService(
         workspace,
@@ -249,6 +269,7 @@ fun main() {
             runCatching {
                 campaignResolutions.reconcileCases()
                 campaignResolutions.reconcileSuccessors()
+                campaignResolutions.reconcileExceptionRequests()
             }.onFailure { error ->
                 CAMPAIGN_LOGGER.log(Level.WARNING, "Campaign resolution reconciliation failed", error)
             }
@@ -268,6 +289,7 @@ fun main() {
             engineeringStandards,
             remediationCampaigns,
             campaignResolutions,
+            standardsPolicy,
         )
     }
     val architectServer = embeddedServer(Netty, host = "127.0.0.1", port = 8086) {
@@ -300,6 +322,7 @@ fun Application.workspaceApi(
     engineeringStandards: EngineeringStandardsService? = null,
     remediationCampaigns: RemediationCampaignService? = null,
     campaignResolutions: CampaignResolutionService? = null,
+    standardsPolicy: StandardsPolicyService? = null,
 ) {
     configureJson()
     routing {
@@ -360,6 +383,21 @@ fun Application.workspaceApi(
             }
             call.respond(engineeringStandards.view(projectId))
         }
+        get("/api/projects/{projectId}/standards-policy") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0 || standardsPolicy == null) {
+                call.respond(if (projectId == null || projectId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val modulePath = call.request.queryParameters["modulePath"]
+            val workItemId = call.request.queryParameters["workItemId"]?.toIntOrNull()
+            val scope = when {
+                workItemId != null -> StandardPolicyScope(STANDARD_SCOPE_WORK_ITEM, projectId, modulePath, workItemId)
+                modulePath != null -> StandardPolicyScope(STANDARD_SCOPE_MODULE, projectId, modulePath)
+                else -> StandardPolicyScope(STANDARD_SCOPE_PROJECT, projectId)
+            }
+            call.respond(standardsPolicy.view(projectId, scope))
+        }
         put("/api/projects/{projectId}/engineering-standards") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
             val submission = runCatching { call.receive<EngineeringStandardSubmission>() }.getOrNull()
@@ -377,13 +415,59 @@ fun Application.workspaceApi(
             }
             call.respond(status, result)
         }
+        post("/api/projects/{projectId}/standards-overlays") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val submission = runCatching { call.receive<StandardOverlaySubmission>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || submission == null || standardsPolicy == null) {
+                call.respond(if (projectId == null || projectId <= 0 || submission == null) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = standardsPolicy.appendOverlay(projectId, submission)
+            call.respond(standardsPolicyStatus(result.status), result)
+        }
+        post("/api/projects/{projectId}/standards-exception-proposals") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val submission = runCatching { call.receive<StandardsExceptionProposalSubmission>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || submission == null || standardsPolicy == null) {
+                call.respond(if (projectId == null || projectId <= 0 || submission == null) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = standardsPolicy.proposeException(projectId, submission)
+            call.respond(standardsPolicyStatus(result.status), result)
+        }
+        post("/api/standards-exception-proposals/{proposalId}/admission") {
+            val proposalId = call.parameters["proposalId"]?.toLongOrNull()
+            val submission = runCatching { call.receive<StandardsExceptionAdmissionSubmission>() }.getOrNull()
+            if (proposalId == null || proposalId <= 0 || submission == null || standardsPolicy == null) {
+                call.respond(if (proposalId == null || proposalId <= 0 || submission == null) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = standardsPolicy.admitException(proposalId, submission)
+            call.respond(standardsPolicyStatus(result.status), result)
+        }
+        post("/api/standards-exception-admissions/{admissionId}/revocation") {
+            val admissionId = call.parameters["admissionId"]?.toLongOrNull()
+            val submission = runCatching { call.receive<StandardsExceptionRevocationSubmission>() }.getOrNull()
+            if (admissionId == null || admissionId <= 0 || submission == null || standardsPolicy == null) {
+                call.respond(if (admissionId == null || admissionId <= 0 || submission == null) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = standardsPolicy.revokeException(admissionId, submission)
+            call.respond(standardsPolicyStatus(result.status), result)
+        }
         post("/api/projects/{projectId}/conformance-scans") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
             if (projectId == null || projectId <= 0 || engineeringStandards == null) {
                 call.respond(if (projectId == null || projectId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
                 return@post
             }
-            val result = engineeringStandards.scan(projectId)
+            val result = engineeringStandards.scan(
+                projectId,
+                ConformanceScanSubmission(
+                    modulePath = call.request.queryParameters["modulePath"],
+                    workItemId = call.request.queryParameters["workItemId"]?.toIntOrNull(),
+                ),
+            )
             val status = when (result.status) {
                 ConformanceScanStatus.CREATED -> HttpStatusCode.Created
                 ConformanceScanStatus.PROJECT_NOT_FOUND,
@@ -394,7 +478,8 @@ fun Application.workspaceApi(
                 ConformanceScanStatus.ALREADY_SCANNED,
                 ConformanceScanStatus.REPOSITORY_DRIFTED -> HttpStatusCode.Conflict
                 ConformanceScanStatus.CONTEXT_BUDGET_EXCEEDED,
-                ConformanceScanStatus.INVALID_OUTPUT -> HttpStatusCode.UnprocessableEntity
+                ConformanceScanStatus.INVALID_OUTPUT,
+                ConformanceScanStatus.POLICY_CONFLICT -> HttpStatusCode.UnprocessableEntity
                 ConformanceScanStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
                 ConformanceScanStatus.CONTEXT_UNAVAILABLE,
                 ConformanceScanStatus.NO_COMPATIBLE_MODEL,
@@ -1012,6 +1097,22 @@ private fun collaborationStatus(status: DefinitionCollaborationStatus): HttpStat
     DefinitionCollaborationStatus.WORKFLOW_ALREADY_STARTED -> HttpStatusCode.Conflict
     DefinitionCollaborationStatus.INVALID_RECORD -> HttpStatusCode.UnprocessableEntity
     DefinitionCollaborationStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+}
+
+private fun standardsPolicyStatus(status: StandardsPolicyMutationStatus): HttpStatusCode = when (status) {
+    StandardsPolicyMutationStatus.RECORDED -> HttpStatusCode.Created
+    StandardsPolicyMutationStatus.PROJECT_NOT_FOUND,
+    StandardsPolicyMutationStatus.STANDARD_NOT_FOUND,
+    StandardsPolicyMutationStatus.PROPOSAL_NOT_FOUND,
+    StandardsPolicyMutationStatus.ADMISSION_NOT_FOUND,
+    StandardsPolicyMutationStatus.REPOSITORY_UNAVAILABLE -> HttpStatusCode.NotFound
+    StandardsPolicyMutationStatus.REPOSITORY_DIRTY,
+    StandardsPolicyMutationStatus.REPOSITORY_DRIFTED,
+    StandardsPolicyMutationStatus.STALE_POLICY,
+    StandardsPolicyMutationStatus.ALREADY_DECIDED -> HttpStatusCode.Conflict
+    StandardsPolicyMutationStatus.INVALID_REQUEST,
+    StandardsPolicyMutationStatus.POLICY_CONFLICT -> HttpStatusCode.UnprocessableEntity
+    StandardsPolicyMutationStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
 }
 
 private fun designGovernanceStatus(status: DesignGovernanceStatus): HttpStatusCode = when (status) {

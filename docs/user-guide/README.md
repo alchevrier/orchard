@@ -1,6 +1,6 @@
 # Orchard User Guide
 
-This guide covers the current desktop product at Milestone 10.0. It is written for an operator who wants Orchard to form and run a governed local software company against a new or existing Git repository.
+This guide covers the current desktop product at Milestone 10.1. It is written for an operator who wants Orchard to form and run a governed local software company against a new or existing Git repository.
 
 ## Start Here
 
@@ -22,6 +22,7 @@ Product genesis
   -> verification and independent audit
   -> local promotion
   -> standards scan and remediation
+  -> scoped policy and exception evaluation
   -> closure or governed resolution
 ```
 
@@ -42,7 +43,8 @@ The desktop exposes actions only where the backend can validate the transition. 
 - Scripted setup supports Linux and macOS. Windows setup is not automated.
 - The active workspace is limited to 32 entities.
 - Repository promotion is local only.
-- Organization policy overlays, signed identities, quorum, and active exception authority are planned but not delivered.
-- Rescan, exception request, and standard clarification resolution actions are durable decisions but do not yet invoke specialized executors.
+- Identity authentication, delegation, quorum, signatures, and verified external policy sources are planned but not delivered.
+- Rescan and standard clarification resolution actions are durable decisions but do not yet invoke specialized executors.
+- Exception control evidence proves unchanged repository content, not real-world process effectiveness.
 
 See the [Roadmap](../../ROADMAP.md) for dependency-ordered future work and the [Troubleshooting Guide](troubleshooting.md) for operational boundaries.

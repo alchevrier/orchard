@@ -117,13 +117,25 @@ Test that:
 - revision changes do not rewrite historical scans; and
 - remediation and follow-up evaluation retain the stable practice lineage.
 
+## Add a Standards Scope or Overlay Operation
+
+Scope and operation values are serialized authority, not display-only enums. A new scope must define deterministic applicability, precedence, specificity, identity validation, and leakage tests. A new operation must define how it composes with inherited practices and mandatory floors.
+
+Update pure composition, append validation, effective-standard hashing, scan target selection, typed APIs, cockpit projection, and replay tests together. Never let a narrower scope weaken inherited mandatory policy implicitly.
+
+## Extend Exception Authority
+
+Keep proposal, admission, current effect, and revocation separate. Any new exception condition must be deterministic and included in scan/campaign authority identity when it can change conformance without changing Git HEAD.
+
+Actor authentication, role authorization, delegation, quorum, and signatures belong in the identity authority planned for Milestone 10.2. Do not retrofit them as trusted string comparisons inside `StandardsPolicyService`.
+
 ## Add a Resolution Action Executor
 
-At Milestone 10.0, resolution admission creates successors only for delivery actions. Rescan, exception request, and standard clarification are durable decisions without specialized execution.
+Resolution admission creates successors for delivery actions. Exception requests seed candidate scoped exception proposals through idempotent reconciliation. Rescan and standard clarification remain durable decisions without specialized execution.
 
 A future executor must consume an admitted decision and produce a separate execution record. It must not reinterpret proposal text as authority or mutate the predecessor campaign. Define idempotency across the external action and ledger append, then project execution status separately from decision admission.
 
-This work is sequenced after scoped exception and verified policy authority on the [Roadmap](../../ROADMAP.md).
+Additional executors are sequenced after identity and verified policy authority on the [Roadmap](../../ROADMAP.md).
 
 ## Add a Frontend Projection
 

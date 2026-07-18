@@ -44,15 +44,43 @@ Coding cannot submit its own human judgment, mark a run complete directly, appro
 
 ## Standards and Conformance
 
-Engineering standards are immutable project revisions with stable practice IDs. A scan judges every enabled practice against a clean repository revision and records exact citations.
+Engineering standards begin as immutable project revisions with stable practice IDs. Scoped overlays then compose an effective standard in this precedence order:
+
+1. organization;
+2. project;
+3. module; and
+4. work item.
+
+An overlay can add, tighten, or disable a practice. A narrower scope may strengthen inherited policy. It cannot disable a mandatory floor; Orchard reports a composition conflict and blocks scanning instead of guessing which policy should win.
+
+A scan judges every enabled effective practice against a clean repository revision and records exact citations. It also pins the effective-standard hash and every applied exception admission, so later policy changes do not rewrite what governed historical evidence.
 
 `UNKNOWN` means evidence is insufficient. `CONFLICTING` means supplied evidence supports incompatible conclusions. Neither should be converted into confident implementation work without investigation or resolution.
 
-`EXCEPTION_ACTIVE` is recognized as a resolved disposition, but active scoped exception authority is not implemented at Milestone 10.0. A model or user cannot truthfully create this disposition merely by requesting an exception. Milestone 10.1 on the [Roadmap](../../ROADMAP.md) introduces that authority.
+## Exception Authority
+
+An exception proposal identifies exact practices, scope, effective policy, repository revision, rationale, compensating controls, content-hashed evidence, and requested time bounds. It has no effect until explicitly admitted.
+
+Admission adds the grantor and exact activation/expiry window. Orchard then evaluates the authority continuously:
+
+| State | Meaning |
+| --- | --- |
+| `PENDING` | The proposal is not admitted or its activation time has not arrived. |
+| `ACTIVE` | Scope, policy, time, Git ancestry, evidence, and revocation checks all pass. |
+| `EXPIRED` | The admitted expiry time passed. |
+| `REVOKED` | A revocation became effective. |
+| `SUPERSEDED` | The effective policy hash changed. |
+| `INVALIDATED` | Repository ancestry or compensating-control evidence no longer validates. |
+
+`EXCEPTION_ACTIVE` is truthful only when deterministic active authority covers that practice and scan scope. An active exception permits that disposition when the deviation remains; it does not prevent a scan from reporting `CONFORMING` when repository evidence independently satisfies the practice.
+
+An admitted campaign `EXCEPTION_REQUEST` creates one candidate proposal linked to its resolution evidence. It never grants itself. Review the generated scope, practices, controls, evidence, and expiry before admission.
 
 ## Campaign Closure
 
 A remediation campaign closes only when a promoted follow-up scan proves every linked practice is resolved and no seeded practice regressed.
+
+Closure remains policy-sensitive. Admission, expiry, revocation, supersession, or invalidation can trigger another scan and evaluation at the same promoted Git revision because the governing authority changed even though repository bytes did not.
 
 The following do not prove closure:
 
@@ -71,7 +99,7 @@ Delivery actions create successor work and a linked campaign. Non-delivery actio
 | Action | What admission means | What it does not mean |
 | --- | --- | --- |
 | `RESCAN` | A fresh scan was selected as the next decision. | A scan has already run. |
-| `EXCEPTION_REQUEST` | An exception should be considered by a future authority. | An exception is active. |
+| `EXCEPTION_REQUEST` | A candidate scoped exception proposal should be considered. | The proposal is admitted or active. |
 | `STANDARD_CLARIFICATION` | A prospective policy decision is required. | The pinned standard changed. |
 | `ABANDON` | The lineage is intentionally ended with rationale. | Findings or history were deleted. |
 
@@ -83,4 +111,4 @@ Do not edit an Orchard-managed worktree while a run is active. Destination drift
 
 ## Planned Governance
 
-The current next milestone adds scoped standards overlays and exception authority. Identity, delegation, quorum, signed decisions, and verified external policy sources follow it. Until those milestones land, actor strings are attributable records but not cryptographic identity.
+The current next milestone adds identity, delegation, quorum, and signed decisions. Verified external policy sources follow it. Until those milestones land, actor and grantor strings are attributable records but not authenticated or cryptographic identity.

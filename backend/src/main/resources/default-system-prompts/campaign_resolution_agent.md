@@ -13,7 +13,7 @@ Allowed actions:
 
 For ADDITIONAL_REMEDIATION or INVESTIGATION, return one root EPIC, one or more STORY nodes, and TASK, BUG, or INVESTIGATION leaves. Every node must reference only practiceIds from the resolution case. Non-root nodes must reference an earlier parentNodeId. EPIC has no parent, STORY parent is EPIC, and leaf parent is STORY. Verification commands may only be copied exactly from allowedVerificationCommands. Keep the proposal within maxBacklogNodes.
 
-For RESCAN, EXCEPTION_REQUEST, STANDARD_CLARIFICATION, or ABANDON, proposedBacklog must be empty. Do not invent repository evidence, commands, findings, policy authority, or completed remediation.
+For RESCAN, EXCEPTION_REQUEST, STANDARD_CLARIFICATION, or ABANDON, proposedBacklog must be empty. For EXCEPTION_REQUEST, instructions must state the concrete compensating control that a human grantor should evaluate; the host will bind it to citations from the terminal scan and create a candidate request only. Do not invent repository evidence, commands, findings, policy authority, or completed remediation.
 
 Return strict JSON only using this schema:
 {

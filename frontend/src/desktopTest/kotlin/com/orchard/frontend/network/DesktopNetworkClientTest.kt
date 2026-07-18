@@ -19,6 +19,74 @@ import kotlin.test.assertTrue
 
 class DesktopNetworkClientTest {
     @Test
+    fun requestsWorkItemPolicyThroughModuleAncestry() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Get, request.method)
+            assertEquals("backend/standards", request.url.parameters["modulePath"])
+            assertEquals("42", request.url.parameters["workItemId"])
+            respond(
+                content = """{"overlays":[],"exceptions":[]}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val result = client.getStandardsPolicy(1, "backend/standards", 42)
+
+        assertTrue(result.overlays.isEmpty())
+        client.close()
+    }
+
+    @Test
+    fun admitsExactStandardsExceptionProposal() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/standards-exception-proposals/7/admission", request.url.toString())
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"grantor\":\"TECH_LEAD\""))
+            assertTrue(body.contains("\"expiresAt\":\"2026-08-01T00:00:00Z\""))
+            respond(
+                content = """{
+                    "status":"RECORDED",
+                    "admission":{
+                        "admissionId":3,
+                        "proposalId":7,
+                        "proposalHash":"${"a".repeat(64)}",
+                        "grantor":"TECH_LEAD",
+                        "activeFrom":"2026-07-20T00:00:00Z",
+                        "expiresAt":"2026-08-01T00:00:00Z",
+                        "admittedAt":"2026-07-20T00:00:00Z",
+                        "hash":"${"b".repeat(64)}"
+                    }
+                }""".trimIndent(),
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val result = client.admitStandardsException(
+            7,
+            StandardsExceptionAdmissionSubmissionRequest(
+                "TECH_LEAD", "2026-07-20T00:00:00Z", "2026-08-01T00:00:00Z",
+            ),
+        )
+
+        assertEquals("RECORDED", result.status)
+        assertEquals(3L, result.admission?.admissionId)
+        client.close()
+    }
+
+    @Test
     fun requestsNonAuthoritativeGenesisProposal() = runBlocking {
         val engine = MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)

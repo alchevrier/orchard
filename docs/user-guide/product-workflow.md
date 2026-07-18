@@ -133,7 +133,17 @@ Possible actions are:
 - standard clarification; or
 - abandonment.
 
-Additional remediation and investigation can create a new admitted hierarchy and linked successor campaign. The other actions currently record a durable decision only. They do not automatically run a scan, grant an exception, or modify a standard.
+Additional remediation and investigation can create a new admitted hierarchy and linked successor campaign. An admitted exception request now creates one candidate scoped exception proposal, but does not grant it. Rescan, standard clarification, and abandonment remain durable decisions without automatic scan or policy mutation.
+
+## 8. Govern Scoped Policy and Exceptions
+
+The standards policy panel projects the selected scope's effective hash, enabled practices, mandatory floors, source overlays, conflicts, and exception lifecycle.
+
+Use a tightening overlay to add requirements or evidence, elevate severity, or establish a mandatory floor. The project-focused cockpit preserves prior same-scope adjustments when it records a successor overlay revision. Module and work-item scopes are available through the typed API.
+
+To request an exception, select the exact practice and provide a bounded rationale, compensating control, repository citation evidence, and expiry. Review the candidate before selecting explicit admission. A request imported from campaign resolution follows the same admission boundary.
+
+Revoke authority when the compensating control no longer applies or the deviation is resolved. Expiry, revocation, policy drift, repository ancestry failure, or changed control evidence removes active coverage; Orchard can reevaluate the campaign without requiring a new Git commit.
 
 ## Operating Rule
 

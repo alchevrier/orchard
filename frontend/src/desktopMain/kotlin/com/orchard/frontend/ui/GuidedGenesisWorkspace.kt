@@ -72,9 +72,20 @@ import com.orchard.frontend.network.CompanyProjectResponse
 import com.orchard.frontend.network.EngineeringPracticeResponse
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
+import com.orchard.frontend.network.StandardOverlayAdjustmentRequest
+import com.orchard.frontend.network.StandardOverlaySubmissionRequest
+import com.orchard.frontend.network.StandardPolicyScopeResponse
+import com.orchard.frontend.network.StandardsExceptionAdmissionSubmissionRequest
+import com.orchard.frontend.network.StandardsExceptionProposalSubmissionRequest
+import com.orchard.frontend.network.StandardsExceptionRevocationSubmissionRequest
+import com.orchard.frontend.network.StandardsPolicyViewResponse
+import com.orchard.frontend.network.ExceptionControlEvidenceRequest
 import com.orchard.frontend.network.RemediationCampaignViewResponse
 import com.orchard.frontend.network.CampaignResolutionViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
+import com.orchard.frontend.network.RepositoryConformanceScanResponse
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 
 private const val GENESIS_CLASSIFICATION = "CLASSIFICATION"
 private const val GENESIS_EXPERIENCE = "EXPERIENCE"
@@ -119,12 +130,14 @@ internal fun GuidedGenesisWorkspace(
     company: CompanyProjectResponse?,
     executionPlan: RepositoryExecutionPlanResponse?,
     engineeringStandards: EngineeringStandardsViewResponse?,
+    standardsPolicy: StandardsPolicyViewResponse?,
     remediationCampaigns: List<RemediationCampaignViewResponse>,
     campaignResolutions: List<CampaignResolutionViewResponse>,
     isSavingStandard: Boolean,
     isScanningConformance: Boolean,
     isAdmittingConformance: Boolean,
     isResolvingCampaign: Boolean,
+    isMutatingPolicy: Boolean,
     onCreateProject: (String) -> Unit,
     onCreateEpic: (String) -> Unit,
     onBindRepository: () -> Unit,
@@ -139,6 +152,10 @@ internal fun GuidedGenesisWorkspace(
     onAdmitConformance: (Long) -> Unit,
     onProposeCampaignResolution: (Long) -> Unit,
     onAdmitCampaignResolution: (Long) -> Unit,
+    onAppendOverlay: (StandardOverlaySubmissionRequest) -> Unit,
+    onProposeException: (StandardsExceptionProposalSubmissionRequest) -> Unit,
+    onAdmitException: (Long, StandardsExceptionAdmissionSubmissionRequest) -> Unit,
+    onRevokeException: (Long, StandardsExceptionRevocationSubmissionRequest) -> Unit,
     onRefresh: () -> Unit,
 ) {
     val phase = genesis?.phase ?: GENESIS_CLASSIFICATION
@@ -191,17 +208,23 @@ internal fun GuidedGenesisWorkspace(
                 company = company,
                 executionPlan = executionPlan,
                 engineeringStandards = engineeringStandards,
+                standardsPolicy = standardsPolicy,
                 remediationCampaigns = remediationCampaigns,
                 campaignResolutions = campaignResolutions,
                 isSavingStandard = isSavingStandard,
                 isScanningConformance = isScanningConformance,
                 isAdmittingConformance = isAdmittingConformance,
                 isResolvingCampaign = isResolvingCampaign,
+                isMutatingPolicy = isMutatingPolicy,
                 onSaveStandard = onSaveStandard,
                 onScanConformance = onScanConformance,
                 onAdmitConformance = onAdmitConformance,
                 onProposeCampaignResolution = onProposeCampaignResolution,
                 onAdmitCampaignResolution = onAdmitCampaignResolution,
+                onAppendOverlay = onAppendOverlay,
+                onProposeException = onProposeException,
+                onAdmitException = onAdmitException,
+                onRevokeException = onRevokeException,
             )
         }
     }
@@ -791,17 +814,23 @@ private fun ProjectionSurface(
     company: CompanyProjectResponse?,
     executionPlan: RepositoryExecutionPlanResponse?,
     engineeringStandards: EngineeringStandardsViewResponse?,
+    standardsPolicy: StandardsPolicyViewResponse?,
     remediationCampaigns: List<RemediationCampaignViewResponse>,
     campaignResolutions: List<CampaignResolutionViewResponse>,
     isSavingStandard: Boolean,
     isScanningConformance: Boolean,
     isAdmittingConformance: Boolean,
     isResolvingCampaign: Boolean,
+    isMutatingPolicy: Boolean,
     onSaveStandard: (EngineeringStandardSubmissionRequest) -> Unit,
     onScanConformance: () -> Unit,
     onAdmitConformance: (Long) -> Unit,
     onProposeCampaignResolution: (Long) -> Unit,
     onAdmitCampaignResolution: (Long) -> Unit,
+    onAppendOverlay: (StandardOverlaySubmissionRequest) -> Unit,
+    onProposeException: (StandardsExceptionProposalSubmissionRequest) -> Unit,
+    onAdmitException: (Long, StandardsExceptionAdmissionSubmissionRequest) -> Unit,
+    onRevokeException: (Long, StandardsExceptionRevocationSubmissionRequest) -> Unit,
 ) {
     Column(modifier.background(GenesisCanvas).padding(32.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -832,6 +861,18 @@ private fun ProjectionSurface(
                         onSave = onSaveStandard,
                         onScan = onScanConformance,
                         onAdmit = onAdmitConformance,
+                    )
+                }
+                standardsPolicy?.let { policy ->
+                    StandardsPolicyProjection(
+                        projectId = policy.effectiveStandard?.projectId ?: 0,
+                        policy = policy,
+                        latestScan = engineeringStandards?.scans?.maxByOrNull { it.scanId },
+                        isMutating = isMutatingPolicy,
+                        onAppendOverlay = onAppendOverlay,
+                        onProposeException = onProposeException,
+                        onAdmitException = onAdmitException,
+                        onRevokeException = onRevokeException,
                     )
                 }
                 remediationCampaigns.forEach { campaign ->
@@ -1069,6 +1110,214 @@ private fun EngineeringStandardsProjection(
                     if (isAdmitting) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                     else Text(if (admitted) "Backlog admitted" else "Admit candidate backlog")
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StandardsPolicyProjection(
+    projectId: Int,
+    policy: StandardsPolicyViewResponse,
+    latestScan: RepositoryConformanceScanResponse?,
+    isMutating: Boolean,
+    onAppendOverlay: (StandardOverlaySubmissionRequest) -> Unit,
+    onProposeException: (StandardsExceptionProposalSubmissionRequest) -> Unit,
+    onAdmitException: (Long, StandardsExceptionAdmissionSubmissionRequest) -> Unit,
+    onRevokeException: (Long, StandardsExceptionRevocationSubmissionRequest) -> Unit,
+) {
+    val effective = policy.effectiveStandard
+    val enabledPractices = effective?.practices?.filter { it.practice.enabled }.orEmpty()
+    var selectedPracticeId by remember(effective?.hash) {
+        mutableStateOf(enabledPractices.firstOrNull()?.practice?.practiceId.orEmpty())
+    }
+    var additionalRequirement by remember { mutableStateOf("") }
+    var additionalEvidence by remember { mutableStateOf("") }
+    var mandatoryFloor by remember { mutableStateOf(false) }
+    var exceptionRationale by remember { mutableStateOf("") }
+    var compensatingControl by remember { mutableStateOf("") }
+    var revocationReason by remember { mutableStateOf("") }
+    val finding = latestScan?.findings?.singleOrNull { it.practiceId == selectedPracticeId }
+    val citation = finding?.citations?.firstOrNull()
+
+    ProjectionSection("EFFECTIVE POLICY") {
+        if (effective == null) {
+            Text("Adopt a project engineering standard before composing scoped policy.", color = GenesisMuted, fontSize = 10.sp)
+        } else {
+            MetadataLine(
+                "${effective.targetScope.type.replace('_', ' ')} SCOPE",
+                "${effective.overlayHashes.size} overlays  /  ${effective.hash.take(10)}",
+            )
+            effective.practices.filter { it.practice.enabled }.forEach { entry ->
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(entry.practice.practiceId, Modifier.weight(1f), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                    if (entry.mandatoryFloor) Text("MANDATORY FLOOR", color = GenesisRed, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                    else Text(entry.practice.severity, color = GenesisMuted, fontSize = 8.sp)
+                }
+                if (entry.sourceOverlayIds.isNotEmpty()) {
+                    Text("Overlay provenance ${entry.sourceOverlayIds.joinToString()}", color = GenesisBlue, fontFamily = FontFamily.Monospace, fontSize = 8.sp)
+                }
+            }
+            effective.conflicts.forEach { conflict ->
+                Text(
+                    "CONFLICT ${conflict.practiceId}  /  overlay ${conflict.overlayId}",
+                    Modifier.padding(top = 8.dp),
+                    color = GenesisRed,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                )
+                Text(conflict.diagnostic, color = GenesisMuted, fontSize = 9.sp)
+            }
+        }
+    }
+
+    if (effective != null && enabledPractices.isNotEmpty()) {
+        ProjectionSection("TIGHTEN PROJECT POLICY") {
+            Text("Select practice", color = GenesisMuted, fontSize = 9.sp)
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                enabledPractices.take(4).forEach { entry ->
+                    TextButton(onClick = { selectedPracticeId = entry.practice.practiceId }, enabled = !isMutating) {
+                        Text(
+                            entry.practice.practiceId.take(18),
+                            color = if (selectedPracticeId == entry.practice.practiceId) GenesisBlue else GenesisMuted,
+                            fontSize = 8.sp,
+                        )
+                    }
+                }
+            }
+            OutlinedTextField(
+                value = additionalRequirement,
+                onValueChange = { additionalRequirement = it },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                label = { Text("Additional requirement") },
+                minLines = 2,
+            )
+            OutlinedTextField(
+                value = additionalEvidence,
+                onValueChange = { additionalEvidence = it },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                label = { Text("Additional required evidence") },
+                singleLine = true,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = mandatoryFloor, onCheckedChange = { mandatoryFloor = it }, enabled = !isMutating)
+                Text("Prevent narrower scopes from disabling this practice", color = GenesisMuted, fontSize = 9.sp)
+            }
+            TextButton(
+                enabled = !isMutating && selectedPracticeId.isNotBlank() &&
+                    (additionalRequirement.isNotBlank() || additionalEvidence.isNotBlank() || mandatoryFloor),
+                onClick = {
+                    onAppendOverlay(
+                        StandardOverlaySubmissionRequest(
+                            scope = StandardPolicyScopeResponse("PROJECT", projectId),
+                            name = "Project policy tightening",
+                            adjustments = listOf(
+                                StandardOverlayAdjustmentRequest(
+                                    operation = "TIGHTEN",
+                                    practiceId = selectedPracticeId,
+                                    additionalRequirement = additionalRequirement.trim().takeIf(String::isNotBlank),
+                                    additionalEvidence = listOfNotNull(additionalEvidence.trim().takeIf(String::isNotBlank)),
+                                    mandatoryFloor = mandatoryFloor,
+                                )
+                            ),
+                        )
+                    )
+                },
+                colors = ButtonDefaults.textButtonColors(contentColor = GenesisGreen),
+            ) { Text(if (isMutating) "Recording..." else "Record tightening overlay") }
+        }
+
+        ProjectionSection("REQUEST SCOPED EXCEPTION") {
+            Text(
+                if (citation == null) "Select a practice with current repository citation evidence."
+                else "Evidence ${citation.path}  /  ${citation.contentHash.take(10)}",
+                color = if (citation == null) GenesisAmber else GenesisBlue,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 8.sp,
+            )
+            OutlinedTextField(
+                value = exceptionRationale,
+                onValueChange = { exceptionRationale = it },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                label = { Text("Bounded deviation rationale") },
+                minLines = 2,
+            )
+            OutlinedTextField(
+                value = compensatingControl,
+                onValueChange = { compensatingControl = it },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                label = { Text("Compensating control") },
+                minLines = 2,
+            )
+            TextButton(
+                enabled = !isMutating && citation != null && exceptionRationale.isNotBlank() && compensatingControl.isNotBlank(),
+                onClick = {
+                    val now = Instant.now()
+                    onProposeException(
+                        StandardsExceptionProposalSubmissionRequest(
+                            scope = StandardPolicyScopeResponse("PROJECT", projectId),
+                            practiceIds = listOf(selectedPracticeId),
+                            rationale = exceptionRationale.trim(),
+                            compensatingControls = listOf(compensatingControl.trim()),
+                            controlEvidence = listOf(ExceptionControlEvidenceRequest(citation!!.path, citation.contentHash, citation.observation)),
+                            requestedFrom = now.toString(),
+                            requestedUntil = now.plus(30, ChronoUnit.DAYS).toString(),
+                        )
+                    )
+                },
+                colors = ButtonDefaults.textButtonColors(contentColor = GenesisAmber),
+            ) { Text(if (isMutating) "Recording..." else "Record 30-day exception proposal") }
+        }
+    }
+
+    if (policy.exceptions.isNotEmpty()) {
+        ProjectionSection("EXCEPTION AUTHORITY") {
+            policy.exceptions.sortedByDescending { it.proposal.proposalId }.forEach { view ->
+                val stateColor = when (view.state) {
+                    "ACTIVE" -> GenesisGreen
+                    "PENDING" -> GenesisAmber
+                    else -> GenesisRed
+                }
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("PROPOSAL ${view.proposal.proposalId}", Modifier.weight(1f), color = GenesisInk, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                    Text(view.state, color = stateColor, fontWeight = FontWeight.Bold, fontSize = 8.sp)
+                }
+                Text(view.proposal.practiceIds.joinToString(), color = GenesisBlue, fontFamily = FontFamily.Monospace, fontSize = 8.sp)
+                Text(view.proposal.rationale, Modifier.padding(top = 3.dp), color = GenesisMuted, fontSize = 9.sp, lineHeight = 13.sp)
+                MetadataLine("Expires", view.admission?.expiresAt ?: view.proposal.requestedUntil)
+                view.proposal.sourceResolutionCaseId?.let { MetadataLine("Resolution case $it", "admission ${view.proposal.sourceResolutionAdmissionId}") }
+                when {
+                    view.admission == null -> TextButton(
+                        enabled = !isMutating,
+                        onClick = {
+                            onAdmitException(
+                                view.proposal.proposalId,
+                                StandardsExceptionAdmissionSubmissionRequest("HUMAN", view.proposal.requestedFrom, view.proposal.requestedUntil),
+                            )
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = GenesisGreen),
+                    ) { Text("Admit exact exception request") }
+                    view.state == "ACTIVE" -> {
+                        OutlinedTextField(
+                            value = revocationReason,
+                            onValueChange = { revocationReason = it },
+                            modifier = Modifier.fillMaxWidth().padding(top = 5.dp),
+                            label = { Text("Revocation reason") },
+                            singleLine = true,
+                        )
+                        TextButton(
+                            enabled = !isMutating && revocationReason.isNotBlank(),
+                            onClick = {
+                                onRevokeException(
+                                    view.admission.admissionId,
+                                    StandardsExceptionRevocationSubmissionRequest("HUMAN", revocationReason.trim()),
+                                )
+                            },
+                            colors = ButtonDefaults.textButtonColors(contentColor = GenesisRed),
+                        ) { Text("Revoke exception") }
+                    }
+                }
+                Divider(Modifier.padding(top = 8.dp), color = GenesisLine)
             }
         }
     }

@@ -86,6 +86,7 @@ data class BacklogProposalNode(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class RepositoryConformanceScan(
     val scanId: Long,
     val projectId: Int,
@@ -100,6 +101,10 @@ data class RepositoryConformanceScan(
     val contextHash: String,
     val outputHash: String,
     val createdAt: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val effectiveStandard: EffectiveEngineeringStandard? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val appliedExceptions: List<AppliedStandardsException> = emptyList(),
     val hash: String,
 )
 
@@ -277,6 +282,14 @@ fun newEngineeringStandardRevision(
 fun newRepositoryConformanceScan(scan: RepositoryConformanceScan): RepositoryConformanceScan =
     scan.copy(hash = repositoryConformanceScanHash(scan.copy(hash = "")))
 
+fun conformanceAuthorityHash(
+    standardHash: String,
+    effectiveStandard: EffectiveEngineeringStandard?,
+    appliedExceptions: List<AppliedStandardsException>,
+): String = sha256(
+    listOf(effectiveStandard?.hash ?: standardHash, appliedExceptions.map { it.admissionHash }.sorted().joinToString(",")).joinToString(":"),
+)
+
 fun newConformanceBacklogAdmission(admission: ConformanceBacklogAdmission): ConformanceBacklogAdmission =
     admission.copy(hash = conformanceBacklogAdmissionHash(admission.copy(hash = "")))
 
@@ -287,7 +300,7 @@ private fun validateStandardAppend(existing: List<EngineeringStandardRevision>, 
     require(standard.practices.isNotEmpty() && standard.practices.map { it.practiceId }.distinct().size == standard.practices.size) {
         "Engineering standard practices are empty or duplicated"
     }
-    require(standard.practices.all(::validPractice)) { "Engineering standard contains an invalid practice" }
+    require(standard.practices.all(::validEngineeringPractice)) { "Engineering standard contains an invalid practice" }
     val previous = existing.filter { it.projectId == standard.projectId }.maxByOrNull { it.revision }
     require(standard.revision == (previous?.revision ?: 0) + 1 && standard.previousHash == previous?.hash) {
         "Engineering standard revision does not extend current project authority"
@@ -305,15 +318,34 @@ private fun validateScanAppend(
         "Conformance scan does not reference admitted standard authority"
     }
     require(scan.scanId > 0 && scan.repositoryRevision.matches(Regex("[0-9a-f]{40,64}"))) { "Conformance scan identity is invalid" }
-    require(existing.none { it.projectId == scan.projectId && it.standardHash == scan.standardHash && it.repositoryRevision == scan.repositoryRevision }) {
+    val authorityHash = conformanceAuthorityHash(scan.standardHash, scan.effectiveStandard, scan.appliedExceptions)
+    require(existing.none { it.projectId == scan.projectId &&
+        conformanceAuthorityHash(it.standardHash, it.effectiveStandard, it.appliedExceptions) == authorityHash &&
+        it.repositoryRevision == scan.repositoryRevision }) {
         "Conformance scan already exists for this standard and repository revision"
     }
-    val enabledPracticeIds = standard.practices.filter { it.enabled }.map { it.practiceId }.toSet()
+    val effective = scan.effectiveStandard
+    require(effective == null || effective.projectId == scan.projectId && effective.baseStandardId == standard.standardId &&
+        effective.baseStandardRevision == standard.revision && effective.baseStandardHash == standard.hash && validEffectiveStandard(effective)) {
+        "Conformance scan effective standard is invalid"
+    }
+    val enabledPracticeIds = (effective?.practices?.map { it.practice } ?: standard.practices)
+        .filter { it.enabled }.map { it.practiceId }.toSet()
     require(scan.findings.size == enabledPracticeIds.size && scan.findings.map { it.practiceId }.toSet() == enabledPracticeIds) {
         "Conformance scan must judge every enabled practice exactly once"
     }
     require(scan.findings.map { it.findingId }.distinct().size == scan.findings.size && scan.findings.all(::validFinding)) {
         "Conformance scan findings are invalid"
+    }
+    require(scan.appliedExceptions.map { it.admissionId }.distinct().size == scan.appliedExceptions.size &&
+        scan.appliedExceptions.all { exception ->
+            exception.admissionId > 0 && exception.proposalId > 0 && exception.admissionHash.matches(Regex("[0-9a-f]{64}")) &&
+                exception.proposalHash.matches(Regex("[0-9a-f]{64}")) && validPolicyScope(exception.scope) &&
+                exception.practiceIds.isNotEmpty() && exception.practiceIds.all(enabledPracticeIds::contains) && exception.activeFrom < exception.expiresAt
+        }) { "Conformance scan applied exception authority is invalid" }
+    val exceptedPracticeIds = scan.appliedExceptions.flatMap { it.practiceIds }.toSet()
+    require(scan.findings.filter { it.disposition == CONFORMANCE_EXCEPTION_ACTIVE }.all { it.practiceId in exceptedPracticeIds }) {
+        "Conformance scan exception dispositions are not backed by applied authority"
     }
     require(validBacklog(scan.proposedBacklog, scan.findings.map { it.findingId }.toSet())) { "Conformance backlog proposal is invalid" }
     val actionableFindingIds = scan.findings.filter {
@@ -346,7 +378,7 @@ private fun validateAdmissionAppend(
     require(admission.hash == conformanceBacklogAdmissionHash(admission.copy(hash = ""))) { "Backlog admission hash is invalid" }
 }
 
-private fun validPractice(practice: EngineeringPractice): Boolean =
+fun validEngineeringPractice(practice: EngineeringPractice): Boolean =
     practice.practiceId.matches(Regex("[A-Z][A-Z0-9_-]{2,63}")) && practice.title.isNotBlank() && practice.category.isNotBlank() &&
         practice.severity in setOf(PRACTICE_SEVERITY_REQUIRED, PRACTICE_SEVERITY_ADVISORY) && practice.applicability.isNotBlank() &&
         practice.requirement.isNotBlank() && practice.requiredEvidence.isNotEmpty() && practice.remediation.isNotBlank()

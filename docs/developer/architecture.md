@@ -27,7 +27,7 @@ The backend owns authority and mutation.
 - `company`: company state, staffing, orchestration, independent audits, and local promotion.
 - `analysis`: broad repository analysis and revision-pinned execution plans.
 - `agent`: typed coding operations, worktree application, verification, and repository context collection.
-- `standards`: project standards, conformance scans, remediation campaigns, and resolution cases.
+- `standards`: base standards, scoped policy composition, exception authority, conformance scans, remediation campaigns, and resolution cases.
 - `vector`: provider catalog, model profiles, provider clients, and routing.
 - `resource`: machine telemetry, policy, and execution leases.
 - `config`: local storage roots.
@@ -60,6 +60,23 @@ flowchart TD
 
 Each arrow is a boundary with its own record and failure state. Avoid helper methods that collapse proposal, admission, execution, and acceptance into one mutation.
 
+Standards have a second deterministic flow:
+
+```mermaid
+flowchart TD
+    Base[Immutable base standard] --> Compose[Scope overlay composition]
+    Overlay[Organization to work-item overlays] --> Compose
+    Compose --> Effective[Hash-pinned effective standard]
+    Request[Exception request] --> Proposal[Evidence-bound proposal]
+    Proposal --> Admission[Explicit exception admission]
+    Admission --> Active[Scope, policy, Git, time, evidence, revocation checks]
+    Effective --> Scan[Repository conformance scan]
+    Active --> Scan
+    Scan --> Campaign[Policy-aware campaign evaluation]
+```
+
+`StandardsPolicyAuthority` owns immutable records and pure composition. `StandardsPolicyService` owns repository-bound lifecycle validation. `EngineeringStandardsService` supplies only deterministic active admissions to the model and rejects unsupported `EXCEPTION_ACTIVE` output. Campaign identity includes policy authority so unchanged Git revisions can be reevaluated after authority changes.
+
 ## Background Workers
 
 The backend starts supervised coroutine loops at one-second intervals for:
@@ -68,7 +85,7 @@ The backend starts supervised coroutine loops at one-second intervals for:
 - repository analysis;
 - governed coding;
 - independent audit; and
-- remediation campaign and resolution reconciliation.
+- remediation campaign, resolution, and exception-request reconciliation.
 
 Manual tick endpoints exist for selected workers and tests. Production correctness must be idempotent because a process can stop after an external mutation but before its corresponding ledger append. Resolution admission, promotion, and campaign reconciliation therefore match durable evidence before creating successors or recording completion.
 

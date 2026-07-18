@@ -65,13 +65,22 @@ Both install `ContentNegotiation` with `kotlinx.serialization`. Decoding ignores
 | --- | --- | --- |
 | `GET` | `/api/projects/{projectId}/engineering-standards` | Get standards and scan projection |
 | `PUT` | `/api/projects/{projectId}/engineering-standards` | Save a new standards revision |
-| `POST` | `/api/projects/{projectId}/conformance-scans` | Scan a clean repository revision |
+| `GET` | `/api/projects/{projectId}/standards-policy` | Get effective policy, overlays, and exception lifecycle |
+| `POST` | `/api/projects/{projectId}/standards-overlays` | Append an immutable scoped overlay revision |
+| `POST` | `/api/projects/{projectId}/standards-exception-proposals` | Propose an evidence-bound scoped exception |
+| `POST` | `/api/standards-exception-proposals/{proposalId}/admission` | Admit an exact exception proposal and time window |
+| `POST` | `/api/standards-exception-admissions/{admissionId}/revocation` | Revoke admitted exception authority |
+| `POST` | `/api/projects/{projectId}/conformance-scans` | Scan a clean repository revision under effective policy |
 | `POST` | `/api/conformance-scans/{scanId}/admission` | Admit candidate remediation backlog |
 | `GET` | `/api/projects/{projectId}/remediation-campaigns` | List campaign projections |
 | `POST` | `/api/remediation-campaigns/tick` | Run campaign/resolution reconciliation |
 | `GET` | `/api/projects/{projectId}/campaign-resolutions` | List resolution cases and decisions |
 | `POST` | `/api/campaign-resolution-cases/{caseId}/proposals` | Generate a resolution proposal |
 | `POST` | `/api/campaign-resolution-proposals/{proposalId}/admission` | Admit a resolution decision |
+
+Policy projection and scan routes default to project scope. Supply `modulePath` for a module target, `workItemId` for a work-item target, or both to compose a work item through its module ancestry. Overlay and exception request bodies carry an explicit `StandardPolicyScope`; the backend rejects project leakage and invalid combinations. An organization overlay uses an organization scope with no project ID and becomes applicable across local projects.
+
+Exception admission never changes the proposal's requested scope, practices, policy hash, repository revision, controls, or evidence. Revocation appends a separate record. Read the projected state rather than inferring current effect from the presence of an admission record.
 
 ## Models and Resources
 

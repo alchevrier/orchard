@@ -1,6 +1,6 @@
 # Orchard Developer Documentation
 
-This documentation covers the current Kotlin codebase and Milestone 10.0 runtime.
+This documentation covers the current Kotlin codebase and Milestone 10.1 runtime.
 
 ## Reading Order
 
@@ -24,7 +24,7 @@ backend/
     config/                     local path model
     domain/                     core product models
     resource/                   machine capacity admission
-    standards/                  standards, scans, campaigns, resolution
+    standards/                  standards, overlays, exceptions, scans, campaigns, resolution
     vector/                     model providers, profiles, inference
     workspace/                  workspace authorities and persistence
   src/main/resources/default-system-prompts/

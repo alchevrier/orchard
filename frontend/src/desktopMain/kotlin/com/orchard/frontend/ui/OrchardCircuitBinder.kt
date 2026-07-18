@@ -101,6 +101,11 @@ import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.CompanyProjectResponse
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
+import com.orchard.frontend.network.StandardOverlaySubmissionRequest
+import com.orchard.frontend.network.StandardsExceptionAdmissionSubmissionRequest
+import com.orchard.frontend.network.StandardsExceptionProposalSubmissionRequest
+import com.orchard.frontend.network.StandardsExceptionRevocationSubmissionRequest
+import com.orchard.frontend.network.StandardsPolicyViewResponse
 import com.orchard.frontend.network.RemediationCampaignViewResponse
 import com.orchard.frontend.network.CampaignResolutionViewResponse
 import com.orchard.frontend.network.RepositoryExecutionPlanResponse
@@ -165,12 +170,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var isBindingRepository by remember { mutableStateOf(false) }
         var isGeneratingProposal by remember { mutableStateOf(false) }
         var engineeringStandards by remember { mutableStateOf<EngineeringStandardsViewResponse?>(null) }
+        var standardsPolicy by remember { mutableStateOf<StandardsPolicyViewResponse?>(null) }
         var remediationCampaigns by remember { mutableStateOf(emptyList<RemediationCampaignViewResponse>()) }
         var campaignResolutions by remember { mutableStateOf(emptyList<CampaignResolutionViewResponse>()) }
         var isSavingStandard by remember { mutableStateOf(false) }
         var isScanningConformance by remember { mutableStateOf(false) }
         var isAdmittingConformance by remember { mutableStateOf(false) }
         var isResolvingCampaign by remember { mutableStateOf(false) }
+        var isMutatingPolicy by remember { mutableStateOf(false) }
         var genesisProposal by remember { mutableStateOf<GenesisProposalResponse?>(null) }
         var requestError by remember { mutableStateOf<String?>(null) }
         val scope = rememberCoroutineScope()
@@ -195,11 +202,13 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             if (projectId > 0 && repository?.available == true) {
                 runCatching {
                     engineeringStandards = networkClient.getEngineeringStandards(projectId)
+                    standardsPolicy = networkClient.getStandardsPolicy(projectId)
                     remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
                     campaignResolutions = networkClient.getCampaignResolutions(projectId)
                 }.onFailure { requestError = it.message ?: "Unable to load engineering standards." }
             } else {
                 engineeringStandards = null
+                standardsPolicy = null
                 remediationCampaigns = emptyList()
                 campaignResolutions = emptyList()
             }
@@ -235,12 +244,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 company = company,
                 executionPlan = executionPlan,
                 engineeringStandards = engineeringStandards,
+                standardsPolicy = standardsPolicy,
                 remediationCampaigns = remediationCampaigns,
                 campaignResolutions = campaignResolutions,
                 isSavingStandard = isSavingStandard,
                 isScanningConformance = isScanningConformance,
                 isAdmittingConformance = isAdmittingConformance,
                 isResolvingCampaign = isResolvingCampaign,
+                isMutatingPolicy = isMutatingPolicy,
                 onCreateProject = { name ->
                     runSubmission { sendArchitectPrompt("Create a project named \"$name\".") }
                 },
@@ -342,11 +353,60 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             runCatching { networkClient.admitCampaignResolution(proposalId) }
                                 .onSuccess {
                                     campaignResolutions = networkClient.getCampaignResolutions(projectId)
+                                    standardsPolicy = networkClient.getStandardsPolicy(projectId)
                                     remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
                                     refreshWorkspace().getOrThrow()
                                 }
                                 .onFailure { requestError = it.message ?: "Unable to admit the campaign resolution." }
                             isResolvingCampaign = false
+                        }
+                    }
+                },
+                onAppendOverlay = { submission ->
+                    if (!isMutatingPolicy) {
+                        isMutatingPolicy = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.appendStandardsOverlay(projectId, submission) }
+                                .onSuccess { standardsPolicy = networkClient.getStandardsPolicy(projectId) }
+                                .onFailure { requestError = it.message ?: "Unable to record the standards overlay." }
+                            isMutatingPolicy = false
+                        }
+                    }
+                },
+                onProposeException = { submission ->
+                    if (!isMutatingPolicy) {
+                        isMutatingPolicy = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.proposeStandardsException(projectId, submission) }
+                                .onSuccess { standardsPolicy = networkClient.getStandardsPolicy(projectId) }
+                                .onFailure { requestError = it.message ?: "Unable to record the exception proposal." }
+                            isMutatingPolicy = false
+                        }
+                    }
+                },
+                onAdmitException = { proposalId, submission ->
+                    if (!isMutatingPolicy) {
+                        isMutatingPolicy = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.admitStandardsException(proposalId, submission) }
+                                .onSuccess { standardsPolicy = networkClient.getStandardsPolicy(projectId) }
+                                .onFailure { requestError = it.message ?: "Unable to admit the exception." }
+                            isMutatingPolicy = false
+                        }
+                    }
+                },
+                onRevokeException = { admissionId, submission ->
+                    if (!isMutatingPolicy) {
+                        isMutatingPolicy = true
+                        requestError = null
+                        scope.launch {
+                            runCatching { networkClient.revokeStandardsException(admissionId, submission) }
+                                .onSuccess { standardsPolicy = networkClient.getStandardsPolicy(projectId) }
+                                .onFailure { requestError = it.message ?: "Unable to revoke the exception." }
+                            isMutatingPolicy = false
                         }
                     }
                 },
@@ -358,6 +418,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                                 refreshWorkspace().getOrThrow()
                                 if (projectId > 0 && repository?.available == true) {
                                     engineeringStandards = networkClient.getEngineeringStandards(projectId)
+                                    standardsPolicy = networkClient.getStandardsPolicy(projectId)
                                     remediationCampaigns = networkClient.getRemediationCampaigns(projectId)
                                     campaignResolutions = networkClient.getCampaignResolutions(projectId)
                                 }

@@ -103,9 +103,7 @@ class RemediationCampaignService(
         if (!tickMutex.tryLock()) return RemediationCampaignTickResult(CAMPAIGN_TICK_IDLE)
         return try {
             reconcileAdmissions()
-            val campaign = views().firstOrNull {
-                it.state !in setOf(CAMPAIGN_CLOSED, CAMPAIGN_BLOCKED, CAMPAIGN_ESCALATED)
-            }
+            val campaign = views().firstOrNull(::requiresEvaluation)
                 ?: return RemediationCampaignTickResult(CAMPAIGN_TICK_IDLE)
             evaluate(campaign)
         } finally {
@@ -121,7 +119,15 @@ class RemediationCampaignService(
         val head = repositoryBindings.resolveHead(campaign.projectId)
             ?: return RemediationCampaignTickResult(CAMPAIGN_TICK_SCAN_BLOCKED, view, "The bound repository is unavailable.")
         if (!head.clean) return RemediationCampaignTickResult(CAMPAIGN_TICK_SCAN_BLOCKED, view, "The bound repository is dirty.")
-        val key = campaignIdempotencyKey(campaign.campaignId, head.commitHash)
+        val standard = standardsStore.standards().singleOrNull {
+            it.standardId == campaign.standardId && it.revision == campaign.standardRevision && it.hash == campaign.standardHash
+        } ?: return RemediationCampaignTickResult(CAMPAIGN_TICK_STORAGE_UNAVAILABLE, view, "The campaign standard revision is unavailable.")
+        val seedScan = standardsStore.scans().single { it.scanId == campaign.seedScanId && it.hash == campaign.seedScanHash }
+        val targetScope = seedScan.effectiveStandard?.targetScope ?: StandardPolicyScope(STANDARD_SCOPE_PROJECT, campaign.projectId)
+        val authorityHash = standardsService.currentAuthorityHash(campaign.projectId, standard, targetScope)
+            ?: return RemediationCampaignTickResult(CAMPAIGN_TICK_SCAN_BLOCKED, view, "The current standards policy authority is unavailable or conflicting.")
+        val policyAuthorityHash = authorityHash.takeUnless { it == campaign.standardHash }
+        val key = campaignIdempotencyKey(campaign.campaignId, head.commitHash, policyAuthorityHash)
         store.evaluations().singleOrNull { it.idempotencyKey == key }?.let { evaluation ->
             if (evaluation.state == CAMPAIGN_IN_PROGRESS) {
                 compileNextSlice(campaign)?.let { diagnostic ->
@@ -155,13 +161,11 @@ class RemediationCampaignService(
             progressView(campaign),
             "Campaign closure requires an accepted local promotion for linked work.",
         )
-        val standard = standardsStore.standards().singleOrNull {
-            it.standardId == campaign.standardId && it.revision == campaign.standardRevision && it.hash == campaign.standardHash
-        } ?: return RemediationCampaignTickResult(CAMPAIGN_TICK_STORAGE_UNAVAILABLE, view, "The campaign standard revision is unavailable.")
         val existingScan = standardsStore.scans().singleOrNull {
-            it.projectId == campaign.projectId && it.standardHash == campaign.standardHash && it.repositoryRevision == head.commitHash
+            it.projectId == campaign.projectId && it.standardHash == campaign.standardHash && it.repositoryRevision == head.commitHash &&
+                conformanceAuthorityHash(it.standardHash, it.effectiveStandard, it.appliedExceptions) == authorityHash
         }
-        val scan = existingScan ?: standardsService.scanRevision(campaign.projectId, standard).scan
+        val scan = existingScan ?: standardsService.scanRevision(campaign.projectId, standard, targetScope).scan
             ?: return RemediationCampaignTickResult(CAMPAIGN_TICK_SCAN_BLOCKED, progressView(campaign), "The follow-up conformance scan did not complete.")
         val prior = view.evaluations.lastOrNull()?.practices?.associateBy { it.practiceId }
             ?: campaign.seedPractices.associate { seed ->
@@ -201,6 +205,7 @@ class RemediationCampaignService(
                 idempotencyKey = key,
                 recordedAt = Instant.now().toString(),
                 hash = "",
+                policyAuthorityHash = policyAuthorityHash,
             )
         )
         return runCatching { store.appendEvaluation(evaluation) }.fold(
@@ -212,6 +217,20 @@ class RemediationCampaignService(
             },
             onFailure = { RemediationCampaignTickResult(CAMPAIGN_TICK_STORAGE_UNAVAILABLE, view, it.message.orEmpty()) },
         )
+    }
+
+    private fun requiresEvaluation(view: RemediationCampaignView): Boolean {
+        if (view.state !in setOf(CAMPAIGN_CLOSED, CAMPAIGN_BLOCKED, CAMPAIGN_ESCALATED)) return true
+        val campaign = view.campaign
+        val standard = standardsStore.standards().singleOrNull {
+            it.standardId == campaign.standardId && it.revision == campaign.standardRevision && it.hash == campaign.standardHash
+        } ?: return false
+        val seedScan = standardsStore.scans().singleOrNull { it.scanId == campaign.seedScanId && it.hash == campaign.seedScanHash }
+            ?: return false
+        val targetScope = seedScan.effectiveStandard?.targetScope ?: StandardPolicyScope(STANDARD_SCOPE_PROJECT, campaign.projectId)
+        val authorityHash = standardsService.currentAuthorityHash(campaign.projectId, standard, targetScope) ?: return false
+        val currentPolicyAuthorityHash = authorityHash.takeUnless { it == campaign.standardHash }
+        return view.evaluations.lastOrNull()?.policyAuthorityHash != currentPolicyAuthorityHash
     }
 
     private fun progressView(campaign: RemediationCampaign): RemediationCampaignView {
