@@ -1,9 +1,20 @@
 package com.orchard.frontend.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +26,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -31,6 +43,8 @@ import androidx.compose.material.Slider
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
+import androidx.compose.material.TextField
+import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -53,6 +67,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.ControlConversationObjectiveRequest
 import com.orchard.frontend.network.ConversationCommandViewResponse
@@ -67,18 +82,18 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private val ConductorCanvas = Color(0xFFF3F4F1)
-private val ConductorSurface = Color(0xFFFCFCFA)
-private val ConductorInk = Color(0xFF171A18)
-private val ConductorMuted = Color(0xFF68706B)
-private val ConductorLine = Color(0xFFD8DDD8)
-private val ConductorGreen = Color(0xFF276749)
-private val ConductorGreenSoft = Color(0xFFE2EEE7)
-private val ConductorBlue = Color(0xFF315E84)
-private val ConductorBlueSoft = Color(0xFFE4EDF4)
-private val ConductorAmber = Color(0xFF8A601B)
-private val ConductorAmberSoft = Color(0xFFF5EBD6)
-private val ConductorRed = Color(0xFF9B4039)
+private val ConductorCanvas = Color(0xFFF5F5F7)
+private val ConductorSurface = Color(0xFFFFFFFF)
+private val ConductorRaised = Color(0xFFFAFAFC)
+private val ConductorInk = Color(0xFF1D1D1F)
+private val ConductorMuted = Color(0xFF6E6E73)
+private val ConductorLine = Color(0xFFE5E5EA)
+private val ConductorGreen = Color(0xFF277A57)
+private val ConductorGreenSoft = Color(0xFFEAF4EF)
+private val ConductorBlue = Color(0xFF2877C7)
+private val ConductorAmber = Color(0xFF936516)
+private val ConductorAmberSoft = Color(0xFFFAF2E3)
+private val ConductorRed = Color(0xFFB64A45)
 
 @Composable
 internal fun DurableConversationWorkspace(
@@ -194,46 +209,52 @@ internal fun DurableConversationWorkspace(
             onOpenAuthority = onOpenAuthority,
         )
         Divider(color = ConductorLine)
-        val current = projection
-        if (current == null) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                if (error == null) CircularProgressIndicator(color = ConductorGreen)
-                else Text(error.orEmpty(), color = ConductorRed)
-            }
-        } else {
-            Row(Modifier.fillMaxSize()) {
-                ObjectiveRail(
-                    objectives = current.objectives,
-                    selectedObjectiveId = selectedObjectiveId,
-                    onSelect = { selectedObjectiveId = it },
-                    onControl = ::control,
-                )
-                Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
-                Transcript(
-                    modifier = Modifier.weight(1f),
-                    messages = current.messages,
-                    selectedObjectiveId = selectedObjectiveId,
-                    prompt = prompt,
-                    error = error,
-                    isSubmitting = isSubmitting,
-                    onPromptChange = { prompt = it },
-                    onSubmit = ::submit,
-                )
-                Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
-                AuthorityRail(
-                    commands = current.commands,
-                    activities = current.activities,
-                    selectedObjectiveId = selectedObjectiveId,
-                    onAdmit = { command ->
-                        scope.launch {
-                            runCatching {
-                                val response = networkClient.admitConversationCommand(command.proposal.commandId, command.proposal.hash)
-                                projection = response.projection ?: projection
-                                if (response.diagnostic.isNotBlank()) error = response.diagnostic
-                            }.onFailure { error = it.message ?: "Command admission failed." }
-                        }
-                    },
-                )
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val objectiveRailWidth = if (maxWidth < 1_250.dp) 224.dp else 252.dp
+            val authorityRailWidth = if (maxWidth < 1_250.dp) 264.dp else 296.dp
+            val current = projection
+            if (current == null) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    if (error == null) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = ConductorGreen)
+                    else Text(error.orEmpty(), color = ConductorRed, fontSize = 13.sp)
+                }
+            } else {
+                Row(Modifier.fillMaxSize()) {
+                    ObjectiveRail(
+                        width = objectiveRailWidth,
+                        objectives = current.objectives,
+                        selectedObjectiveId = selectedObjectiveId,
+                        onSelect = { selectedObjectiveId = it },
+                        onControl = ::control,
+                    )
+                    Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
+                    Transcript(
+                        modifier = Modifier.weight(1f),
+                        messages = current.messages,
+                        selectedObjectiveId = selectedObjectiveId,
+                        prompt = prompt,
+                        error = error,
+                        isSubmitting = isSubmitting,
+                        onPromptChange = { prompt = it },
+                        onSubmit = ::submit,
+                    )
+                    Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
+                    AuthorityRail(
+                        width = authorityRailWidth,
+                        commands = current.commands,
+                        activities = current.activities,
+                        selectedObjectiveId = selectedObjectiveId,
+                        onAdmit = { command ->
+                            scope.launch {
+                                runCatching {
+                                    val response = networkClient.admitConversationCommand(command.proposal.commandId, command.proposal.hash)
+                                    projection = response.projection ?: projection
+                                    if (response.diagnostic.isNotBlank()) error = response.diagnostic
+                                }.onFailure { error = it.message ?: "Command admission failed." }
+                            }
+                        },
+                    )
+                }
             }
         }
     }
@@ -268,17 +289,17 @@ private fun ConductorHeader(
     var expanded by remember { mutableStateOf(false) }
     val selected = conversations.singleOrNull { it.conversation.conversationId == selectedConversationId }
     Row(
-        Modifier.fillMaxWidth().height(64.dp).background(ConductorSurface).padding(horizontal = 18.dp),
+        Modifier.fillMaxWidth().height(60.dp).background(ConductorSurface).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column {
-            Text("ORCHARD CONDUCTOR", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, fontSize = 13.sp)
+        Column(Modifier.widthIn(min = 220.dp, max = 360.dp)) {
+            Text("Orchard", color = ConductorInk, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
             Box {
                 Text(
                     selected?.conversation?.title ?: "Select conversation",
-                    modifier = Modifier.width(300.dp).clickable { expanded = true }.padding(top = 3.dp),
+                    modifier = Modifier.fillMaxWidth().clickable { expanded = true }.padding(top = 1.dp),
                     color = ConductorMuted,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -292,49 +313,94 @@ private fun ConductorHeader(
             }
         }
         Spacer(Modifier.weight(1f))
-        TextButton(onClick = onOpenAuthority) { Text("Authority", color = ConductorInk) }
-        IconButton(onClick = onCreate) { Icon(Icons.Default.Add, "New conversation", tint = ConductorGreen) }
-        IconButton(onClick = onRefresh, enabled = !isRefreshing) {
+        TextButton(onClick = onOpenAuthority, modifier = Modifier.height(36.dp)) {
+            Text("Authority", color = ConductorMuted, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(6.dp))
+        ToolbarIconButton(onClick = onCreate, label = "New conversation") {
+            Icon(Icons.Default.Add, "New conversation", Modifier.size(17.dp), tint = ConductorInk)
+        }
+        Spacer(Modifier.width(6.dp))
+        ToolbarIconButton(onClick = onRefresh, label = "Refresh", enabled = !isRefreshing) {
             if (isRefreshing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = ConductorGreen)
-            else Icon(Icons.Default.Refresh, "Refresh", tint = ConductorGreen)
+            else Icon(Icons.Default.Refresh, "Refresh", Modifier.size(17.dp), tint = ConductorInk)
+        }
+    }
+}
+
+@Composable
+private fun ToolbarIconButton(
+    onClick: () -> Unit,
+    label: String,
+    enabled: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.size(36.dp),
+        shape = RoundedCornerShape(8.dp),
+        color = ConductorRaised,
+        border = BorderStroke(1.dp, ConductorLine),
+    ) {
+        IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(36.dp)) {
+            Box(contentAlignment = Alignment.Center) { content() }
         }
     }
 }
 
 @Composable
 private fun ObjectiveRail(
+    width: Dp,
     objectives: List<ConversationObjectiveResponse>,
     selectedObjectiveId: Long?,
     onSelect: (Long) -> Unit,
     onControl: (ConversationObjectiveResponse, String, Int?, List<Long>?) -> Unit,
 ) {
-    Column(Modifier.width(270.dp).fillMaxHeight().background(ConductorSurface)) {
-        Text("OBJECTIVES", Modifier.padding(18.dp), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+    Column(Modifier.width(width).fillMaxHeight().background(ConductorSurface)) {
+        Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Objectives", color = ConductorInk, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            Text(objectives.size.toString(), color = ConductorMuted, fontSize = 11.sp)
+        }
         Divider(color = ConductorLine)
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             objectives.sortedWith(compareByDescending<ConversationObjectiveResponse> { it.priority }.thenBy { it.objectiveId }).forEach { objective ->
                 val selected = objective.objectiveId == selectedObjectiveId
-                Column(
-                    Modifier.fillMaxWidth().clickable { onSelect(objective.objectiveId) }
-                        .background(if (selected) ConductorGreenSoft else Color.Transparent)
-                        .padding(14.dp),
+                val background by animateColorAsState(
+                    targetValue = if (selected) ConductorGreenSoft else Color.Transparent,
+                    animationSpec = tween(180, easing = FastOutSlowInEasing),
+                    label = "objective-background",
+                )
+                Surface(
+                    modifier = Modifier.fillMaxWidth().clickable { onSelect(objective.objectiveId) }
+                        .animateContentSize(tween(220, easing = FastOutSlowInEasing)),
+                    color = background,
+                    shape = RoundedCornerShape(8.dp),
+                    border = if (selected) BorderStroke(1.dp, ConductorLine) else null,
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(7.dp).background(objectiveStateColor(objective.state), RoundedCornerShape(4.dp)))
-                        Text(objective.state.replace('_', ' '), Modifier.padding(start = 7.dp), color = objectiveStateColor(objective.state), fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.weight(1f))
-                        Text("P${objective.priority}", color = ConductorMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
-                    }
-                    Text(objective.title, Modifier.padding(top = 8.dp), color = ConductorInk, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                    Text(objective.outcome, Modifier.padding(top = 4.dp), color = ConductorMuted, fontSize = 11.sp, maxLines = if (selected) 4 else 2, overflow = TextOverflow.Ellipsis)
-                    if (selected) {
-                        ObjectiveControls(objective, objectives, onControl)
+                    Column(Modifier.padding(horizontal = 12.dp, vertical = 11.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(7.dp).background(objectiveStateColor(objective.state), RoundedCornerShape(4.dp)))
+                            Text(objective.state.replace('_', ' ').lowercase(), Modifier.padding(start = 7.dp), color = objectiveStateColor(objective.state), fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.weight(1f))
+                            Text(objective.priority.toString(), color = ConductorMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                        }
+                        Text(objective.title, Modifier.padding(top = 7.dp), color = ConductorInk, fontWeight = FontWeight.Medium, fontSize = 13.sp, lineHeight = 17.sp)
+                        Text(objective.outcome, Modifier.padding(top = 4.dp), color = ConductorMuted, fontSize = 11.sp, lineHeight = 15.sp, maxLines = if (selected) 4 else 2, overflow = TextOverflow.Ellipsis)
+                        AnimatedVisibility(
+                            visible = selected,
+                            enter = fadeIn(tween(180)) + expandVertically(tween(220)),
+                            exit = fadeOut(tween(120)) + shrinkVertically(tween(180)),
+                        ) {
+                            ObjectiveControls(objective, objectives, onControl)
+                        }
                     }
                 }
-                Divider(color = ConductorLine)
             }
             if (objectives.isEmpty()) {
-                Text("Describe an outcome in the conversation to propose the first objective.", Modifier.padding(18.dp), color = ConductorMuted, fontSize = 12.sp)
+                Text("Describe an outcome to propose the first objective.", Modifier.padding(10.dp), color = ConductorMuted, fontSize = 12.sp, lineHeight = 17.sp)
             }
         }
     }
@@ -394,7 +460,11 @@ private fun ObjectiveControls(
 
 @Composable
 private fun SmallIconAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.size(28.dp)) { Icon(icon, label, Modifier.size(15.dp), tint = ConductorGreen) }
+    Surface(shape = RoundedCornerShape(8.dp), color = ConductorRaised, border = BorderStroke(1.dp, ConductorLine)) {
+        IconButton(onClick = onClick, modifier = Modifier.size(32.dp)) {
+            Icon(icon, label, Modifier.size(15.dp), tint = ConductorGreen)
+        }
+    }
 }
 
 @Composable
@@ -408,34 +478,64 @@ private fun Transcript(
     onPromptChange: (String) -> Unit,
     onSubmit: () -> Unit,
 ) {
+    val transcriptScroll = rememberScrollState()
+    LaunchedEffect(messages.size, isSubmitting) {
+        delay(40)
+        transcriptScroll.animateScrollTo(transcriptScroll.maxValue)
+    }
     Column(modifier.fillMaxHeight().background(ConductorCanvas)) {
         Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 30.dp, vertical = 22.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(transcriptScroll).padding(horizontal = 34.dp, vertical = 26.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             messages.forEach { message -> MessageRow(message) }
             if (messages.isEmpty()) {
-                Text("Start with an outcome, a status request, or a question about current authority.", color = ConductorMuted, fontSize = 14.sp)
+                Column(Modifier.widthIn(max = 420.dp).padding(top = 28.dp)) {
+                    Text("What are we working toward?", color = ConductorInk, fontWeight = FontWeight.Medium, fontSize = 20.sp)
+                    Text("Start with an outcome, a status request, or a question about current authority.", Modifier.padding(top = 8.dp), color = ConductorMuted, fontSize = 13.sp, lineHeight = 19.sp)
+                }
             }
         }
-        if (!error.isNullOrBlank()) {
-            Text(error, Modifier.fillMaxWidth().background(ConductorAmberSoft).padding(horizontal = 18.dp, vertical = 7.dp), color = ConductorAmber, fontSize = 11.sp)
+        AnimatedVisibility(
+            visible = !error.isNullOrBlank(),
+            enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+            exit = fadeOut(tween(120)) + shrinkVertically(tween(140)),
+        ) {
+            Text(error.orEmpty(), Modifier.fillMaxWidth().background(ConductorAmberSoft).padding(horizontal = 18.dp, vertical = 8.dp), color = ConductorAmber, fontSize = 11.sp)
         }
         Divider(color = ConductorLine)
-        Row(Modifier.fillMaxWidth().background(ConductorSurface).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().background(ConductorSurface).padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             OutlinedTextField(
                 value = prompt,
                 onValueChange = onPromptChange,
-                modifier = Modifier.weight(1f).heightIn(min = 72.dp, max = 150.dp),
+                modifier = Modifier.weight(1f).heightIn(min = 56.dp, max = 132.dp),
                 placeholder = { Text(if (selectedObjectiveId == null) "Discuss or propose an objective" else "Continue objective $selectedObjectiveId", fontSize = 12.sp) },
                 enabled = !isSubmitting,
                 minLines = 2,
-                maxLines = 6,
-                shape = RoundedCornerShape(5.dp),
+                maxLines = 5,
+                shape = RoundedCornerShape(8.dp),
+                colors = TextFieldDefaults.outlinedTextFieldColors(
+                    backgroundColor = ConductorRaised,
+                    focusedBorderColor = ConductorBlue,
+                    unfocusedBorderColor = ConductorLine,
+                    cursorColor = ConductorBlue,
+                ),
             )
-            IconButton(onClick = onSubmit, enabled = prompt.isNotBlank() && !isSubmitting) {
-                if (isSubmitting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = ConductorGreen)
-                else Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = ConductorGreen)
+            val canSubmit = prompt.isNotBlank() && !isSubmitting
+            Surface(
+                modifier = Modifier.size(40.dp),
+                shape = RoundedCornerShape(8.dp),
+                color = if (canSubmit) ConductorBlue else ConductorRaised,
+                border = if (canSubmit) null else BorderStroke(1.dp, ConductorLine),
+            ) {
+                IconButton(onClick = onSubmit, enabled = canSubmit, modifier = Modifier.size(40.dp)) {
+                    if (isSubmitting) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp, color = ConductorBlue)
+                    else Icon(Icons.AutoMirrored.Filled.Send, "Send", Modifier.size(17.dp), tint = if (canSubmit) Color.White else ConductorMuted)
+                }
             }
         }
     }
@@ -445,18 +545,19 @@ private fun Transcript(
 private fun MessageRow(message: ConversationMessageResponse) {
     val user = message.role == "USER"
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
-        Column(Modifier.fillMaxWidth(0.82f)) {
+        Column(Modifier.fillMaxWidth(0.78f).widthIn(max = 720.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (user) "YOU" else "ORCHARD", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = if (user) ConductorBlue else ConductorGreen)
-                message.objectiveId?.let { Text("  OBJECTIVE $it", fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = ConductorMuted) }
+                Text(if (user) "You" else "Orchard", fontWeight = FontWeight.SemiBold, fontSize = 10.sp, color = if (user) ConductorBlue else ConductorGreen)
+                message.objectiveId?.let { Text("  Objective $it", fontSize = 9.sp, color = ConductorMuted) }
             }
             Surface(
-                color = if (user) ConductorBlueSoft else ConductorSurface,
-                shape = RoundedCornerShape(5.dp),
+                color = if (user) ConductorBlue else ConductorSurface,
+                shape = RoundedCornerShape(8.dp),
+                border = if (user) null else BorderStroke(1.dp, ConductorLine),
                 elevation = 0.dp,
                 modifier = Modifier.padding(top = 5.dp),
             ) {
-                Text(message.content, Modifier.padding(13.dp), color = ConductorInk, fontSize = 13.sp, lineHeight = 19.sp)
+                Text(message.content, Modifier.padding(horizontal = 14.dp, vertical = 11.dp), color = if (user) Color.White else ConductorInk, fontSize = 13.sp, lineHeight = 19.sp)
             }
         }
     }
@@ -464,27 +565,30 @@ private fun MessageRow(message: ConversationMessageResponse) {
 
 @Composable
 private fun AuthorityRail(
+    width: Dp,
     commands: List<ConversationCommandViewResponse>,
     activities: List<com.orchard.frontend.network.ConversationActivityResponse>,
     selectedObjectiveId: Long?,
     onAdmit: (ConversationCommandViewResponse) -> Unit,
 ) {
-    Column(Modifier.width(310.dp).fillMaxHeight().background(ConductorSurface)) {
-        Text("AUTHORITY", Modifier.padding(18.dp), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+    Column(Modifier.width(width).fillMaxHeight().background(ConductorSurface)) {
+        Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Authority", color = ConductorInk, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
         Divider(color = ConductorLine)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             val visibleCommands = commands.filter { selectedObjectiveId == null || it.proposal.objectiveId == selectedObjectiveId }
             visibleCommands.filter { it.proposal.mutation && it.admission == null }.forEach { command ->
-                Surface(color = ConductorAmberSoft, shape = RoundedCornerShape(5.dp)) {
+                Surface(color = ConductorAmberSoft, shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, ConductorLine)) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("ADMISSION REQUIRED", color = ConductorAmber, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+                        Text("Admission required", color = ConductorAmber, fontWeight = FontWeight.SemiBold, fontSize = 10.sp)
                         Text(command.proposal.capabilityId.replace('_', ' '), Modifier.padding(top = 6.dp), fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                         Text(command.proposal.payloadJson, Modifier.padding(top = 5.dp), color = ConductorMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
                         TextButton(
                             onClick = { onAdmit(command) },
                             colors = ButtonDefaults.textButtonColors(contentColor = ConductorGreen),
                             modifier = Modifier.align(Alignment.End),
-                        ) { Text("Admit exact command") }
+                        ) { Text("Admit", fontSize = 12.sp) }
                     }
                 }
             }
@@ -500,7 +604,7 @@ private fun AuthorityRail(
                 Divider(color = ConductorLine)
             }
             if (activities.isNotEmpty()) {
-                Text("RECENT ACTIVITY", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = ConductorMuted)
+                Text("Recent activity", fontWeight = FontWeight.SemiBold, fontSize = 10.sp, color = ConductorMuted)
                 activities.filter { selectedObjectiveId == null || it.objectiveId == selectedObjectiveId }.takeLast(8).reversed().forEach { activity ->
                     Column {
                         Text(activity.summary, color = ConductorInk, fontSize = 11.sp)
@@ -521,10 +625,22 @@ private fun NewConversationDialog(onDismiss: () -> Unit, onCreate: (String) -> U
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New conversation") },
-        text = { OutlinedTextField(title, { title = it }, label = { Text("Title") }, singleLine = true) },
+        text = {
+            TextField(
+                value = title,
+                onValueChange = { title = it },
+                label = { Text("Title") },
+                singleLine = true,
+                colors = TextFieldDefaults.textFieldColors(
+                    backgroundColor = Color.Transparent,
+                    focusedIndicatorColor = ConductorBlue,
+                    unfocusedIndicatorColor = ConductorLine,
+                ),
+            )
+        },
         confirmButton = { TextButton(onClick = { onCreate(title.trim()) }, enabled = title.isNotBlank()) { Text("Create") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(8.dp),
         backgroundColor = ConductorSurface,
     )
 }
