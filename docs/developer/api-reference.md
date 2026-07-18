@@ -1,0 +1,118 @@
+# API Reference
+
+The backend exposes JSON over two loopback-only Ktor servers. The Compose desktop is the primary client; the HTTP surface is not currently versioned as a public remote API.
+
+## Servers
+
+| Server | Base URL | Routes |
+| --- | --- | --- |
+| Workspace API | `http://127.0.0.1:8085` | `/api/*` except Architect chat |
+| Architect API | `http://127.0.0.1:8086` | `/api/architect/chat` |
+
+Both install `ContentNegotiation` with `kotlinx.serialization`. Decoding ignores unknown JSON keys. Request and response DTOs live beside backend routes and in the frontend typed client; inspect both before changing a contract.
+
+## Workspace and Company
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/workspace` | Complete workspace projection |
+| `GET` | `/api/company/state` | Durable company control state |
+| `GET` | `/api/company` | Company workspace projection |
+| `POST` | `/api/projects/{projectId}/company/start` | Start governed company execution |
+| `POST` | `/api/company/runs/{runId}/promotion` | Promote an accepted candidate locally |
+
+## Genesis, Design, and Repository
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/projects/{projectId}/genesis` | Record a genesis revision |
+| `POST` | `/api/projects/{projectId}/genesis/admission` | Admit an exact genesis revision |
+| `POST` | `/api/projects/{projectId}/genesis/proposal` | Generate a candidate genesis phase proposal |
+| `POST` | `/api/projects/{projectId}/design-governance` | Activate project design governance |
+| `POST` | `/api/designs` | Record a design requirement revision |
+| `POST` | `/api/designs/{designId}/admission` | Admit or reject a design |
+| `PUT` | `/api/projects/{projectId}/repository` | Bind a canonical local repository |
+
+## Definition, Planning, and Workflow
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/work-items/{workItemId}/definitions` | Record a work definition |
+| `POST` | `/api/work-items/{workItemId}/definition-proposals` | Generate a definition proposal |
+| `POST` | `/api/definition-proposals/{proposalId}/feedback` | Add proposal feedback |
+| `POST` | `/api/definition-proposals/{proposalId}/accept` | Accept a proposal, optionally with edited definition |
+| `POST` | `/api/staged-plans` | Record a staged delivery plan |
+| `POST` | `/api/staged-plan-proposals/{scopeId}/generate` | Generate a staged plan proposal |
+| `POST` | `/api/staged-plan-proposals/{proposalId}/accept` | Accept a staged plan proposal |
+| `POST` | `/api/work-items/{workItemId}/runs` | Start a workflow run |
+| `POST` | `/api/workflow-runs/{runId}/evidence` | Submit evidence |
+| `POST` | `/api/workflow-runs/{runId}/attempts` | Record an attempt |
+| `POST` | `/api/workflow-runs/{runId}/criterion-judgments` | Submit a human criterion judgment |
+| `POST` | `/api/workflow-runs/{runId}/cancel` | Cancel a run |
+
+## Repository Analysis and Coding
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/repository-analysis/plans` | List repository execution plans |
+| `POST` | `/api/repository-analysis/tick` | Run one analysis reconciliation tick |
+| `GET` | `/api/coding-worker/executions` | List coding execution records |
+| `POST` | `/api/coding-worker/tick` | Run one coding reconciliation tick |
+
+## Standards, Campaigns, and Resolution
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/projects/{projectId}/engineering-standards` | Get standards and scan projection |
+| `PUT` | `/api/projects/{projectId}/engineering-standards` | Save a new standards revision |
+| `POST` | `/api/projects/{projectId}/conformance-scans` | Scan a clean repository revision |
+| `POST` | `/api/conformance-scans/{scanId}/admission` | Admit candidate remediation backlog |
+| `GET` | `/api/projects/{projectId}/remediation-campaigns` | List campaign projections |
+| `POST` | `/api/remediation-campaigns/tick` | Run campaign/resolution reconciliation |
+| `GET` | `/api/projects/{projectId}/campaign-resolutions` | List resolution cases and decisions |
+| `POST` | `/api/campaign-resolution-cases/{caseId}/proposals` | Generate a resolution proposal |
+| `POST` | `/api/campaign-resolution-proposals/{proposalId}/admission` | Admit a resolution decision |
+
+## Models and Resources
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/model-profiles` | List execution profiles and settings |
+| `PUT` | `/api/model-profiles/{profileId}` | Update profile settings |
+| `GET` | `/api/model-providers` | Get provider catalog and policy |
+| `PUT` | `/api/model-providers` | Replace validated provider catalog |
+| `GET` | `/api/model-providers/inspection` | Inspect configured endpoints/models |
+| `GET` | `/api/machine-resources` | Get capacity, usage, and policy projection |
+| `PUT` | `/api/machine-resources/policy` | Update resource admission policy |
+
+## Architect
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/architect/chat` | Submit Architect chat input and return its snapshot |
+
+## Status Semantics
+
+Routes map domain outcomes instead of returning `200` for every result. Common meanings are:
+
+| Status | Meaning |
+| --- | --- |
+| `200 OK` | Projection, accepted update, or idempotent successful result |
+| `201 Created` | New durable record or completed candidate creation |
+| `400 Bad Request` | Request body cannot be decoded |
+| `404 Not Found` | Referenced project, work item, run, proposal, or case is absent |
+| `409 Conflict` | Stale revision, busy worker, already-decided state, drift, or illegal current-state conflict |
+| `422 Unprocessable Entity` | Decoded request violates a domain invariant |
+| `429 Too Many Requests` | Resource or concurrency admission is blocked |
+| `503 Service Unavailable` | Storage, model, telemetry, application, or verification dependency failed |
+
+Read the structured response body for the domain status and diagnostic. Clients must not infer admission or completion from the HTTP class alone.
+
+## Contract Change Checklist
+
+1. Change the owning service result and backend DTO.
+2. Update route decoding and status mapping.
+3. Update `DesktopNetworkClient` DTOs and method.
+4. Update the binder and projection where user-visible.
+5. Add backend and frontend client tests.
+6. Update this reference and the relevant user workflow.

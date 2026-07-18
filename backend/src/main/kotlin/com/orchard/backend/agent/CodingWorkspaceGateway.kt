@@ -108,7 +108,7 @@ class LocalCodingWorkspaceGateway(
             val lowerContent = content.lowercase()
             val score = queryTokens.sumOf { token ->
                 (if (lowerPath.contains(token)) 20 else 0) + (if (lowerContent.contains(token)) 1 else 0)
-            } + if (isFoundationFile(relative)) 10 else 0
+            } + foundationScore(relative)
             Triple(score, relative, content)
         }.sortedWith(compareByDescending<Triple<Int, String, String>> { it.first }.thenBy { it.second })
 
@@ -369,9 +369,10 @@ class LocalCodingWorkspaceGateway(
         }.trim()
     }
 
-    private fun isFoundationFile(path: String): Boolean {
+    private fun foundationScore(path: String): Int {
+        if (path in DOCUMENTATION_INDEX_FILES) return 20
         val name = path.substringAfterLast('/')
-        return name in FOUNDATION_FILES || path.startsWith("docs/")
+        return if (name in FOUNDATION_FILES || path.startsWith("docs/")) 10 else 0
     }
 
     private fun tokens(value: String): Set<String> = value.lowercase()
@@ -408,8 +409,11 @@ class LocalCodingWorkspaceGateway(
             "PATH", "HOME", "JAVA_HOME", "GRADLE_USER_HOME", "MAVEN_OPTS", "CARGO_HOME", "RUSTUP_HOME", "NPM_CONFIG_CACHE"
         )
         val FOUNDATION_FILES = setOf(
-            "README.md", "build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle",
+            "README.md", "ROADMAP.md", "build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle",
             "pom.xml", "Cargo.toml", "meson.build", "CMakeLists.txt", "package.json", "AGENTS.md"
+        )
+        val DOCUMENTATION_INDEX_FILES = setOf(
+            "docs/README.md", "docs/user-guide/README.md", "docs/developer/README.md"
         )
     }
 }

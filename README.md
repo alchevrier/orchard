@@ -6,6 +6,16 @@ Orchard is a local-first engineering workspace for turning natural-language inte
 
 > **Project status:** Milestone 10.0 complete - Campaign Resolution and Successor Governance. Orchard now turns blocked or escalated remediation into immutable, evidence-pinned decision cases whose Architect proposals require explicit admission before any successor work or campaign authority exists.
 
+> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The single next milestone is 10.1: Scoped Standards Overlays and Exception Authority.
+
+## Documentation
+
+- [User Guide](docs/user-guide/README.md): install, configure, operate, govern, and recover Orchard.
+- [Developer Documentation](docs/developer/README.md): architecture, development, persistence, APIs, and extension points.
+- [Architecture Decision Records](docs/adrs): accepted decisions and their consequences.
+- [Documentation Portal](docs/README.md): documentation authority and maintenance rules.
+- [Roadmap](ROADMAP.md): dependency-ordered product intent and exit evidence.
+
 ## Milestone 10.0: Campaign Resolution and Successor Governance
 
 Terminal campaigns are now governed decision points rather than dead ends. Orchard distinguishes exhausted remediation, conflicting or unknown evidence, and regressions; asks the Architect for one bounded candidate response; and preserves the human admission boundary before reopening delivery authority.
@@ -606,190 +616,36 @@ Milestone 9.3 boundaries:
 - Pack commands are bounded argv, not shell scripts, but repository builds still lack an OS-level filesystem/network sandbox.
 - Pack selection is detector-based and not yet exposed as an explicit per-Project UI setting.
 
-## Architecture
+## Quick Start
 
-```mermaid
-flowchart LR
-    UI[Compose Desktop] -->|Ktor client| API[Ktor workspace and chat APIs]
-    API --> AS[ArchitectService]
-    AS -->|Phase 0| TR[Ollama triage]
-    TR -->|Phase 2| PL[Ollama planning]
-    PL --> VA[Typed decoding and deterministic validation]
-    VA --> WS[WorkspaceStore projection]
-    WS --> FS[Checksummed journal and atomic snapshot]
-    WS --> RB[Repository binding authority]
-    RB -->|Read-only Git inspection| GR[Local Git repository]
-    WS --> WM[Workflow runs and work episodes]
-    WS --> WE[Attempts, evidence, and decisions]
-    WS --> WD[System workflows and work definitions]
-    WD --> CP[Context-bounded execution profile]
-    CP --> MB[Compatible model binding]
-    MB --> ME[Checksummed execution and satisfaction memory]
-    ME --> CP
-    WD -->|READY manifest| WM
-    WS --> SC[Staged delivery circuit]
-    AS -->|Proposal only| CSP[Circuit synthesis proposal]
-    CSP -->|Human review and acceptance| SC
-    SC -->|dependency and artifact gates| DQ[Durable dispatch queue]
-    DQ -->|priority and admission| WM
-    DQ --> WT[Isolated Git worktrees]
-    WM --> CW[Governed coding worker]
-    WM --> RA[Broad repository analysis]
-    RA -->|revision-bound execution plan| EP[Execution plan authority]
-    EP -->|target files and exact operations| CW
-    CW -->|typed file operations| WT
-    CW -->|bounded verification evidence| WE
-    CW --> MX[Worker execution journal]
-    PP[Validated toolchain policy packs] -->|pinned typed commands| CW
-    WS --> CC[Company control projection]
-    CC -->|staff assignment| CW
-    CW --> IA[Independent architecture and quality audits]
-    IA -->|evidence-bound judgment| CC
-    IA -->|violation repair| WM
-    CC -->|accepted local revision| RB
-    WM --> RC[Deterministic context recall]
-    WS -->|Serialized resource snapshot| UI
-```
-
-Orchard has two Gradle modules:
-
-- `frontend`: Compose Desktop UI, ordinary Compose state, and a typed Ktor client.
-- `backend`: Ktor servers, Architect orchestration, workflow policy, durable workspace authority, and the Ollama client.
-
-The backend exposes:
-
-- `GET http://127.0.0.1:8085/api/workspace`
-- `GET http://127.0.0.1:8085/api/company/state`
-- `GET http://127.0.0.1:8085/api/company`
-- `GET http://127.0.0.1:8085/api/repository-analysis/plans`
-- `POST http://127.0.0.1:8085/api/repository-analysis/tick`
-- `POST http://127.0.0.1:8085/api/projects/{id}/company/start`
-- `POST http://127.0.0.1:8085/api/company/runs/{id}/promotion`
-- `POST http://127.0.0.1:8086/api/architect/chat`
-- `POST http://127.0.0.1:8085/api/work-items/{id}/runs`
-- `POST http://127.0.0.1:8085/api/work-items/{id}/definitions`
-- `POST http://127.0.0.1:8085/api/workflow-runs/{id}/attempts`
-- `POST http://127.0.0.1:8085/api/workflow-runs/{id}/evidence`
-- `POST http://127.0.0.1:8085/api/workflow-runs/{id}/cancel`
-- `GET http://127.0.0.1:8085/api/coding-worker/executions`
-- `POST http://127.0.0.1:8085/api/coding-worker/tick`
-
-The chat request is `{ "prompt": "..." }` with a 4092-byte UTF-8 limit. Both APIs return the same resource envelope, including non-success chat responses such as `409`, `422`, and `503`.
-
-## Key Decisions
-
-| Area | Decision |
-| --- | --- |
-| Runtime | Use conventional Kotlin, Ktor, coroutines, and serialization. |
-| UI | Use Compose state and lifecycle-aware client disposal. |
-| LLM | Treat Ollama output as untrusted input that must pass typed decoding and deterministic validation. |
-| Multi-intent | Let the model propose at most eight operations; Kotlin assigns IDs and commits or rolls back the batch. |
-| Authority | Keep hierarchy and workflow policy outside the model. |
-| Storage | Make human-readable filesystem records authoritative; indexes and embeddings are derived. |
-| Repository | Bind canonical local Git roots by Project ID and inspect them without mutation. |
-| Workflow memory | Pin immutable context, derive lifecycle state from events, and recall scoped completed work. |
-| System workflows | Require a versioned Ready Work Definition and derive acceptance evidence before delivery admission. |
-| Workflow runtime | Execute system and delivery policy through the same start, context, executor, evidence, and signal contract. |
-| Prompts | Keep system prompts as versioned resources. |
-| Coding worker | Treat model output as typed candidate operations; Orchard owns worktree mutation, verification, evidence, and retry authority. |
-
-See [docs/adrs](docs/adrs) for the decision history and proposed filesystem intelligence, workflow, and model-routing architecture.
-
-## Requirements
-
-- Linux, macOS, or Windows with a Compose Desktop-compatible environment.
-- JDK 21 or newer. The newcomer setup installs JDK 21 LTS when Java is absent.
-- `curl` for the combined launcher readiness check.
-- Git available on the local `PATH` for repository binding and inspection.
-- Ollama on `127.0.0.1:11434` with `phi3:mini` installed.
-
-## Newcomer Setup
-
-On macOS or Linux, install the complete default local stack and compile Orchard:
+Scripted onboarding supports Linux and macOS. JDK 21, Git, and `curl` are required; Ollama is optional when using another configured provider.
 
 ```bash
 ./setup_orchard.sh
-```
-
-The setup is safe to rerun. It installs or verifies JDK 21, Git, curl, Ollama, Linux desktop libraries, and the default `phi3:mini` model, then runs the complete Gradle build. On macOS it uses Homebrew, installing Homebrew first when necessary. On Linux it supports `apt`, `dnf`, `pacman`, and `zypper`.
-
-Check a machine without changing it:
-
-```bash
-./setup_orchard.sh --check
-```
-
-Use `--skip-ollama` when onboarding directly with LM Studio or a remote OpenAI-compatible endpoint. The provider can then be configured in Orchard's execution settings.
-
-## Run
-
-Launch the complete application:
-
-```bash
 ./run_orchard.sh
 ```
 
-The launcher can be called from any directory. It starts Ollama and the backend when they are not already running, verifies the configured default model, launches the desktop application, and stops only the processes it started. Pass `--skip-ollama` or set `ORCHARD_SKIP_OLLAMA=1` when using LM Studio or a remote endpoint. Set `ORCHARD_MODEL` to override the default Ollama model.
+Use `--skip-ollama` with either script for LM Studio or another OpenAI-compatible endpoint. See [Getting Started](docs/user-guide/getting-started.md) for prerequisites, first-project admission, ports, and launcher controls.
 
-Or start each module separately.
+## Architecture
 
-Start the backend:
+Orchard has two Gradle modules:
 
-```bash
-./gradlew :backend:jvmRun --no-daemon
-```
+- `backend`: loopback-only Ktor APIs, governed services, model routing, Git operations, and checksummed local authority.
+- `frontend`: Compose Desktop projections, edit buffers, and a typed Ktor client.
 
-Start the desktop application in another terminal:
+The backend owns every authoritative transition. Model output remains candidate data until deterministic validation and any required admission. Coding, verification, independent audit, company acceptance, and local promotion remain separate authorities.
 
-```bash
-./gradlew :frontend:desktopRun --no-daemon
-```
+See [Architecture](docs/developer/architecture.md), [API Reference](docs/developer/api-reference.md), and [Persistence and Recovery](docs/developer/persistence.md) for the maintained technical reference.
 
-Compile and test without launching:
+## Build
 
 ```bash
 ./gradlew build --no-daemon
 ```
 
-Example creation sequence:
+See [Development](docs/developer/development.md) for focused test and component run commands.
 
-```text
-Create a project named Aurora.
-Create an epic named Authentication in project ID 1.
-Create a story named Email sign-in in epic ID 2.
-Create a task named Implement login form in story ID 3.
-```
+## Future Direction
 
-Dependent entities can be created atomically:
-
-```text
-Create a project named Atlas, create a story named Import market data, and create two tasks named Parse feed and Validate sequence numbers.
-```
-
-The Default Delivery workflow materializes this as `Atlas -> General -> Import market data -> Parse feed / Validate sequence numbers`. A validation failure rolls back the entire plan.
-
-## Local Data
-
-Backend startup creates the directory structure:
-
-```text
-~/.orchard/
-|-- db/
-|-- projects/
-|   `-- workspace/
-`-- rag-shared/
-```
-
-These directories are runtime state and are not part of the repository. Accepted batches append to `workspace.journal.jsonl`; compaction adds `workspace.snapshot.json`. Guided product-genesis revisions append to `project-genesis.jsonl`. Project bindings are stored in `repository-bindings.json`. Revision-bound analysis and accepted coder plans append to `repository-analysis-plans.jsonl`. Company rules, staffing, audits, escalations, acceptance, and local promotions append to `company-control.jsonl`. System workflow revisions append to `work-definitions.jsonl`. Workflow admissions append to `workflow-runs.jsonl`; attempts, evidence, decisions, and cancellations append to `workflow-events.jsonl`; completed historical episodes append to `work-episodes.jsonl`. Corrupt journal tails are moved beside their source as timestamped `*.corrupt-*.jsonl` files.
-
-## Next Milestones
-
-- Add conversational successor revisions that explain and enforce downstream invalidation after admitted product changes.
-- Export structured architectural decisions as correlated repository ADRs while retaining Orchard authority identity.
-- Add verified external Git policy sources with allowlisted identity, signed revisions, manifests, freshness limits, and onboarding attestations.
-- Define an open policy-pack format so communities can publish engineering standards, assurance packs, inspectors, and acceptance templates that organizations compose with stricter private overlays.
-- Build source-bound local RAG only from verified policy commits; retrieval remains a disposable navigation projection and every passage retains repository, revision, path, range, and content-hash provenance.
-- Add an Investigation Center whose agents gather provenance-backed logs, diagnostics, reproductions, and requirement proposals for declared system-workflow phases.
-- Derive project observations, candidate practices, and executable project workflows from evidence.
-- Add review approval, cross-run supersession, repository instruction resolution, and evidence-based model routing.
-- Implement concrete classifier, chunker, embedder, and vector-index adapters.
+Future direction is maintained only in [ROADMAP.md](ROADMAP.md). README milestone sections record delivered history; roadmap entries describe intent and do not become execution authority until they pass Orchard's existing design, admission, implementation, verification, audit, and promotion controls.
