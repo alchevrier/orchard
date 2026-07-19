@@ -15,6 +15,7 @@ import com.orchard.backend.resource.ModelResourceDemand
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.resource.TransientMachineUsagePolicyStore
 import com.orchard.backend.resource.SystemMachineCapacityMonitor
+import com.orchard.backend.resource.parseMacAvailableMemoryBytes
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
@@ -916,6 +917,39 @@ class ArchitectServiceTest {
 }
 
 class MachineResourceControllerTest {
+    @Test
+    fun macCapacityUsesReclaimableVmPagesInsteadOfJvmFreePages() {
+        val directory = createTempDirectory("orchard-mac-capacity-test")
+        try {
+            val snapshot = SystemMachineCapacityMonitor(
+                directory.resolve("missing-meminfo"),
+                directory.resolve("missing-cgroup"),
+                directory.resolve("missing-cgroup-root"),
+                directory.resolve("missing-v1-root"),
+                osName = "Mac OS X",
+                macAvailableMemoryProbe = { 24_000_000_000 },
+            ).snapshot()
+
+            assertEquals(24_000_000_000, snapshot.availableMemoryBytes)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parsesMacFreeInactiveAndSpeculativePagesAsAvailable() {
+        val vmStat = """
+            Mach Virtual Memory Statistics: (page size of 16384 bytes)
+            Pages free:                               100.
+            Pages active:                             900.
+            Pages inactive:                           200.
+            Pages speculative:                         50.
+            Pages wired down:                         300.
+        """.trimIndent()
+
+        assertEquals(350L * 16_384, parseMacAvailableMemoryBytes(vmStat))
+    }
+
     @Test
     fun observesMostRestrictiveProcessCgroupV2Ancestor() {
         val directory = createTempDirectory("orchard-cgroup-test")

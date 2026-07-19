@@ -261,13 +261,14 @@ class ModelConversationInterpreter(
         val promptTokens = estimateModelTokens(prompt)
         require(promptTokens <= profile.inputBudgetTokens) { "Conversation context budget exceeded" }
         val admission = resourceController.tryAcquire(provider.resourceDemand(profile, promptTokens))
-        val lease = admission.lease ?: error(
+        val lease = admission.lease ?: error(buildString {
             if (admission.evidence.decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE) {
-                "Conversation resource telemetry unavailable"
+                append("Conversation resource telemetry unavailable")
             } else {
-                "Conversation resource capacity unavailable"
+                append("Conversation resource capacity unavailable")
             }
-        )
+            append(": ${admission.evidence.decision} - ${admission.evidence.reason}")
+        })
         val startedAt = System.nanoTime()
         val generation = lease.use {
             provider.executeConversation(

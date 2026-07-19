@@ -6,6 +6,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -82,12 +83,18 @@ class SystemMachineCapacityMonitor(
     private val processCgroupPath: Path = Path.of("/proc/self/cgroup"),
     private val cgroupRoot: Path = Path.of("/sys/fs/cgroup"),
     private val cgroupV1MemoryRoot: Path = Path.of("/sys/fs/cgroup/memory"),
+    private val osName: String = System.getProperty("os.name").orEmpty(),
+    private val macAvailableMemoryProbe: () -> Long? = ::macAvailableMemoryBytes,
 ) : MachineCapacityMonitor {
     override fun snapshot(): MachineCapacitySnapshot {
         val operatingSystem = ManagementFactory.getOperatingSystemMXBean() as? OperatingSystemMXBean
         val memInfo = readMemInfo()
         val hostTotal = memInfo["MemTotal"] ?: operatingSystem?.totalMemorySize ?: 0
-        val hostAvailable = memInfo["MemAvailable"] ?: operatingSystem?.freeMemorySize ?: 0
+        val platformAvailable = if (osName.contains("mac", ignoreCase = true)) macAvailableMemoryProbe() else null
+        val hostAvailable = memInfo["MemAvailable"]
+            ?: platformAvailable
+            ?: operatingSystem?.freeMemorySize
+            ?: 0
         require(hostTotal > 0 && hostAvailable >= 0) { "Physical memory telemetry is unavailable" }
         val cgroupBoundaries = resolveProcessCgroupV2()?.let(::cgroupV2MemoryBoundaries)
             ?: resolveProcessCgroupV1()?.let(::cgroupV1MemoryBoundaries)
@@ -179,6 +186,31 @@ class SystemMachineCapacityMonitor(
         return boundaries
     }
 }
+
+internal fun parseMacAvailableMemoryBytes(vmStat: String): Long? {
+    val pageSize = Regex("page size of (\\d+) bytes", RegexOption.IGNORE_CASE)
+        .find(vmStat)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+    val pages = vmStat.lineSequence().mapNotNull { line ->
+        val separator = line.indexOf(':')
+        if (separator <= 0) return@mapNotNull null
+        val count = line.substring(separator + 1).trim().removeSuffix(".").toLongOrNull() ?: return@mapNotNull null
+        line.substring(0, separator).trim() to count
+    }.toMap()
+    val availablePages = listOf("Pages free", "Pages inactive", "Pages speculative")
+        .sumOf { pages[it] ?: 0L }
+    if (availablePages <= 0 || availablePages > Long.MAX_VALUE / pageSize) return null
+    return availablePages * pageSize
+}
+
+private fun macAvailableMemoryBytes(): Long? = runCatching {
+    val process = ProcessBuilder("/usr/bin/vm_stat").redirectErrorStream(true).start()
+    if (!process.waitFor(1, TimeUnit.SECONDS)) {
+        process.destroyForcibly()
+        return@runCatching null
+    }
+    if (process.exitValue() != 0) return@runCatching null
+    parseMacAvailableMemoryBytes(process.inputStream.bufferedReader().use { it.readText() })
+}.getOrNull()
 
 interface MachineUsagePolicyStore {
     fun load(): MachineUsagePolicy
