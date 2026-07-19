@@ -84,6 +84,7 @@ import com.orchard.frontend.network.ModelProfileConfigurationResponse
 import com.orchard.frontend.network.ModelProfileOverrideRequest
 import com.orchard.frontend.network.ModelProviderCatalogResponse
 import com.orchard.frontend.network.ModelEndpointInspectionResponse
+import com.orchard.frontend.network.ModelSetupRecommendationsResponse
 import com.orchard.frontend.network.MachineResourceConfigurationResponse
 import com.orchard.frontend.network.MachineUsagePolicyRequest
 import com.orchard.frontend.network.StagedDeliveryPlanSubmissionRequest
@@ -460,12 +461,14 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var modelProfileConfigurations by remember { mutableStateOf(emptyList<ModelProfileConfigurationResponse>()) }
         var modelProviderCatalog by remember { mutableStateOf<ModelProviderCatalogResponse?>(null) }
         var modelProviderInspections by remember { mutableStateOf(emptyList<ModelEndpointInspectionResponse>()) }
+        var modelSetupRecommendations by remember { mutableStateOf<ModelSetupRecommendationsResponse?>(null) }
         var machineResourceConfiguration by remember { mutableStateOf<MachineResourceConfigurationResponse?>(null) }
         var isLoadingModelSettings by remember { mutableStateOf(false) }
         var isSavingModelSettings by remember { mutableStateOf(false) }
         var isSavingMachinePolicy by remember { mutableStateOf(false) }
         var isSavingModelProvider by remember { mutableStateOf(false) }
         var isInspectingModelProvider by remember { mutableStateOf(false) }
+        var isApplyingModelPreset by remember { mutableStateOf(false) }
         var selectedProjectId by remember { mutableStateOf(0) }
         var selectedEpicId by remember { mutableStateOf(0) }
         var planningScopeId by remember { mutableStateOf(0) }
@@ -475,6 +478,22 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
         LaunchedEffect(Unit) {
             refreshWorkspace().onFailure { requestError = it.message ?: "Unable to reach Orchard." }
+            runCatching {
+                ModelSettingsBundle(
+                    networkClient.getModelProfileConfigurations(),
+                    networkClient.getMachineResourceConfiguration(),
+                    networkClient.getModelProviderCatalog(),
+                    networkClient.getModelSetupRecommendations(),
+                )
+            }.onSuccess { settings ->
+                modelProfileConfigurations = settings.profiles
+                machineResourceConfiguration = settings.resources
+                modelProviderCatalog = settings.providers
+                modelSetupRecommendations = settings.recommendations
+                val untouchedLegacySetup = settings.providers.bindings.singleOrNull()?.model == "phi3:mini" &&
+                    settings.profiles.all { it.override == null }
+                if (untouchedLegacySetup) showModelSettings = true
+            }
         }
 
         val snapshot = remember(response) { readWorkspaceSnapshot(response) }
@@ -586,15 +605,17 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             isLoadingModelSettings = true
                             scope.launch {
                                 runCatching {
-                                    Triple(
+                                    ModelSettingsBundle(
                                         networkClient.getModelProfileConfigurations(),
                                         networkClient.getMachineResourceConfiguration(),
                                         networkClient.getModelProviderCatalog(),
+                                        networkClient.getModelSetupRecommendations(),
                                     )
-                                }.onSuccess { (profiles, resources, providers) ->
-                                        modelProfileConfigurations = profiles
-                                        machineResourceConfiguration = resources
-                                        modelProviderCatalog = providers
+                                }.onSuccess { settings ->
+                                        modelProfileConfigurations = settings.profiles
+                                        machineResourceConfiguration = settings.resources
+                                        modelProviderCatalog = settings.providers
+                                        modelSetupRecommendations = settings.recommendations
                                         modelProviderInspections = emptyList()
                                         showModelSettings = true
                                     }
@@ -715,19 +736,37 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             if (showModelSettings) {
                 val resourceConfiguration = machineResourceConfiguration
                 val providerCatalog = modelProviderCatalog
-                modelProfileConfigurations.firstOrNull()?.let { configuration ->
-                    if (resourceConfiguration == null || providerCatalog == null) return@let
+                val setupRecommendations = modelSetupRecommendations
+                if (modelProfileConfigurations.isNotEmpty() && resourceConfiguration != null && providerCatalog != null && setupRecommendations != null) {
                     ModelProfileSettingsDialog(
-                        configuration = configuration,
+                        configurations = modelProfileConfigurations,
                         resourceConfiguration = resourceConfiguration,
                         providerCatalog = providerCatalog,
                         providerInspections = modelProviderInspections,
+                        setupRecommendations = setupRecommendations,
                         isSaving = isSavingModelSettings,
                         isSavingMachinePolicy = isSavingMachinePolicy,
                         isSavingModelProvider = isSavingModelProvider,
                         isInspectingModelProvider = isInspectingModelProvider,
+                        isApplyingPreset = isApplyingModelPreset,
                         onDismiss = {
-                            if (!isSavingModelSettings && !isSavingMachinePolicy && !isSavingModelProvider) showModelSettings = false
+                            if (!isSavingModelSettings && !isSavingMachinePolicy && !isSavingModelProvider && !isApplyingModelPreset) {
+                                showModelSettings = false
+                            }
+                        },
+                        onApplyPreset = { presetId ->
+                            isApplyingModelPreset = true
+                            requestError = null
+                            scope.launch {
+                                runCatching { networkClient.applyModelSetupPreset(presetId) }
+                                    .onSuccess { applied ->
+                                        modelProfileConfigurations = applied.profiles
+                                        modelProviderCatalog = applied.preset.catalog
+                                        modelProviderInspections = runCatching { networkClient.inspectModelProviders() }.getOrDefault(emptyList())
+                                    }
+                                    .onFailure { requestError = it.message ?: "Unable to apply the local model preset." }
+                                isApplyingModelPreset = false
+                            }
                         },
                         onInspectModelProvider = {
                             isInspectingModelProvider = true
@@ -1819,22 +1858,34 @@ private fun TicketCard(
     }
 }
 
+private data class ModelSettingsBundle(
+    val profiles: List<ModelProfileConfigurationResponse>,
+    val resources: MachineResourceConfigurationResponse,
+    val providers: ModelProviderCatalogResponse,
+    val recommendations: ModelSetupRecommendationsResponse,
+)
+
 @Composable
 private fun ModelProfileSettingsDialog(
-    configuration: ModelProfileConfigurationResponse,
+    configurations: List<ModelProfileConfigurationResponse>,
     resourceConfiguration: MachineResourceConfigurationResponse,
     providerCatalog: ModelProviderCatalogResponse,
     providerInspections: List<ModelEndpointInspectionResponse>,
+    setupRecommendations: ModelSetupRecommendationsResponse,
     isSaving: Boolean,
     isSavingMachinePolicy: Boolean,
     isSavingModelProvider: Boolean,
     isInspectingModelProvider: Boolean,
+    isApplyingPreset: Boolean,
     onDismiss: () -> Unit,
+    onApplyPreset: (String) -> Unit,
     onInspectModelProvider: () -> Unit,
     onSaveModelProvider: (ModelProviderCatalogResponse) -> Unit,
     onSaveMachinePolicy: (MachineUsagePolicyRequest) -> Unit,
     onSave: (ModelProfileOverrideRequest) -> Unit,
 ) {
+    var selectedProfileId by remember(configurations) { mutableStateOf(configurations.first().effectiveProfile.id) }
+    val configuration = configurations.firstOrNull { it.effectiveProfile.id == selectedProfileId } ?: configurations.first()
     val endpoint = providerCatalog.endpoints.first()
     val binding = providerCatalog.bindings.first()
     var providerPolicy by remember(providerCatalog.policy) { mutableStateOf(providerCatalog.policy) }
@@ -1847,6 +1898,9 @@ private fun ModelProfileSettingsDialog(
     var contextWindow by remember(binding.contextWindowTokens) { mutableStateOf(binding.contextWindowTokens.toString()) }
     var residentMemoryMiB by remember(binding.residentMemoryBytes) { mutableStateOf((binding.residentMemoryBytes / MEBIBYTE).toString()) }
     var providerCpuUnits by remember(binding.cpuUnits) { mutableStateOf(binding.cpuUnits.toString()) }
+    var selectedPresetId by remember(setupRecommendations.recommendedPresetId) {
+        mutableStateOf(setupRecommendations.recommendedPresetId)
+    }
     var inputBudget by remember(configuration.effectiveProfile.inputBudgetTokens) {
         mutableStateOf(configuration.effectiveProfile.inputBudgetTokens.toString())
     }
@@ -1894,6 +1948,7 @@ private fun ModelProfileSettingsDialog(
         providerMemoryBytes >= 0 && providerCpus != null && providerCpus in 1..256 && validCredentialReference &&
         !(providerPolicy == "LOCAL_ONLY" && locality == "REMOTE") && !(locality == "LOCAL" && credentialReference.isNotBlank())
     val inspection = providerInspections.firstOrNull { it.endpointId == endpoint.endpointId }
+    val selectedPreset = setupRecommendations.presets.first { it.presetId == selectedPresetId }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1908,6 +1963,43 @@ private fun ModelProfileSettingsDialog(
                 modifier = Modifier.width(520.dp).heightIn(max = 680.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                Text("RECOMMENDED LOCAL SETUP", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
+                Text(
+                    "${setupRecommendations.detectedPlatform.replace('_', ' ')} · ${formatGiB(setupRecommendations.detectedMemoryBytes)} detected",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = OrchardColors.muted,
+                )
+                SettingsChoice(
+                    "Hardware preset",
+                    selectedPreset.displayName,
+                    setupRecommendations.presets.map { it.displayName },
+                    { displayName -> selectedPresetId = setupRecommendations.presets.first { it.displayName == displayName }.presetId },
+                    !isApplyingPreset,
+                    Modifier.fillMaxWidth(),
+                )
+                Text(selectedPreset.summary, fontSize = 12.sp, color = OrchardColors.ink)
+                Text(
+                    "Stages: " + selectedPreset.profileOverrides.joinToString { profile ->
+                        val model = selectedPreset.catalog.bindings.first { it.bindingId == profile.preferredBindingId }.model
+                        "${profile.profileId.substringBeforeLast("-v1").substringAfter("bounded-").substringAfter("broad-")} → $model"
+                    },
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = OrchardColors.muted,
+                )
+                selectedPreset.setupCommands.forEach { command ->
+                    Text(command, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = OrchardColors.muted)
+                }
+                TextButton(
+                    enabled = !isApplyingPreset && !isSaving && !isSavingModelProvider,
+                    onClick = { onApplyPreset(selectedPresetId) },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    if (isApplyingPreset) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    else Text(if (selectedPresetId == setupRecommendations.recommendedPresetId) "Apply recommended setup" else "Apply selected setup")
+                }
+                Divider(color = OrchardColors.divider)
                 Text("MODEL PROVIDER", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SettingsChoice(
@@ -2125,6 +2217,14 @@ private fun ModelProfileSettingsDialog(
                 }
                 Divider(color = OrchardColors.divider)
                 Text("MODEL APERTURE", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 10.sp, color = OrchardColors.moss)
+                SettingsChoice(
+                    "Workload stage",
+                    selectedProfileId,
+                    configurations.map { it.effectiveProfile.id },
+                    { selectedProfileId = it },
+                    !isSaving,
+                    Modifier.fillMaxWidth(),
+                )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
                         value = inputBudget,

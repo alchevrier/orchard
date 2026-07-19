@@ -11,7 +11,7 @@ Required for every installation:
 - `curl` for launcher readiness checks.
 - A Compose Desktop-compatible graphical environment.
 
-For the default local model stack, install Ollama and the `phi3:mini` model. Ollama is optional when you intend to configure LM Studio or another OpenAI-compatible provider.
+For the default local model stack, install Ollama. Orchard selects and installs a model set from physical or unified memory; Ollama is optional when you intend to configure LM Studio or another OpenAI-compatible provider.
 
 ## Install the Default Local Stack
 
@@ -25,7 +25,8 @@ The script:
 
 - installs or verifies JDK 21, Git, and `curl`;
 - installs Linux desktop runtime libraries where supported;
-- installs Ollama and downloads `phi3:mini`;
+- detects classic PC or Apple silicon memory capacity;
+- installs Ollama and downloads the recommended general and coding models;
 - downloads Gradle dependencies; and
 - runs the complete build and test suite.
 
@@ -63,10 +64,12 @@ Equivalent environment controls are:
 
 ```bash
 ORCHARD_SKIP_OLLAMA=1 ./run_orchard.sh
-ORCHARD_MODEL=my-local-model ./run_orchard.sh
+ORCHARD_MODELS=qwen3:8b,qwen2.5-coder:7b ./run_orchard.sh
 ```
 
-`ORCHARD_MODEL` changes the Ollama model checked by the launcher. It does not replace the durable provider catalog by itself.
+`ORCHARD_MODELS` changes the models installed or checked by the scripts. The legacy single-model `ORCHARD_MODEL` variable remains supported. Script overrides do not replace Orchard's durable provider catalog by themselves; select the corresponding preset or customize bindings in execution settings.
+
+On first launch with an untouched legacy catalog, Orchard opens execution settings automatically. Review the detected hardware preset, apply it once, and inspect the local endpoint. Every workload stage remains independently editable afterward.
 
 ## First Project
 

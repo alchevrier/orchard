@@ -24,22 +24,35 @@ Cloud escalation is not an automatic retry after arbitrary local generation fail
 
 ## Configure Ollama
 
-The default catalog uses:
+On first launch, Orchard recommends a complete `LOCAL_ONLY` catalog and all six workload assignments from the machine's memory. The recommendation includes exact `ollama pull` commands and remains candidate configuration until you apply it.
+
+| Hardware tier | General, analysis, and audit | Coding | Notes |
+| --- | --- | --- | --- |
+| Classic PC or Apple silicon, 8-15 GiB | `qwen3:4b` | `qwen2.5-coder:3b` | Survival apertures for entry systems, including an 8 GiB MacBook Neo or Air. |
+| Classic PC or Apple silicon, 16-31 GiB | `qwen3:8b` | `qwen2.5-coder:7b` | Balanced MacBook Air/Neo and ordinary-PC default. |
+| Classic PC or Apple silicon, 32-63 GiB | `qwen3:14b` | `qwen2.5-coder:14b` | Role-specific capable default. |
+| Classic PC or Apple silicon, 64-95 GiB | `qwen3-coder:30b` | `qwen3-coder:30b` | Full default stage apertures and long-context repository work. |
+| Apple silicon, 96-127 GiB | `gpt-oss:120b` | `gpt-oss:120b` | Guarded context apertures retain operating-system headroom. |
+| Apple silicon, 128+ GiB | `gpt-oss:120b` | `gpt-oss:120b` | Expanded analysis and audit context. |
+
+Classic PC auto-detection deliberately uses total system memory and stops at the conservative 64 GiB preset because portable GPU/VRAM telemetry is not yet available. A PC with a dedicated accelerator can enter its exact model context and resource demand manually after applying the nearest safe preset.
+
+Every generated catalog uses:
 
 - endpoint `local-ollama`;
-- model `phi3:mini`;
 - strict JSON capability;
 - deterministic temperature and seed settings; and
 - `LOCAL_ONLY` policy.
 
-Install and launch the default model with the setup and run scripts, or choose another installed Ollama model:
+Install and launch the recommended models with the setup and run scripts, or override the model set explicitly:
 
 ```bash
-ORCHARD_MODEL=my-model ./setup_orchard.sh
-ORCHARD_MODEL=my-model ./run_orchard.sh
+./setup_orchard.sh
+ORCHARD_MODELS=model-a,model-b ./setup_orchard.sh
+ORCHARD_MODELS=model-a,model-b ./run_orchard.sh
 ```
 
-Then make sure the durable model binding in Orchard's execution settings names the same model and declares enough context for its assigned profile.
+`ORCHARD_MEMORY_BYTES` and `ORCHARD_PLATFORM=APPLE_SILICON|CLASSIC_PC` are diagnostic overrides for scripted deployments. Normal desktop installations should rely on detection. After a script-level model override, make sure the durable bindings name the same models and declare enough context and resident memory for their assigned profiles.
 
 ## Configure LM Studio or Another Local Compatible Server
 
@@ -69,6 +82,7 @@ Orchard currently separates reasoning by bounded profiles:
 
 | Profile | Purpose | Input / output budget |
 | --- | --- | --- |
+| `bounded-conversation-conductor-v1` | Conversational intent and capability routing | 48K / 4K |
 | `bounded-definition-reasoning-v1` | Work-definition proposals | 12K / 2K |
 | `bounded-circuit-synthesis-v1` | Staged delivery circuit proposals | 12K / 3K |
 | `bounded-coding-patch-v1` | Typed coding operations | 24K / 8K |
@@ -76,6 +90,8 @@ Orchard currently separates reasoning by bounded profiles:
 | `bounded-independent-audit-v1` | Architecture and quality audit | 64K / 4K |
 
 A binding must expose strict JSON and enough total context for the selected profile. Per-profile input/output overrides are durable configuration, but incompatible reductions can prevent routing or validation.
+
+Hardware presets resize these apertures when the default would exceed safe admission capacity. Applying a preset replaces all six assignments together; selecting a workload stage in execution settings then permits deliberate per-stage customization.
 
 ## Machine Resource Policy
 

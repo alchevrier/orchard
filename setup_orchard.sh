@@ -3,7 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_MODEL="${ORCHARD_MODEL:-phi3:mini}"
+source "$ROOT_DIR/model_defaults.sh"
+orchard_select_model_defaults
 CHECK_ONLY=0
 SKIP_MODEL=0
 
@@ -12,7 +13,8 @@ usage() {
 Usage: ./setup_orchard.sh [--check] [--skip-ollama]
 
 Install Orchard's runtime prerequisites on macOS or Linux, download the default
-Ollama model, and build the application. Existing installations are preserved.
+Ollama models for this machine, and build the application. Existing installations
+are preserved. Override selection with ORCHARD_MODELS=model-a,model-b.
 
 	--check        Report missing prerequisites without installing anything
 	--skip-ollama  Install the build toolchain without Ollama or its default model
@@ -218,8 +220,11 @@ check_prerequisites
 
 if [[ "$SKIP_MODEL" -eq 0 ]]; then
 	start_ollama
-	log "Downloading Ollama model $DEFAULT_MODEL"
-	ollama pull "$DEFAULT_MODEL"
+	log "Using model preset $ORCHARD_RECOMMENDED_PRESET"
+	for model in "${ORCHARD_RECOMMENDED_MODELS[@]}"; do
+		log "Downloading Ollama model $model"
+		ollama pull "$model"
+	done
 fi
 
 log "Building Orchard and downloading Gradle dependencies"
@@ -238,7 +243,10 @@ EOF
 if [[ "$SKIP_MODEL" -eq 0 ]]; then
 	cat <<EOF
 
-Default model:
-	$DEFAULT_MODEL
+Recommended preset:
+	$ORCHARD_RECOMMENDED_PRESET
+
+Installed models:
+	${ORCHARD_RECOMMENDED_MODELS[*]}
 EOF
 fi

@@ -183,6 +183,12 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun inspectModelProviders(): List<ModelEndpointInspectionResponse> =
         client.get("http://127.0.0.1:8085/api/model-providers/inspection").successBody()
 
+    suspend fun getModelSetupRecommendations(): ModelSetupRecommendationsResponse =
+        client.get("http://127.0.0.1:8085/api/model-setup/recommendations").successBody()
+
+    suspend fun applyModelSetupPreset(presetId: String): ModelSetupApplicationResponse =
+        client.post("http://127.0.0.1:8085/api/model-setup/presets/$presetId/apply").successBody()
+
     suspend fun getMachineResourceConfiguration(): MachineResourceConfigurationResponse =
         client.get("http://127.0.0.1:8085/api/machine-resources").successBody()
 
@@ -1377,6 +1383,34 @@ data class ModelEndpointInspectionResponse(
     val reachable: Boolean,
     val discoveredModels: List<String> = emptyList(),
     val diagnostic: String = "",
+)
+
+@Serializable
+data class ModelSetupRecommendationsResponse(
+    val detectedPlatform: String,
+    val detectedMemoryBytes: Long,
+    val recommendedPresetId: String,
+    val presets: List<ModelSetupPresetResponse>,
+)
+
+@Serializable
+data class ModelSetupPresetResponse(
+    val presetId: String,
+    val displayName: String,
+    val platform: String,
+    val minimumMemoryBytes: Long,
+    val maximumMemoryBytes: Long? = null,
+    val summary: String,
+    val catalog: ModelProviderCatalogResponse,
+    val profileOverrides: List<ModelProfileOverrideRequest>,
+    val requiredModels: List<String>,
+    val setupCommands: List<String>,
+)
+
+@Serializable
+data class ModelSetupApplicationResponse(
+    val preset: ModelSetupPresetResponse,
+    val profiles: List<ModelProfileConfigurationResponse>,
 )
 
 @Serializable

@@ -134,6 +134,34 @@ class DefinitionIntelligenceService(
         }
     }
 
+    @Synchronized
+    fun replaceProfiles(overrides: List<ModelProfileOverride>): ModelProfileUpdateResult {
+        val currentConfigurations = runCatching { profileConfigurations() }.getOrElse {
+            return ModelProfileUpdateResult(ModelProfileUpdateStatus.STORAGE_UNAVAILABLE, emptyList())
+        }
+        val defaults = DefaultModelExecutionProfiles.all().associateBy { it.id }
+        if (overrides.size != defaults.size || overrides.map { it.profileId }.toSet() != defaults.keys) {
+            return ModelProfileUpdateResult(ModelProfileUpdateStatus.PROFILE_NOT_FOUND, currentConfigurations)
+        }
+        val valid = overrides.all { override ->
+            override.inputBudgetTokens in MIN_INPUT_TOKENS..MAX_PROFILE_TOKENS &&
+                override.outputBudgetTokens in MIN_OUTPUT_TOKENS..MAX_PROFILE_TOKENS &&
+                compatibleProviders(effectiveModelExecutionProfile(defaults.getValue(override.profileId), override)).let { providers ->
+                    providers.isNotEmpty() && (
+                        override.preferredBindingId == null ||
+                            providers.any { it.bindingProfile().bindingId == override.preferredBindingId }
+                        )
+                }
+        }
+        if (!valid) return ModelProfileUpdateResult(ModelProfileUpdateStatus.NO_COMPATIBLE_BINDING, currentConfigurations)
+        return try {
+            profileSettingsStore.save(overrides)
+            ModelProfileUpdateResult(ModelProfileUpdateStatus.UPDATED, profileConfigurations())
+        } catch (_: Exception) {
+            ModelProfileUpdateResult(ModelProfileUpdateStatus.STORAGE_UNAVAILABLE, currentConfigurations)
+        }
+    }
+
     suspend fun propose(workItemId: Int, conversationCommand: ConversationCommandReference? = null): ProposalGenerationResult {
         val mutex = workItemMutexes.computeIfAbsent(workItemId) { Mutex() }
         if (!mutex.tryLock()) return result(ProposalGenerationStatus.BUSY)

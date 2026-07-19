@@ -4,7 +4,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRADLE_COMMAND="${ORCHARD_GRADLE:-$ROOT_DIR/gradlew}"
-DEFAULT_MODEL="${ORCHARD_MODEL:-phi3:mini}"
+source "$ROOT_DIR/model_defaults.sh"
+orchard_select_model_defaults
 SKIP_OLLAMA="${ORCHARD_SKIP_OLLAMA:-0}"
 backend_pid=""
 ollama_pid=""
@@ -131,10 +132,12 @@ fi
 
 if [[ "$SKIP_OLLAMA" != "1" ]]; then
 	require_command ollama
-	if ! ollama show "$DEFAULT_MODEL" >/dev/null 2>&1; then
-		echo "Ollama model $DEFAULT_MODEL is not installed. Run ./setup_orchard.sh or: ollama pull $DEFAULT_MODEL" >&2
-		exit 1
-	fi
+	for model in "${ORCHARD_RECOMMENDED_MODELS[@]}"; do
+		if ! ollama show "$model" >/dev/null 2>&1; then
+			echo "Ollama model $model is not installed for preset $ORCHARD_RECOMMENDED_PRESET. Run ./setup_orchard.sh or: ollama pull $model" >&2
+			exit 1
+		fi
+	done
 fi
 
 if curl --silent --fail http://127.0.0.1:8085/api/workspace >/dev/null 2>&1; then

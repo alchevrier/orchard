@@ -137,15 +137,18 @@ Delivered and verified:
 - Request-time bearer resolution from `env:NAME` references; API key values never enter Orchard persistence or provenance.
 - Live registry wiring for Architect, Genesis, work definition, circuit synthesis, repository analysis, coding, and company staffing.
 - Catalog retrieval/replacement and explicit model-discovery health APIs.
+- Hardware-aware classic PC and Apple silicon presets covering 8, 16, 32, 64, 96, and 128 GiB tiers with complete workload-to-model routing and admission-safe apertures.
+- First-run recommendation and one-shot application in the cockpit, followed by independent customization of every workload stage.
+- Setup and launch scripts that install and verify the complete recommended role-model set while preserving explicit model overrides.
 - Cockpit configuration for Ollama, LM Studio, other OpenAI-compatible servers, and optional remote endpoints.
 - Deterministic tests for persistence recovery, secret rejection, remote-policy rejection, both transport protocols, discovery, bearer resolution, live API replacement, and local-preferred routing.
 
 Milestone 9.7 boundaries:
 
-- The cockpit edits one active endpoint and binding; the backend catalog already supports multiple entries for role-specialized deployment.
+- The guided preset flow configures multiple role bindings; detailed provider editing still operates on one active endpoint and binding at a time.
 - Cloud escalation is capability/context fallback, not automatic retry after a local generation failure.
 - Streaming, tool calling, multimodal requests, pricing, rate-limit scheduling, OAuth, and secret-manager integrations remain future adapters.
-- Default onboarding remains Ollama at `127.0.0.1:11434` with `phi3:mini`; LM Studio uses its OpenAI-compatible base URL, normally `127.0.0.1:1234`.
+- Default onboarding uses Ollama at `127.0.0.1:11434` with machine-sized role models; LM Studio uses its OpenAI-compatible base URL, normally `127.0.0.1:1234`.
 
 ## Milestone 9.6: Repository Analysis and Execution-Plan Compilation
 

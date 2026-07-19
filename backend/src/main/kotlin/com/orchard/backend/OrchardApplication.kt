@@ -37,6 +37,8 @@ import com.orchard.backend.vector.ModelProviderCatalog
 import com.orchard.backend.vector.ModelProviderRegistry
 import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProfileUpdateStatus
+import com.orchard.backend.vector.LocalModelSetupRecommendations
+import com.orchard.backend.vector.ModelSetupApplication
 import com.orchard.backend.resource.FileMachineUsagePolicyStore
 import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.MachineUsagePolicy
@@ -781,6 +783,50 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(modelProviderRegistry.inspect())
+        }
+        get("/api/model-setup/recommendations") {
+            if (definitionIntelligence == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val capacity = runCatching { definitionIntelligence.machineResourceConfiguration().capacity }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(LocalModelSetupRecommendations.forMachine(
+                LocalModelSetupRecommendations.detectPlatform(),
+                capacity.totalMemoryBytes,
+            ))
+        }
+        post("/api/model-setup/presets/{presetId}/apply") {
+            if (definitionIntelligence == null || modelProviderRegistry == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val preset = runCatching {
+                LocalModelSetupRecommendations.resolve(call.parameters["presetId"].orEmpty())
+            }.getOrElse {
+                call.respond(HttpStatusCode.NotFound)
+                return@post
+            }
+            val previousCatalog = modelProviderRegistry.catalog()
+            val catalogUpdated = runCatching { modelProviderRegistry.update(preset.catalog) }
+            if (catalogUpdated.isFailure) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val profiles = definitionIntelligence.replaceProfiles(preset.profileOverrides)
+            if (profiles.status != ModelProfileUpdateStatus.UPDATED) {
+                runCatching { modelProviderRegistry.update(previousCatalog) }
+                val status = if (profiles.status == ModelProfileUpdateStatus.STORAGE_UNAVAILABLE) {
+                    HttpStatusCode.ServiceUnavailable
+                } else {
+                    HttpStatusCode.UnprocessableEntity
+                }
+                call.respond(status)
+                return@post
+            }
+            call.respond(ModelSetupApplication(preset, profiles.configurations))
         }
         get("/api/machine-resources") {
             if (definitionIntelligence == null) {
