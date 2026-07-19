@@ -679,7 +679,7 @@ Milestone 9.3 boundaries:
 
 ## Quick Start
 
-Scripted onboarding supports Linux and macOS. JDK 21, Git, and `curl` are required; Ollama is optional when using another configured provider.
+Scripted onboarding supports Linux and macOS. The setup script installs JDK 21+ through SDKMAN when needed and uses native package managers for the remaining prerequisites. Ollama is optional when using another configured provider.
 
 ```bash
 ./setup_orchard.sh

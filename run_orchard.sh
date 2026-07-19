@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRADLE_COMMAND="${ORCHARD_GRADLE:-$ROOT_DIR/gradlew}"
 source "$ROOT_DIR/model_defaults.sh"
+source "$ROOT_DIR/java_runtime.sh"
 orchard_select_model_defaults
 SKIP_OLLAMA="${ORCHARD_SKIP_OLLAMA:-0}"
 backend_pid=""
@@ -30,54 +31,6 @@ while [[ $# -gt 0 ]]; do
 	shift
 done
 
-java_is_supported() {
-	if ! command -v java >/dev/null 2>&1; then
-		return 1
-	fi
-	local version_line
-	version_line="$(java -version 2>&1 | head -n 1)"
-	[[ "$version_line" =~ version\ \"([0-9]+) ]] && [[ "${BASH_REMATCH[1]}" -ge 21 ]]
-}
-
-activate_java() {
-	if java_is_supported; then
-		return
-	fi
-	local brew_command=""
-	if command -v brew >/dev/null 2>&1; then
-		brew_command="$(command -v brew)"
-	elif [[ -x /opt/homebrew/bin/brew ]]; then
-		brew_command="/opt/homebrew/bin/brew"
-	elif [[ -x /usr/local/bin/brew ]]; then
-		brew_command="/usr/local/bin/brew"
-	fi
-	if [[ -n "$brew_command" ]]; then
-		local java_home
-		java_home="$($brew_command --prefix openjdk@21 2>/dev/null || true)"
-		if [[ -x "$java_home/bin/java" ]]; then
-			export JAVA_HOME="$java_home"
-			export PATH="$JAVA_HOME/bin:$PATH"
-			return
-		fi
-	fi
-	local java_candidate
-	for java_candidate in /usr/lib/jvm/java-21-openjdk*/bin/java; do
-		if [[ -x "$java_candidate" ]]; then
-			export JAVA_HOME="$(cd "$(dirname "$java_candidate")/.." && pwd)"
-			export PATH="$JAVA_HOME/bin:$PATH"
-			return
-		fi
-	done
-	if [[ "$(uname -s)" == "Darwin" ]] && [[ -x /usr/libexec/java_home ]]; then
-		local java_home
-		java_home="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
-		if [[ -x "$java_home/bin/java" ]]; then
-			export JAVA_HOME="$java_home"
-			export PATH="$JAVA_HOME/bin:$PATH"
-		fi
-	fi
-}
-
 require_command() {
 	if ! command -v "$1" >/dev/null 2>&1; then
 		echo "Missing required command: $1. Run ./setup_orchard.sh first." >&2
@@ -99,9 +52,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 cd "$ROOT_DIR"
-activate_java
+orchard_activate_java
 require_command java
-if ! java_is_supported; then
+if ! orchard_java_is_supported; then
 	echo "Orchard requires JDK 21 or newer. Run ./setup_orchard.sh first." >&2
 	exit 1
 fi

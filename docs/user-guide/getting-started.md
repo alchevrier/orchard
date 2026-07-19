@@ -6,10 +6,12 @@ The supported setup scripts target Linux and macOS.
 
 Required for every installation:
 
-- JDK 21 or newer.
 - Git on `PATH`.
 - `curl` for launcher readiness checks.
+- `zip` and `unzip` for SDKMAN.
 - A Compose Desktop-compatible graphical environment.
+
+`./setup_orchard.sh` preserves an existing JDK 21+ or installs the current stable Java through SDKMAN without modifying shell startup files. Set `ORCHARD_JAVA_CANDIDATE` to an exact SDKMAN Java identifier when a specific distribution or patch version is required.
 
 For the default local model stack, install Ollama. Orchard selects and installs a model set from physical or unified memory; Ollama is optional when you intend to configure LM Studio or another OpenAI-compatible provider.
 
@@ -23,14 +25,15 @@ From the repository root:
 
 The script:
 
-- installs or verifies JDK 21, Git, and `curl`;
+- installs or verifies Git, `curl`, `zip`, and `unzip`;
+- installs JDK 21+ through SDKMAN when no compatible Java is already available;
 - installs Linux desktop runtime libraries where supported;
 - detects classic PC or Apple silicon memory capacity;
 - installs Ollama and downloads the recommended general and coding models;
 - downloads Gradle dependencies; and
 - runs the complete build and test suite.
 
-It supports Homebrew on macOS and `apt`, `dnf`, `pacman`, or `zypper` on Linux. The script is safe to rerun.
+It uses Homebrew on macOS and `apt`, `dnf`, `pacman`, or `zypper` on Linux only for native prerequisites; Java remains SDKMAN-managed. The script is safe to rerun.
 
 Inspect prerequisites without changing the machine:
 

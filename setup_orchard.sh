@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT_DIR/model_defaults.sh"
+source "$ROOT_DIR/java_runtime.sh"
 orchard_select_model_defaults
 CHECK_ONLY=0
 SKIP_MODEL=0
@@ -14,7 +15,8 @@ Usage: ./setup_orchard.sh [--check] [--skip-ollama]
 
 Install Orchard's runtime prerequisites on macOS or Linux, download the default
 Ollama models for this machine, and build the application. Existing installations
-are preserved. Override selection with ORCHARD_MODELS=model-a,model-b.
+are preserved. Java is installed through SDKMAN when JDK 21+ is unavailable.
+Override selection with ORCHARD_MODELS=model-a,model-b.
 
 	--check        Report missing prerequisites without installing anything
 	--skip-ollama  Install the build toolchain without Ollama or its default model
@@ -60,43 +62,6 @@ activate_brew() {
 	fi
 }
 
-java_is_supported() {
-	if ! have java; then
-		return 1
-	fi
-	local version_line
-	version_line="$(java -version 2>&1 | head -n 1)"
-	[[ "$version_line" =~ version\ \"([0-9]+) ]] && [[ "${BASH_REMATCH[1]}" -ge 21 ]]
-}
-
-activate_java() {
-	if java_is_supported; then
-		return
-	fi
-	activate_brew
-	if have brew && [[ -x "$(brew --prefix openjdk@21 2>/dev/null)/bin/java" ]]; then
-		export JAVA_HOME="$(brew --prefix openjdk@21)"
-		export PATH="$JAVA_HOME/bin:$PATH"
-		return
-	fi
-	local java_candidate
-	for java_candidate in /usr/lib/jvm/java-21-openjdk*/bin/java; do
-		if [[ -x "$java_candidate" ]]; then
-			export JAVA_HOME="$(cd "$(dirname "$java_candidate")/.." && pwd)"
-			export PATH="$JAVA_HOME/bin:$PATH"
-			return
-		fi
-	done
-	if [[ "$(uname -s)" == "Darwin" ]] && [[ -x /usr/libexec/java_home ]]; then
-		local java_home
-		java_home="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
-		if [[ -x "$java_home/bin/java" ]]; then
-			export JAVA_HOME="$java_home"
-			export PATH="$JAVA_HOME/bin:$PATH"
-		fi
-	fi
-}
-
 install_homebrew() {
 	activate_brew
 	if have brew; then
@@ -113,33 +78,34 @@ install_homebrew() {
 }
 
 install_macos() {
-	install_homebrew
-	local packages=(git curl openjdk@21)
-	if [[ "$SKIP_MODEL" -eq 0 ]]; then
+	local packages=()
+	have git || packages+=(git)
+	have curl || packages+=(curl)
+	have zip || packages+=(zip)
+	have unzip || packages+=(unzip)
+	if [[ "$SKIP_MODEL" -eq 0 ]] && ! have ollama; then
 		packages+=(ollama)
 	fi
-	log "Installing ${packages[*]}"
-	brew install "${packages[@]}"
-	activate_java
+	if [[ ${#packages[@]} -gt 0 ]]; then
+		install_homebrew
+		log "Installing native prerequisites: ${packages[*]}"
+		brew install "${packages[@]}"
+	fi
 }
 
 install_linux_packages() {
-	log "Installing Git, curl, JDK, and desktop runtime libraries"
+	log "Installing Git, curl, SDKMAN prerequisites, and desktop runtime libraries"
 	if have apt-get; then
 		run_privileged apt-get update
-		if ! apt-cache show openjdk-21-jdk >/dev/null 2>&1; then
-			echo "This distribution does not provide OpenJDK 21. Install JDK 21 or newer, then rerun this script." >&2
-			exit 1
-		fi
-		run_privileged apt-get install -y openjdk-21-jdk git curl ca-certificates fontconfig libfreetype6 libx11-6 libxext6 libxi6 libxrender1 libxtst6
+		run_privileged apt-get install -y git curl zip unzip ca-certificates fontconfig libfreetype6 libx11-6 libxext6 libxi6 libxrender1 libxtst6
 	elif have dnf; then
-		run_privileged dnf install -y java-21-openjdk-devel git curl ca-certificates fontconfig freetype libX11 libXext libXi libXrender libXtst
+		run_privileged dnf install -y git curl zip unzip ca-certificates fontconfig freetype libX11 libXext libXi libXrender libXtst
 	elif have pacman; then
-		run_privileged pacman -Syu --needed --noconfirm jdk21-openjdk git curl ca-certificates fontconfig freetype2 libx11 libxext libxi libxrender libxtst
+		run_privileged pacman -Syu --needed --noconfirm git curl zip unzip ca-certificates fontconfig freetype2 libx11 libxext libxi libxrender libxtst
 	elif have zypper; then
-		run_privileged zypper --non-interactive install java-21-openjdk-devel git curl ca-certificates fontconfig libfreetype6 libX11-6 libXext6 libXi6 libXrender1 libXtst6
+		run_privileged zypper --non-interactive install git curl zip unzip ca-certificates fontconfig libfreetype6 libX11-6 libXext6 libXi6 libXrender1 libXtst6
 	else
-		echo "Unsupported Linux package manager. Install JDK 21, Git, curl, fontconfig, FreeType, and X11 desktop libraries, then rerun this script." >&2
+		echo "Unsupported Linux package manager. Install Git, curl, zip, unzip, fontconfig, FreeType, and X11 desktop libraries, then rerun this script." >&2
 		exit 1
 	fi
 }
@@ -176,12 +142,12 @@ start_ollama() {
 }
 
 check_prerequisites() {
-	activate_java
+	orchard_activate_java
 	local missing=()
-	if ! java_is_supported; then
+	if ! orchard_java_is_supported; then
 		missing+=("JDK 21+")
 	fi
-	local commands=(git curl)
+	local commands=(git curl zip unzip)
 	if [[ "$SKIP_MODEL" -eq 0 ]]; then
 		commands+=(ollama)
 	fi
@@ -215,7 +181,8 @@ case "$(uname -s)" in
 	*) echo "Orchard setup supports macOS and Linux." >&2; exit 1 ;;
 esac
 
-activate_java
+log "Ensuring JDK 21+ through SDKMAN"
+orchard_install_java
 check_prerequisites
 
 if [[ "$SKIP_MODEL" -eq 0 ]]; then
