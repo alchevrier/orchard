@@ -50,6 +50,16 @@ fun Route.conversationRoutes(conductor: ConversationConductorService) {
         val result = conductor.admitCommand(commandId, request)
         call.respond(conversationStatus(result.status), result.toApiResponse())
     }
+    post("/api/conversation-commands/{commandId}/rejection") {
+        val commandId = call.parameters["commandId"]?.toLongOrNull()
+        val request = runCatching { call.receive<RejectConversationCommandRequest>() }.getOrNull()
+        if (commandId == null || commandId <= 0 || request == null) {
+            call.respond(HttpStatusCode.BadRequest)
+            return@post
+        }
+        val result = conductor.rejectCommand(commandId, request)
+        call.respond(conversationStatus(result.status), result.toApiResponse())
+    }
     post("/api/conversation-objectives/{objectiveId}/control") {
         val objectiveId = call.parameters["objectiveId"]?.toLongOrNull()
         val request = runCatching { call.receive<ControlConversationObjectiveRequest>() }.getOrNull()

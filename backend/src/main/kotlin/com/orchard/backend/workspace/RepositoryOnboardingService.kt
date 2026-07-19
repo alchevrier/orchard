@@ -41,6 +41,29 @@ class RepositoryOnboardingService(
     private val managedRepositoriesDirectory: Path,
 ) {
     @Synchronized
+    fun findExisting(request: RepositoryOnboardingRequest): RepositoryOnboardingResult? {
+        val repositories = workspace.snapshot(MESSAGE_READY).repositories.values
+        val repository = when (request.source) {
+            REPOSITORY_SOURCE_LOCAL_FOLDER -> {
+                val source = inspectLocalRepository(request.location) ?: return null
+                repositories.singleOrNull { repository ->
+                    runCatching { Path.of(repository.path).toRealPath() }.getOrNull() == source
+                }
+            }
+            REPOSITORY_SOURCE_GIT_URL -> {
+                val source = runCatching { canonicalRemote(request.location).toString() }.getOrNull() ?: return null
+                repositories.singleOrNull { repository ->
+                    runCatching { canonicalRemote(repository.remote).toString() }.getOrNull() == source
+                }
+            }
+            else -> null
+        } ?: return null
+        val project = workspace.entities().singleOrNull { it.id == repository.projectId && it.type == ENTITY_PROJECT }
+            ?: return null
+        return RepositoryOnboardingResult(RepositoryOnboardingStatus.ONBOARDED, project, repository)
+    }
+
+    @Synchronized
     fun onboard(
         request: RepositoryOnboardingRequest,
         conversationCommand: ConversationCommandReference,

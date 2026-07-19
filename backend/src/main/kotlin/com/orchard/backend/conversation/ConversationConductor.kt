@@ -61,6 +61,9 @@ data class SubmitConversationMessageRequest(
 data class AdmitConversationCommandRequest(val commandHash: String, val actor: String = "HUMAN")
 
 @Serializable
+data class RejectConversationCommandRequest(val commandHash: String, val actor: String = "HUMAN")
+
+@Serializable
 data class ControlConversationObjectiveRequest(
     val action: String,
     val sourceMessageId: Long,
@@ -205,6 +208,10 @@ data class ConversationCapabilityResult(
 
 interface ConversationCapability {
     val descriptor: ConversationCapabilityDescriptor
+    suspend fun preflight(
+        payloadJson: String,
+        objective: ConversationObjectiveRevision?,
+    ): ConversationCapabilityResult? = null
     suspend fun reconcile(
         command: ConversationCommandProposal,
         objective: ConversationObjectiveRevision?,
@@ -313,7 +320,13 @@ class ModelConversationInterpreter(
     private companion object {
         val SYSTEM_PROMPT = """
             You are Orchard's conversational conductor. Return exactly one JSON object matching ConversationInterpretation.
+            The top-level keys are exactly speechAct, response, objective, capabilityId, payloadJson, commandId, and commandHash. Return no other top-level keys.
+            payloadJson must be null or a JSON string containing the selected capability payload, escaped as a string inside the outer object. Never return a top-level payload key or a nested payload object.
             Select only a listed speech act and capability. Never invent IDs, routes, shell commands, authority, or admission.
+            Use PROPOSE_DOMAIN_ACTION when the user directly requests a listed capability. A domain action does not require a separate objective; set objective to null unless the user explicitly proposes one.
+            A credential-free HTTP(S) Git URL is sufficient for ONBOARD_REPOSITORY: preserve it exactly as location, use source GIT_URL, derive projectTitle from the repository name, and use projectId 0 when no existing project is identified.
+            A valid onboarding response has this exact outer shape: {"speechAct":"PROPOSE_DOMAIN_ACTION","response":"Proposing repository onboarding.","objective":null,"capabilityId":"ONBOARD_REPOSITORY","payloadJson":"{\"source\":\"GIT_URL\",\"location\":\"https://github.com/example/repository\",\"projectTitle\":\"repository\",\"projectId\":0}","commandId":null,"commandHash":null}
+            The first output character must be { and the last output character must be }. Do not emit analysis or reasoning.
             Mutating domain actions are proposals only. Use ADMIT_DOMAIN_ACTION only when the user cites one exact command ID and hash.
             Use PROPOSE_OBJECTIVE for a new bounded outcome. Use CLARIFY whenever objective or authority identity is ambiguous.
             Keep response concise and distinguish observed authority from proposed action.
@@ -327,16 +340,20 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
         conversationId: Long,
         selectedObjectiveId: Long?,
         capabilities: List<ConversationCapabilityDescriptor>,
+        sourceMessage: ConversationMessage? = null,
     ): ConversationContextManifest {
         val messages = events.mapNotNull { it.message }.filter { it.conversationId == conversationId }
         val objectives = latestObjectives(events, conversationId)
         val commands = events.mapNotNull { it.command }.filter { it.conversationId == conversationId }
         val admissions = events.mapNotNull { it.admission }.associateBy { it.commandId }
         val executions = events.mapNotNull { it.execution }.groupBy { it.commandId }
+        val isolateConversationHistory = selectedObjectiveId == null &&
+            capabilities.any { it.id == CAPABILITY_ONBOARD_REPOSITORY } &&
+            sourceMessage?.let(::isExplicitRepositoryOnboardingAction) == true
         return ConversationContextManifest(
             conversationId = conversationId,
             selectedObjectiveId = selectedObjectiveId,
-            recentMessages = messages.takeLast(maxRecentMessages),
+            recentMessages = if (isolateConversationHistory) listOf(sourceMessage) else messages.takeLast(maxRecentMessages),
             objectives = objectives,
             commandStates = commands.map { command ->
                 val last = executions[command.commandId].orEmpty().maxByOrNull { it.executionId }
@@ -351,7 +368,7 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
                     last?.downstreamId,
                 )
             }.takeLast(32),
-            summaries = events.mapNotNull { it.summary }
+            summaries = if (isolateConversationHistory) emptyList() else events.mapNotNull { it.summary }
                 .filter { it.conversationId == conversationId }
                 .groupBy { it.summaryId }
                 .map { (_, revisions) -> revisions.maxBy { it.revision } },
@@ -359,6 +376,10 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
         )
     }
 }
+
+private fun isExplicitRepositoryOnboardingAction(message: ConversationMessage): Boolean =
+    ONBOARDING_ACTION.containsMatchIn(message.content) &&
+        (HTTP_REPOSITORY_SOURCE.containsMatchIn(message.content) || ABSOLUTE_REPOSITORY_SOURCE.containsMatchIn(message.content))
 
 class ConversationConductorService(
     private val store: ConversationStore,
@@ -416,7 +437,13 @@ class ConversationConductorService(
             store.events()
         }
         val objective = resolveObjective(events, conversationId, request.objectiveId)
-        val context = contextCompiler.compile(events, conversationId, objective?.objectiveId, capabilities.descriptors())
+        val context = contextCompiler.compile(
+            events,
+            conversationId,
+            objective?.objectiveId,
+            capabilities.descriptors(),
+            sourceMessage = userMessage,
+        )
         val turn = runCatching { interpreter.interpret(context, userMessage) }.getOrElse { error ->
             appendAssistant(conversationId, userMessage, objective?.objectiveId, "I could not interpret that request safely: ${error.message.orEmpty()}")
             return ConversationOperationResult(ConversationOperationStatus.MODEL_UNAVAILABLE, projection(conversationId), error.message.orEmpty())
@@ -436,8 +463,15 @@ class ConversationConductorService(
         if (command.hash != request.commandHash || request.actor.isBlank()) {
             return ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(command.conversationId), "Command hash or actor is invalid.")
         }
+        val terminal = events.mapNotNull { it.execution }.filter { it.commandId == commandId }.maxByOrNull { it.executionId }
+        if (terminal?.state == COMMAND_REJECTED) {
+            return ConversationOperationResult(
+                ConversationOperationStatus.REJECTED,
+                projection(command.conversationId),
+                "Rejected commands cannot be admitted.",
+            )
+        }
         if (events.any { it.admission?.commandId == commandId }) {
-            val terminal = events.mapNotNull { it.execution }.filter { it.commandId == commandId }.maxByOrNull { it.executionId }
             return if (terminal?.state == COMMAND_CORRELATED) {
                 ConversationOperationResult(ConversationOperationStatus.ALREADY_RECORDED, projection(command.conversationId))
             } else execute(command)
@@ -453,6 +487,37 @@ class ConversationConductorService(
             }
         }
         return execute(command)
+    }
+
+    fun rejectCommand(commandId: Long, request: RejectConversationCommandRequest): ConversationOperationResult = synchronized(authorityLock) {
+        val events = store.events()
+        val command = events.mapNotNull { it.command }.singleOrNull { it.commandId == commandId }
+            ?: return@synchronized ConversationOperationResult(ConversationOperationStatus.NOT_FOUND)
+        if (command.hash != request.commandHash || request.actor.isBlank()) {
+            return@synchronized ConversationOperationResult(
+                ConversationOperationStatus.REJECTED,
+                project(events, command.conversationId),
+                "Command hash or actor is invalid.",
+            )
+        }
+        val executions = events.mapNotNull { it.execution }.filter { it.commandId == commandId }
+        if (executions.lastOrNull()?.state == COMMAND_REJECTED) {
+            return@synchronized ConversationOperationResult(
+                ConversationOperationStatus.ALREADY_RECORDED,
+                project(events, command.conversationId),
+            )
+        }
+        if (events.any { it.admission?.commandId == commandId } || executions.isNotEmpty()) {
+            return@synchronized ConversationOperationResult(
+                ConversationOperationStatus.REJECTED,
+                project(events, command.conversationId),
+                "Only a pending unadmitted command can be rejected.",
+            )
+        }
+        appendExecutionLocked(command, COMMAND_REJECTED, diagnostic = "Rejected by ${request.actor.trim()}.")
+        val source = store.events().mapNotNull { it.message }.single { it.messageId == command.sourceMessageId }
+        appendAssistantLocked(source, command.objectiveId, "Dismissed ${command.capabilityId} proposal ${command.commandId}.")
+        ConversationOperationResult(ConversationOperationStatus.RECORDED, project(store.events(), command.conversationId))
     }
 
     suspend fun reconcilePending(): Int {
@@ -847,6 +912,20 @@ class ConversationConductorService(
             appendAssistant(source.conversationId, source, selectedObjective?.objectiveId, "Select one objective in an allowed state for $capabilityId.")
             return ConversationOperationResult(ConversationOperationStatus.AMBIGUOUS_OBJECTIVE, projection(source.conversationId))
         }
+        val payloadJson = interpretation.payloadJson?.takeIf(String::isNotBlank) ?: "{}"
+        capability.preflight(payloadJson, selectedObjective)?.let { existing ->
+            appendAssistant(source.conversationId, source, selectedObjective?.objectiveId, existing.summary)
+            appendActivity(
+                source.conversationId,
+                selectedObjective?.objectiveId,
+                if (existing.success) ACTIVITY_INFO else ACTIVITY_ATTENTION,
+                existing.summary,
+                existing.downstreamType,
+                existing.downstreamId,
+                existing.downstreamHash,
+            )
+            return ConversationOperationResult(ConversationOperationStatus.RECORDED, projection(source.conversationId))
+        }
         val command = synchronized(authorityLock) {
             val events = store.events()
             newConversationCommand(ConversationCommandProposal(
@@ -856,7 +935,7 @@ class ConversationConductorService(
                 sourceMessageId = source.messageId,
                 sourceMessageHash = source.hash,
                 capabilityId = capabilityId,
-                payloadJson = interpretation.payloadJson?.takeIf(String::isNotBlank) ?: "{}",
+                payloadJson = payloadJson,
                 mutation = capability.descriptor.mutation,
                 proposedAt = now(),
                 hash = "",
@@ -1077,3 +1156,6 @@ fun conversationAuthorityHash(value: String): String = MessageDigest.getInstance
 
 private const val SUMMARY_BATCH_SIZE = 24
 private const val SUMMARY_CONTENT_CHARS = 160
+private val ONBOARDING_ACTION = Regex("""\bonboard(?:ing)?\b""", RegexOption.IGNORE_CASE)
+private val HTTP_REPOSITORY_SOURCE = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+private val ABSOLUTE_REPOSITORY_SOURCE = Regex("""(?:^|\s)/\S+""")

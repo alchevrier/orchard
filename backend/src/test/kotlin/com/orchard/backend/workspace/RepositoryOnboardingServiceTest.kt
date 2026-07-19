@@ -83,6 +83,12 @@ class RepositoryOnboardingServiceTest {
             assertTrue(Path.of(repository.path).startsWith(managed.toRealPath()))
             assertEquals(url, repository.remote)
             Files.list(managed).use { entries -> assertEquals(1, entries.count()) }
+
+            val existing = assertNotNull(service.findExisting(
+                RepositoryOnboardingRequest(REPOSITORY_SOURCE_GIT_URL, "$url/", "Ignored duplicate title")
+            ))
+            assertEquals(first.project?.id, existing.project?.id)
+            assertEquals(repository.path, existing.repository?.path)
         } finally {
             server.stop(0)
         }

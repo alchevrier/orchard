@@ -20,6 +20,7 @@ import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 @Serializable
@@ -48,6 +49,8 @@ class CatalogModelProvider(
     private val credentialResolver: CredentialResolver = EnvironmentCredentialResolver,
     engine: HttpClientEngine? = null,
     private val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
+    private val providerDiagnosticsEnabled: Boolean = System.getenv("ORCHARD_PROVIDER_DIAGNOSTICS") == "1",
+    private val diagnosticSink: (String) -> Unit = ::println,
 ) : ModelProvider {
     private val client = if (engine == null) HttpClient(CIO) { configure() } else HttpClient(engine) { configure() }
     private val triagePrompt = loadPrompt("architect_phase0_triage.md")
@@ -217,7 +220,30 @@ class CatalogModelProvider(
         val body = response.bodyAsText()
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
-        return json.decodeFromString(body)
+        return json.decodeFromString<OllamaCatalogResponse>(body).also { decoded ->
+            if (providerDiagnosticsEnabled) {
+                diagnosticSink(
+                    "ORCHARD_PROVIDER_DIAGNOSTIC " + json.encodeToString(
+                        OllamaAttemptDiagnostic(
+                            endpointId = endpoint.endpointId,
+                            model = binding.model,
+                            httpStatus = response.status.value,
+                            responseBodyBytes = body.encodeToByteArray().size,
+                            responseLength = decoded.response.length,
+                            thinkingLength = decoded.thinking.orEmpty().length,
+                            done = decoded.done,
+                            doneReason = decoded.doneReason,
+                            promptEvalCount = decoded.promptEvalCount,
+                            evalCount = decoded.evalCount,
+                            numContext = contextWindowTokens,
+                            numPredict = maxOutputTokens,
+                            formatPresent = structured,
+                            think = false,
+                        )
+                    )
+                )
+            }
+        }
     }
 
     private fun HttpClientConfig<*>.configure() {
@@ -370,9 +396,28 @@ private data class OllamaCatalogOptions(
 private data class OllamaCatalogResponse(
     val response: String,
     val thinking: String? = null,
+    val done: Boolean? = null,
     @SerialName("done_reason") val doneReason: String? = null,
     @SerialName("prompt_eval_count") val promptEvalCount: Int? = null,
     @SerialName("eval_count") val evalCount: Int? = null,
+)
+
+@Serializable
+private data class OllamaAttemptDiagnostic(
+    val endpointId: String,
+    val model: String,
+    val httpStatus: Int,
+    val responseBodyBytes: Int,
+    val responseLength: Int,
+    val thinkingLength: Int,
+    val done: Boolean? = null,
+    val doneReason: String? = null,
+    val promptEvalCount: Int? = null,
+    val evalCount: Int? = null,
+    val numContext: Int,
+    val numPredict: Int? = null,
+    val formatPresent: Boolean,
+    val think: Boolean,
 )
 
 @Serializable

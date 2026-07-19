@@ -162,6 +162,26 @@ fun defaultConversationCapabilities(
                 )
             }
 
+            override suspend fun preflight(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+            ): ConversationCapabilityResult? {
+                val payload = runCatching { json.decodeFromString<OnboardRepositoryCapabilityPayload>(payloadJson) }.getOrNull()
+                    ?: return null
+                val existing = service.findExisting(
+                    RepositoryOnboardingRequest(payload.source, payload.location, payload.projectTitle, payload.projectId)
+                ) ?: return null
+                val project = existing.project ?: return null
+                val repository = existing.repository ?: return null
+                return success(
+                    "Repository is already onboarded as project ${project.id} (${project.title}) at ${repository.path} on ${repository.branch}. " +
+                        "No new admission is needed. Next: inspect repository for project ${project.id}, then define an objective for the work you want Orchard to perform.",
+                    "REPOSITORY_ONBOARDING",
+                    project.id.toString(),
+                    json.encodeToString(repository),
+                )
+            }
+
             override suspend fun execute(
                 payloadJson: String,
                 objective: ConversationObjectiveRevision?,
@@ -185,7 +205,8 @@ fun defaultConversationCapabilities(
                     )
                 }
                 return success(
-                    "Onboarded project ${result.project.id} (${result.project.title}) from ${payload.source}; repository is pinned at ${result.repository.path} on ${result.repository.branch}.",
+                    "Onboarded project ${result.project.id} (${result.project.title}) from ${payload.source}; repository is pinned at ${result.repository.path} on ${result.repository.branch}. " +
+                        "Next: inspect repository for project ${result.project.id}, then define an objective for the work you want Orchard to perform.",
                     "REPOSITORY_ONBOARDING",
                     result.project.id.toString(),
                     json.encodeToString(result.repository),

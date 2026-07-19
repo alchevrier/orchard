@@ -136,24 +136,32 @@ class ModelProviderCatalogTest {
     @Test
     fun `Ollama adapter retries empty JSON mode without weakening strict decoding`() = runTest {
         val requests = mutableListOf<String>()
+        val diagnostics = mutableListOf<String>()
         val engine = MockEngine { request ->
             requests += (request.body as? TextContent)?.text.orEmpty()
             if (requests.size == 1) {
                 respond(
-                    """{"response":"","done_reason":"stop","prompt_eval_count":7,"eval_count":0}""",
+                    """{"response":"","thinking":"private reasoning","done":true,"done_reason":"stop","prompt_eval_count":7,"eval_count":0}""",
                     headers = headersOf(HttpHeaders.ContentType, "application/json"),
                 )
             } else {
                 respond(
-                    """{"response":"{\"speechAct\":\"PROPOSE_DOMAIN_ACTION\",\"response\":\"Ready\"}","done_reason":"stop","prompt_eval_count":7,"eval_count":12}""",
+                    """{"response":"{\"speechAct\":\"PROPOSE_DOMAIN_ACTION\",\"response\":\"Ready\"}","thinking":"more private reasoning","done":true,"done_reason":"stop","prompt_eval_count":7,"eval_count":12}""",
                     headers = headersOf(HttpHeaders.ContentType, "application/json"),
                 )
             }
         }
         val catalog = defaultLocalModelProviderCatalog()
-        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+        val provider = CatalogModelProvider(
+            catalog.endpoints.single(),
+            catalog.bindings.single(),
+            engine = engine,
+            providerDiagnosticsEnabled = true,
+            diagnosticSink = diagnostics::add,
+        )
 
-        val generation = provider.executeConversation("onboard https://example.com/repository.git", 128, 4_096)
+        val privatePrompt = "onboard https://example.com/private-repository.git"
+        val generation = provider.executeConversation(privatePrompt, 128, 4_096)
         provider.close()
 
         assertEquals(2, requests.size)
@@ -161,6 +169,14 @@ class ModelProviderCatalogTest {
         assertFalse(requests.last().contains("\"format\""))
         assertTrue(requests.all { it.contains("\"think\":false") })
         assertTrue(generation.text.contains("PROPOSE_DOMAIN_ACTION"))
+        assertEquals(2, diagnostics.size)
+        assertTrue(diagnostics.first().contains("\"responseLength\":0"))
+        assertTrue(diagnostics.first().contains("\"thinkingLength\":17"))
+        assertTrue(diagnostics.first().contains("\"done\":true"))
+        assertTrue(diagnostics.first().contains("\"formatPresent\":true"))
+        assertTrue(diagnostics.last().contains("\"formatPresent\":false"))
+        assertTrue(diagnostics.all { it.contains("\"httpStatus\":200") && it.contains("\"think\":false") })
+        assertTrue(diagnostics.none { it.contains(privatePrompt) || it.contains("private reasoning") || it.contains("PROPOSE_DOMAIN_ACTION") })
     }
 
     @Test

@@ -10,6 +10,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -50,9 +53,12 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,6 +72,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -109,6 +116,7 @@ internal fun DurableConversationWorkspace(
     var isSubmitting by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showNewConversation by remember { mutableStateOf(false) }
+    var showOnboardRepository by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     suspend fun loadConversations(createWhenEmpty: Boolean = false) {
@@ -146,8 +154,8 @@ internal fun DurableConversationWorkspace(
         }
     }
 
-    fun submit() {
-        val content = prompt.trim()
+    fun submitMessage(message: String) {
+        val content = message.trim()
         val current = projection ?: return
         if (content.isEmpty() || isSubmitting) return
         prompt = ""
@@ -171,6 +179,8 @@ internal fun DurableConversationWorkspace(
             isSubmitting = false
         }
     }
+
+    fun submit() = submitMessage(prompt)
 
     fun control(objective: ConversationObjectiveResponse, action: String, priority: Int? = null, dependencies: List<Long>? = null) {
         scope.launch {
@@ -198,6 +208,7 @@ internal fun DurableConversationWorkspace(
             isRefreshing = isRefreshing,
             onSelect = { selectedConversationId = it; projection = null; selectedObjectiveId = null },
             onCreate = { showNewConversation = true },
+            onOnboardRepository = { showOnboardRepository = true },
             onRefresh = {
                 if (!isRefreshing) scope.launch {
                     isRefreshing = true
@@ -231,12 +242,15 @@ internal fun DurableConversationWorkspace(
                     Transcript(
                         modifier = Modifier.weight(1f),
                         messages = current.messages,
+                        commands = current.commands,
                         selectedObjectiveId = selectedObjectiveId,
                         prompt = prompt,
                         error = error,
                         isSubmitting = isSubmitting,
                         onPromptChange = { prompt = it },
                         onSubmit = ::submit,
+                        onOnboardRepository = { showOnboardRepository = true },
+                        onSuggestedAction = ::submitMessage,
                     )
                     Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
                     AuthorityRail(
@@ -251,6 +265,15 @@ internal fun DurableConversationWorkspace(
                                     projection = response.projection ?: projection
                                     if (response.diagnostic.isNotBlank()) error = response.diagnostic
                                 }.onFailure { error = it.message ?: "Command admission failed." }
+                            }
+                        },
+                        onReject = { command ->
+                            scope.launch {
+                                runCatching {
+                                    val response = networkClient.rejectConversationCommand(command.proposal.commandId, command.proposal.hash)
+                                    projection = response.projection ?: projection
+                                    if (response.diagnostic.isNotBlank()) error = response.diagnostic
+                                }.onFailure { error = it.message ?: "Command rejection failed." }
                             }
                         },
                     )
@@ -274,6 +297,19 @@ internal fun DurableConversationWorkspace(
             }
         },
     )
+    if (showOnboardRepository) OnboardRepositoryDialog(
+        onDismiss = { showOnboardRepository = false },
+        onReview = { source, location, title ->
+            showOnboardRepository = false
+            val titleClause = title.takeIf(String::isNotBlank)?.let { " as project ${it.trim()}" }.orEmpty()
+            val request = if (source == "GIT_URL") {
+                "Onboard repository from Git URL: ${location.trim()}$titleClause"
+            } else {
+                "Onboard repository from local folder: ${location.trim()}$titleClause"
+            }
+            submitMessage(request)
+        },
+    )
 }
 
 @Composable
@@ -283,6 +319,7 @@ private fun ConductorHeader(
     isRefreshing: Boolean,
     onSelect: (Long) -> Unit,
     onCreate: () -> Unit,
+    onOnboardRepository: () -> Unit,
     onRefresh: () -> Unit,
     onOpenAuthority: () -> Unit,
 ) {
@@ -292,27 +329,78 @@ private fun ConductorHeader(
         Modifier.fillMaxWidth().height(60.dp).background(ConductorSurface).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.widthIn(min = 220.dp, max = 360.dp)) {
+        Column(Modifier.width(320.dp)) {
             Text("Orchard", color = ConductorInk, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
             Box {
-                Text(
-                    selected?.conversation?.title ?: "Select conversation",
-                    modifier = Modifier.fillMaxWidth().clickable { expanded = true }.padding(top = 1.dp),
-                    color = ConductorMuted,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
+                        .background(ConductorRaised, RoundedCornerShape(6.dp))
+                        .clickable { expanded = true }
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ConversationTitleTooltip(
+                        title = selected?.conversation?.title ?: "Select conversation",
+                        modifier = Modifier.weight(1f),
+                        color = ConductorMuted,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Switch conversation",
+                        modifier = Modifier.size(16.dp),
+                        tint = ConductorMuted,
+                    )
+                }
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false },
+                    modifier = Modifier.width(420.dp),
+                ) {
                     conversations.forEach { item ->
-                        DropdownMenuItem(onClick = { expanded = false; onSelect(item.conversation.conversationId) }) {
-                            Text("${item.conversation.title}  ·  ${item.objectiveCount} objectives")
+                        val isSelected = item.conversation.conversationId == selectedConversationId
+                        DropdownMenuItem(
+                            onClick = { expanded = false; onSelect(item.conversation.conversationId) },
+                            modifier = Modifier.background(if (isSelected) ConductorGreenSoft else Color.Transparent),
+                        ) {
+                            ConversationTitleTooltip(
+                                title = item.conversation.title,
+                                modifier = Modifier.weight(1f),
+                                color = if (isSelected) ConductorGreen else ConductorInk,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                "${item.objectiveCount} objectives",
+                                color = ConductorMuted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            if (isSelected) {
+                                Icon(
+                                    Icons.Default.Check,
+                                    contentDescription = "Current conversation",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = ConductorGreen,
+                                )
+                            } else {
+                                Spacer(Modifier.size(16.dp))
+                            }
                         }
                     }
                 }
             }
         }
         Spacer(Modifier.weight(1f))
+        TextButton(onClick = onOnboardRepository, modifier = Modifier.height(36.dp)) {
+            Icon(Icons.Default.FolderOpen, null, Modifier.size(16.dp), tint = ConductorGreen)
+            Spacer(Modifier.width(6.dp))
+            Text("Onboard", color = ConductorGreen, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(6.dp))
         TextButton(onClick = onOpenAuthority, modifier = Modifier.height(36.dp)) {
             Text("Authority", color = ConductorMuted, fontSize = 12.sp)
         }
@@ -325,6 +413,44 @@ private fun ConductorHeader(
             if (isRefreshing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = ConductorGreen)
             else Icon(Icons.Default.Refresh, "Refresh", Modifier.size(17.dp), tint = ConductorInk)
         }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ConversationTitleTooltip(
+    title: String,
+    modifier: Modifier = Modifier,
+    color: Color,
+    fontWeight: FontWeight = FontWeight.Normal,
+) {
+    TooltipArea(
+        tooltip = {
+            Surface(
+                color = ConductorInk,
+                shape = RoundedCornerShape(6.dp),
+            ) {
+                Text(
+                    title,
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                )
+            }
+        },
+        modifier = modifier,
+        delayMillis = 450,
+        tooltipPlacement = TooltipPlacement.CursorPoint(offset = DpOffset(0.dp, 16.dp)),
+    ) {
+        Text(
+            title,
+            color = color,
+            fontSize = 11.sp,
+            fontWeight = fontWeight,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -471,12 +597,15 @@ private fun SmallIconAction(icon: androidx.compose.ui.graphics.vector.ImageVecto
 private fun Transcript(
     modifier: Modifier,
     messages: List<ConversationMessageResponse>,
+    commands: List<ConversationCommandViewResponse>,
     selectedObjectiveId: Long?,
     prompt: String,
     error: String?,
     isSubmitting: Boolean,
     onPromptChange: (String) -> Unit,
     onSubmit: () -> Unit,
+    onOnboardRepository: () -> Unit,
+    onSuggestedAction: (String) -> Unit,
 ) {
     val transcriptScroll = rememberScrollState()
     LaunchedEffect(messages.size, isSubmitting) {
@@ -493,6 +622,30 @@ private fun Transcript(
                 Column(Modifier.widthIn(max = 420.dp).padding(top = 28.dp)) {
                     Text("What are we working toward?", color = ConductorInk, fontWeight = FontWeight.Medium, fontSize = 20.sp)
                     Text("Start with an outcome, a status request, or a question about current authority.", Modifier.padding(top = 8.dp), color = ConductorMuted, fontSize = 13.sp, lineHeight = 19.sp)
+                    Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = onOnboardRepository) {
+                            Icon(Icons.Default.FolderOpen, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Onboard repository")
+                        }
+                        TextButton(onClick = { onSuggestedAction("Report current workspace status") }) {
+                            Text("Request status")
+                        }
+                    }
+                }
+            }
+            latestOnboardedProjectId(commands)?.let { projectId ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { onSuggestedAction("Inspect repository for project $projectId") }) {
+                        Icon(Icons.Default.Search, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Inspect repository")
+                    }
+                    TextButton(onClick = { onPromptChange("For project $projectId, I want to ") }) {
+                        Icon(Icons.Default.Add, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Define objective")
+                    }
                 }
             }
         }
@@ -570,6 +723,7 @@ private fun AuthorityRail(
     activities: List<com.orchard.frontend.network.ConversationActivityResponse>,
     selectedObjectiveId: Long?,
     onAdmit: (ConversationCommandViewResponse) -> Unit,
+    onReject: (ConversationCommandViewResponse) -> Unit,
 ) {
     Column(Modifier.width(width).fillMaxHeight().background(ConductorSurface)) {
         Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -578,10 +732,18 @@ private fun AuthorityRail(
         Divider(color = ConductorLine)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             val visibleCommands = commands.filter { selectedObjectiveId == null || it.proposal.objectiveId == selectedObjectiveId }
-            visibleCommands.filter { it.proposal.mutation && it.admission == null }.forEach { command ->
+            visibleCommands.filter {
+                it.proposal.mutation && it.admission == null && it.executions.lastOrNull()?.state != "REJECTED"
+            }.forEach { command ->
                 Surface(color = ConductorAmberSoft, shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, ConductorLine)) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("Admission required", color = ConductorAmber, fontWeight = FontWeight.SemiBold, fontSize = 10.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Admission required", color = ConductorAmber, fontWeight = FontWeight.SemiBold, fontSize = 10.sp)
+                            Spacer(Modifier.weight(1f))
+                            IconButton(onClick = { onReject(command) }, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.Close, "Dismiss proposal", Modifier.size(15.dp), tint = ConductorMuted)
+                            }
+                        }
                         Text(command.proposal.capabilityId.replace('_', ' '), Modifier.padding(top = 6.dp), fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                         Text(command.proposal.payloadJson, Modifier.padding(top = 5.dp), color = ConductorMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
                         TextButton(
@@ -592,7 +754,9 @@ private fun AuthorityRail(
                     }
                 }
             }
-            visibleCommands.filter { it.admission != null || !it.proposal.mutation }.takeLast(8).reversed().forEach { command ->
+            visibleCommands.filter {
+                it.admission != null || !it.proposal.mutation || it.executions.lastOrNull()?.state == "REJECTED"
+            }.takeLast(8).reversed().forEach { command ->
                 val execution = command.executions.lastOrNull()
                 Column {
                     Text(command.proposal.capabilityId, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = ConductorGreen)
@@ -644,6 +808,71 @@ private fun NewConversationDialog(onDismiss: () -> Unit, onCreate: (String) -> U
         backgroundColor = ConductorSurface,
     )
 }
+
+@Composable
+private fun OnboardRepositoryDialog(
+    onDismiss: () -> Unit,
+    onReview: (source: String, location: String, title: String) -> Unit,
+) {
+    var source by remember { mutableStateOf("GIT_URL") }
+    var location by remember { mutableStateOf("") }
+    var title by remember { mutableStateOf("") }
+    val validLocation = if (source == "GIT_URL") {
+        location.trim().startsWith("https://") || location.trim().startsWith("http://")
+    } else {
+        location.trim().startsWith("/") || Regex("^[A-Za-z]:[\\\\/].+").matches(location.trim())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Onboard repository") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Surface(shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, ConductorLine), color = ConductorRaised) {
+                    Row {
+                        TextButton(
+                            onClick = { source = "GIT_URL" },
+                            colors = ButtonDefaults.textButtonColors(contentColor = if (source == "GIT_URL") ConductorGreen else ConductorMuted),
+                        ) { Text("Git URL") }
+                        TextButton(
+                            onClick = { source = "LOCAL_FOLDER" },
+                            colors = ButtonDefaults.textButtonColors(contentColor = if (source == "LOCAL_FOLDER") ConductorGreen else ConductorMuted),
+                        ) { Text("Local folder") }
+                    }
+                }
+                TextField(
+                    value = location,
+                    onValueChange = { location = it },
+                    label = { Text(if (source == "GIT_URL") "Repository URL" else "Absolute folder path") },
+                    singleLine = true,
+                    colors = TextFieldDefaults.textFieldColors(backgroundColor = Color.Transparent),
+                )
+                TextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Project title (optional)") },
+                    singleLine = true,
+                    colors = TextFieldDefaults.textFieldColors(backgroundColor = Color.Transparent),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onReview(source, location.trim(), title.trim()) }, enabled = validLocation) {
+                Text("Review proposal")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        shape = RoundedCornerShape(8.dp),
+        backgroundColor = ConductorSurface,
+    )
+}
+
+internal fun latestOnboardedProjectId(commands: List<ConversationCommandViewResponse>): Int? = commands
+    .asReversed()
+    .firstNotNullOfOrNull { command ->
+        command.executions.asReversed().firstOrNull {
+            it.state == "CORRELATED" && it.downstreamType == "REPOSITORY_ONBOARDING"
+        }?.downstreamId?.toIntOrNull()
+    }
 
 private fun objectiveStateColor(state: String) = when (state) {
     "ACTIVE", "READY", "COMPLETED" -> ConductorGreen

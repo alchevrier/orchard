@@ -34,6 +34,7 @@ class ConversationConductorTest {
     fun `small onboarding turn admits actual context demand instead of full aperture`() = runBlocking {
         var admittedInputTokens = 0
         var executionContextTokens = 0
+        var executionPrompt = ""
         val provider = object : ModelProvider {
             override suspend fun triage(prompt: String): String = error("unused")
             override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
@@ -50,6 +51,7 @@ class ConversationConductorTest {
                 return ModelResourceDemand(inputTokens.toLong() + profile.outputBudgetTokens, 1)
             }
             override suspend fun executeConversation(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration {
+                executionPrompt = prompt
                 executionContextTokens = contextWindowTokens
                 return ModelGeneration("{\"speechAct\":\"INFORMATION\",\"response\":\"Ready.\"}", admittedInputTokens, 8)
             }
@@ -70,6 +72,12 @@ class ConversationConductorTest {
         assertTrue(admittedInputTokens in 1 until 26_000)
         assertEquals(admittedInputTokens + 4_000, executionContextTokens)
         assertEquals("ADMITTED", result.resourceDecision)
+        assertTrue(executionPrompt.contains("The top-level keys are exactly speechAct, response, objective, capabilityId, payloadJson, commandId, and commandHash."))
+        assertTrue(executionPrompt.contains("Never return a top-level payload key or a nested payload object."))
+        assertTrue(executionPrompt.contains("A credential-free HTTP(S) Git URL is sufficient for ONBOARD_REPOSITORY"))
+        assertTrue(executionPrompt.contains("A domain action does not require a separate objective"))
+        assertTrue(executionPrompt.contains("The first output character must be { and the last output character must be }."))
+        assertTrue(executionPrompt.contains("\"payloadJson\":\"{\\\"source\\\":\\\"GIT_URL\\\""))
     }
 
     @Test
@@ -171,6 +179,105 @@ class ConversationConductorTest {
         assertNotNull(commandView.admission)
         assertEquals(COMMAND_CORRELATED, commandView.executions.last().state)
         assertEquals("42", commandView.executions.last().downstreamId)
+    }
+
+    @Test
+    fun `capability preflight reports existing authority without proposing duplicate mutation`() = runBlocking {
+        val store = TransientConversationStore()
+        val executions = AtomicInteger()
+        val capability = object : ConversationCapability {
+            override val descriptor = ConversationCapabilityDescriptor(
+                "EXISTING_TEST",
+                "Existing authority",
+                true,
+                "{}",
+                emptySet(),
+                "TestService",
+                "EXACT_COMMAND_HASH",
+                "TEST_AUTHORITY",
+                "CANONICAL_SOURCE",
+            )
+
+            override suspend fun preflight(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+            ) = ConversationCapabilityResult(true, "Already exists. Next: inspect it.", "TEST_AUTHORITY", "42", HASH)
+
+            override suspend fun execute(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+                command: ConversationCommandProposal,
+            ): ConversationCapabilityResult {
+                executions.incrementAndGet()
+                return ConversationCapabilityResult(true, "Unexpected execution.", "TEST_AUTHORITY", "42", HASH)
+            }
+        }
+        val service = service(store, QueueInterpreter(commandTurn("EXISTING_TEST")), capability)
+        val conversationId = requireNotNull(service.create(CreateConversationRequest("Existing authority")).projection)
+            .conversation.conversationId
+
+        val result = service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest("client-existing-0001", 1, "Do it again"),
+        )
+
+        assertEquals(ConversationOperationStatus.RECORDED, result.status)
+        assertEquals(0, executions.get())
+        val projection = requireNotNull(result.projection)
+        assertTrue(projection.commands.isEmpty())
+        assertEquals("Already exists. Next: inspect it.", projection.messages.last().content)
+        assertEquals("42", projection.activities.single().authorityId)
+    }
+
+    @Test
+    fun `pending command rejection is durable and prevents later admission`() = runBlocking {
+        val store = TransientConversationStore()
+        val executions = AtomicInteger()
+        val capability = object : ConversationCapability {
+            override val descriptor = ConversationCapabilityDescriptor(
+                "REJECT_TEST",
+                "Reject test",
+                true,
+                "{}",
+                emptySet(),
+                "TestService",
+                "EXACT_COMMAND_HASH",
+                "TEST_AUTHORITY",
+                "TEST_KEY",
+            )
+
+            override suspend fun execute(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+                command: ConversationCommandProposal,
+            ): ConversationCapabilityResult {
+                executions.incrementAndGet()
+                return ConversationCapabilityResult(true, "Unexpected execution.", "TEST_AUTHORITY", "42", HASH)
+            }
+        }
+        val service = service(store, QueueInterpreter(commandTurn("REJECT_TEST")), capability)
+        val conversationId = requireNotNull(service.create(CreateConversationRequest("Reject proposal")).projection)
+            .conversation.conversationId
+        val proposed = service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest("client-reject-0001", 1, "Propose it"),
+        )
+        val command = requireNotNull(proposed.projection).commands.single().proposal
+
+        val rejected = service.rejectCommand(command.commandId, RejectConversationCommandRequest(command.hash))
+
+        assertEquals(ConversationOperationStatus.RECORDED, rejected.status)
+        assertEquals(COMMAND_REJECTED, requireNotNull(rejected.projection).commands.single().executions.last().state)
+        assertEquals("Dismissed REJECT_TEST proposal ${command.commandId}.", rejected.projection.messages.last().content)
+        assertEquals(ConversationOperationStatus.REJECTED, service.admitCommand(
+            command.commandId,
+            AdmitConversationCommandRequest(command.hash),
+        ).status)
+        assertEquals(0, executions.get())
+        assertEquals(ConversationOperationStatus.ALREADY_RECORDED, service.rejectCommand(
+            command.commandId,
+            RejectConversationCommandRequest(command.hash),
+        ).status)
     }
 
     @Test
@@ -309,6 +416,49 @@ class ConversationConductorTest {
         assertEquals(24, projection.summaries.single().sourceMessageIds.size)
         assertTrue(contexts.last().recentMessages.size <= 24)
         assertEquals(projection.summaries.single().hash, contexts.last().summaries.single().hash)
+    }
+
+    @Test
+    fun `explicit standalone onboarding isolates stale conversation history`() = runBlocking {
+        val store = TransientConversationStore()
+        val contexts = mutableListOf<ConversationContextManifest>()
+        val interpreter = ConversationInterpreter { context, _ ->
+            contexts += context
+            InterpretedConversationTurn(ConversationInterpretation(SPEECH_DISCUSS, "Recorded."))
+        }
+        val onboardingCapability = testCapability(CAPABILITY_ONBOARD_REPOSITORY, mutation = true) {
+            ConversationCapabilityResult(true, "Onboarded.", "REPOSITORY_ONBOARDING", "1", HASH)
+        }
+        val service = service(store, interpreter, onboardingCapability)
+        val conversationId = requireNotNull(service.create(CreateConversationRequest("Polluted context")).projection)
+            .conversation.conversationId
+
+        repeat(13) { index ->
+            val expectedSequence = requireNotNull(service.projection(conversationId)).messages.size + 1L
+            assertEquals(ConversationOperationStatus.RECORDED, service.submitMessage(
+                conversationId,
+                SubmitConversationMessageRequest(
+                    "client-pollution-${index.toString().padStart(4, '0')}",
+                    expectedSequence,
+                    "Failed onboarding attempt $index",
+                ),
+            ).status)
+        }
+        assertTrue(requireNotNull(service.projection(conversationId)).summaries.isNotEmpty())
+
+        val expectedSequence = requireNotNull(service.projection(conversationId)).messages.size + 1L
+        assertEquals(ConversationOperationStatus.RECORDED, service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest(
+                "client-isolated-onboarding-0001",
+                expectedSequence,
+                "Would you mind onboarding: https://github.com/alchevrier/autumn",
+            ),
+        ).status)
+
+        assertEquals(listOf("Would you mind onboarding: https://github.com/alchevrier/autumn"), contexts.last().recentMessages.map { it.content })
+        assertTrue(contexts.last().summaries.isEmpty())
+        assertTrue(contexts.last().capabilities.any { it.id == CAPABILITY_ONBOARD_REPOSITORY })
     }
 
     @Test

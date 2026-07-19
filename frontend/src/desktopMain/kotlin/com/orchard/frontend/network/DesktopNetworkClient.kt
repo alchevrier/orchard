@@ -49,6 +49,12 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
             setBody(AdmitConversationCommandRequest(commandHash))
         }.body()
 
+    suspend fun rejectConversationCommand(commandId: Long, commandHash: String): ConversationApiResponse =
+        client.post("http://127.0.0.1:8085/api/conversation-commands/$commandId/rejection") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(RejectConversationCommandRequest(commandHash))
+        }.body()
+
     suspend fun controlConversationObjective(
         objectiveId: Long,
         request: ControlConversationObjectiveRequest,
@@ -304,6 +310,7 @@ private data class ArchitectChatRequest(val prompt: String)
     val actor: String = "HUMAN",
 )
 @Serializable data class AdmitConversationCommandRequest(val commandHash: String, val actor: String = "HUMAN")
+@Serializable data class RejectConversationCommandRequest(val commandHash: String, val actor: String = "HUMAN")
 @Serializable data class ControlConversationObjectiveRequest(
     val action: String,
     val sourceMessageId: Long,
