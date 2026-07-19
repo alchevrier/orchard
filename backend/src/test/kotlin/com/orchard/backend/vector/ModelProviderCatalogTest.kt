@@ -16,6 +16,7 @@ import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
 import io.ktor.server.testing.testApplication
 import java.nio.file.Files
+import java.security.MessageDigest
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -39,6 +40,23 @@ class ModelProviderCatalogTest {
         assertEquals(PROVIDER_POLICY_LOCAL_ONLY, catalog.policy)
         assertEquals(PROVIDER_PROTOCOL_OLLAMA_NATIVE, catalog.endpoints.single().protocol)
         assertFalse(Files.readString(directory.resolve("model-provider-catalog.json")).contains("apiKey", ignoreCase = true))
+    }
+
+    @Test
+    fun `catalog recovers legacy checksum before command provenance fields`() {
+        val directory = createTempDirectory("orchard-legacy-provider-catalog-")
+        val compactCatalog = """{"policy":"LOCAL_ONLY","endpoints":[{"endpointId":"local-ollama","displayName":"Local Ollama","protocol":"OLLAMA_NATIVE","baseUrl":"http://127.0.0.1:11434","locality":"LOCAL","credentialReference":null,"enabled":true}],"bindings":[{"bindingId":"ollama:phi3-mini:json:t0:s42","endpointId":"local-ollama","model":"phi3:mini","contextWindowTokens":131072,"capabilities":["STRICT_JSON"],"modelDigest":null,"residentMemoryBytes":2400000000,"cpuUnits":1,"configuration":{"temperature":"0","seed":"42"}}]}"""
+        val checksum = MessageDigest.getInstance("SHA-256").digest(compactCatalog.toByteArray())
+            .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+        Files.writeString(
+            directory.resolve("model-provider-catalog.json"),
+            """{"version":1,"catalog":$compactCatalog,"checksum":"$checksum"}""",
+        )
+
+        val recovered = FileModelProviderCatalogStore(directory).load()
+
+        assertEquals("phi3:mini", recovered.bindings.single().model)
+        assertEquals(null, recovered.bindings.single().conversationCommand)
     }
 
     @Test

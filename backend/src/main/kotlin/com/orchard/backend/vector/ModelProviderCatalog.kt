@@ -1,5 +1,6 @@
 package com.orchard.backend.vector
 
+import com.orchard.backend.workspace.ConversationCommandReference
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -11,6 +12,7 @@ import java.security.MessageDigest
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 const val PROVIDER_PROTOCOL_OLLAMA_NATIVE = "OLLAMA_NATIVE"
 const val PROVIDER_PROTOCOL_OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE"
@@ -30,6 +32,7 @@ data class ModelEndpointDefinition(
     val locality: String,
     val credentialReference: String? = null,
     val enabled: Boolean = true,
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 @Serializable
@@ -43,6 +46,7 @@ data class CatalogModelBinding(
     val residentMemoryBytes: Long = 0,
     val cpuUnits: Int = 1,
     val configuration: Map<String, String> = emptyMap(),
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 @Serializable
@@ -82,10 +86,12 @@ class FileModelProviderCatalogStore(private val directory: Path) : ModelProvider
             save(catalog)
             return catalog
         }
-        val envelope = runCatching { json.decodeFromString<ModelProviderCatalogEnvelope>(Files.readString(path)) }
+        val encoded = Files.readString(path)
+        val envelope = runCatching { json.decodeFromString<ModelProviderCatalogEnvelope>(encoded) }
             .getOrElse { throw IllegalStateException("Cannot decode model provider catalog at $path", it) }
         require(envelope.version == FORMAT_VERSION) { "Unsupported model provider catalog version ${envelope.version}" }
-        require(envelope.checksum == checksum(compactJson.encodeToString(envelope.catalog))) {
+        val serializedCatalog = json.parseToJsonElement(encoded).jsonObject.getValue("catalog").toString()
+        require(envelope.checksum == checksum(serializedCatalog)) {
             "Model provider catalog checksum mismatch at $path"
         }
         validateModelProviderCatalog(envelope.catalog)
@@ -162,6 +168,7 @@ fun validateModelProviderCatalog(catalog: ModelProviderCatalog) {
         require(endpoint.credentialReference == null || endpoint.locality == PROVIDER_LOCALITY_REMOTE) {
             "Local endpoints cannot declare credentials"
         }
+        require(validCommandReference(endpoint.conversationCommand)) { "Model endpoint command reference is invalid" }
     }
     val endpoints = catalog.endpoints.associateBy { it.endpointId }
     catalog.bindings.forEach { binding ->
@@ -173,11 +180,15 @@ fun validateModelProviderCatalog(catalog: ModelProviderCatalog) {
         require(binding.configuration.keys.none { it.contains("key", true) || it.contains("secret", true) || it.contains("token", true) }) {
             "Model binding configuration cannot contain secrets"
         }
+        require(validCommandReference(binding.conversationCommand)) { "Model binding command reference is invalid" }
     }
     if (catalog.policy == PROVIDER_POLICY_LOCAL_ONLY) require(catalog.endpoints.filter { it.enabled }.all { it.locality == PROVIDER_LOCALITY_LOCAL }) {
         "Local-only policy cannot enable remote endpoints"
     }
 }
+
+private fun validCommandReference(reference: ConversationCommandReference?): Boolean = reference == null ||
+    (reference.commandId > 0 && reference.commandHash.matches(Regex("[0-9a-f]{64}")) && reference.capabilityId.matches(ID))
 
 @Serializable
 private data class ModelProviderCatalogEnvelope(

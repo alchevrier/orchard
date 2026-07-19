@@ -9,6 +9,14 @@ import com.orchard.backend.company.CompanyCircuitService
 import com.orchard.backend.company.CompanyCircuitStatus
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
+import com.orchard.backend.vector.CatalogModelBinding
+import com.orchard.backend.vector.ModelEndpointDefinition
+import com.orchard.backend.vector.ModelEndpointInspection
+import com.orchard.backend.vector.ModelProfileConfiguration
+import com.orchard.backend.vector.ModelProfileOverride
+import com.orchard.backend.vector.ModelProfileUpdateStatus
+import com.orchard.backend.vector.ModelProviderCatalog
+import com.orchard.backend.vector.ModelProviderRegistry
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
@@ -17,6 +25,9 @@ import com.orchard.backend.workspace.GENESIS_READY
 import com.orchard.backend.workspace.ProjectGenesisStatus
 import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.RepositoryBindStatus
+import com.orchard.backend.workspace.RepositoryOnboardingRequest
+import com.orchard.backend.workspace.RepositoryOnboardingService
+import com.orchard.backend.workspace.RepositoryOnboardingStatus
 import com.orchard.backend.workspace.StagedPlanStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
@@ -43,6 +54,10 @@ const val CAPABILITY_PROMOTE_RUN = "PROMOTE_RUN"
 const val CAPABILITY_INSPECT_PROJECT_GENESIS = "INSPECT_PROJECT_GENESIS"
 const val CAPABILITY_ADVANCE_PROJECT_GENESIS = "ADVANCE_PROJECT_GENESIS"
 const val CAPABILITY_ADMIT_PROJECT_GENESIS = "ADMIT_PROJECT_GENESIS"
+const val CAPABILITY_ONBOARD_REPOSITORY = "ONBOARD_REPOSITORY"
+const val CAPABILITY_INSPECT_MODEL_CONFIGURATION = "INSPECT_MODEL_CONFIGURATION"
+const val CAPABILITY_REGISTER_MODEL = "REGISTER_MODEL"
+const val CAPABILITY_ASSIGN_MODEL_PROFILE = "ASSIGN_MODEL_PROFILE"
 
 @Serializable data class ProjectCapabilityPayload(val projectId: Int)
 @Serializable data class RepositoryCapabilityPayload(val projectId: Int, val path: String)
@@ -62,6 +77,28 @@ const val CAPABILITY_ADMIT_PROJECT_GENESIS = "ADMIT_PROJECT_GENESIS"
     val projectId: Int,
     val submission: ProjectGenesisSubmission,
 )
+@Serializable data class OnboardRepositoryCapabilityPayload(
+    val source: String,
+    val location: String,
+    val projectTitle: String,
+    val projectId: Int = 0,
+)
+@Serializable data class RegisterModelCapabilityPayload(
+    val endpoint: ModelEndpointDefinition,
+    val binding: CatalogModelBinding,
+    val providerPolicy: String? = null,
+)
+@Serializable data class AssignModelProfileCapabilityPayload(
+    val profileId: String,
+    val preferredBindingId: String,
+    val inputBudgetTokens: Int? = null,
+    val outputBudgetTokens: Int? = null,
+)
+@Serializable data class ModelConfigurationInspection(
+    val catalog: ModelProviderCatalog,
+    val profiles: List<ModelProfileConfiguration>,
+    val endpoints: List<ModelEndpointInspection>,
+)
 
 fun defaultConversationCapabilities(
     workspace: WorkspaceStore,
@@ -69,6 +106,8 @@ fun defaultConversationCapabilities(
     circuitIntelligence: CircuitIntelligenceService? = null,
     companyControl: CompanyControlService? = null,
     companyCircuit: CompanyCircuitService? = null,
+    repositoryOnboarding: RepositoryOnboardingService? = null,
+    modelProviderRegistry: ModelProviderRegistry? = null,
     json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
 ): ConversationCapabilityRegistry = ConversationCapabilityRegistry(listOfNotNull(
     object : ConversationCapability {
@@ -96,6 +135,253 @@ fun defaultConversationCapabilities(
             )
         }
     },
+    repositoryOnboarding?.let { service ->
+        object : ConversationCapability {
+            override val descriptor = descriptor(
+                CAPABILITY_ONBOARD_REPOSITORY,
+                "Create or select a project and bind either an existing local Git folder or a safely cloned HTTP(S) Git repository. Cloning never executes repository code, submodules, or LFS smudging.",
+                mutation = true,
+                payloadSchema = """{"source":"LOCAL_FOLDER|GIT_URL","location":"absolute folder or HTTP(S) Git URL without credentials","projectTitle":"title required for a new project","projectId":"existing project ID or 0 to create"}""",
+                owningService = "RepositoryOnboardingService",
+                resultType = "REPOSITORY_ONBOARDING",
+                idempotencyStrategy = "COMMAND_REFERENCE_AND_CANONICAL_SOURCE",
+            )
+
+            override suspend fun reconcile(
+                command: ConversationCommandProposal,
+                objective: ConversationObjectiveRevision?,
+            ): ConversationCapabilityResult? {
+                val project = workspace.entities().singleOrNull { it.conversationCommand == commandReference(command) }
+                    ?: return null
+                val repository = workspace.snapshot(MESSAGE_READY).repositories[project.id] ?: return null
+                return success(
+                    "Recovered repository onboarding for project ${project.id} at ${repository.path}.",
+                    "REPOSITORY_ONBOARDING",
+                    project.id.toString(),
+                    json.encodeToString(repository),
+                )
+            }
+
+            override suspend fun execute(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+                command: ConversationCommandProposal,
+            ): ConversationCapabilityResult {
+                val payload = json.decodeFromString<OnboardRepositoryCapabilityPayload>(payloadJson)
+                require(payload.location.isNotBlank() && payload.projectId >= 0)
+                require(
+                    objective?.projectId == null ||
+                        (payload.projectId > 0 && objective.projectId == payload.projectId)
+                ) { "Repository onboarding crossed the selected objective's project authority." }
+                val result = service.onboard(
+                    RepositoryOnboardingRequest(payload.source, payload.location, payload.projectTitle, payload.projectId),
+                    commandReference(command),
+                )
+                if (result.status != RepositoryOnboardingStatus.ONBOARDED || result.project == null || result.repository == null) {
+                    return failure(
+                        "Repository was not onboarded: ${result.status}. ${result.diagnostic}",
+                        "REPOSITORY_ONBOARDING",
+                        payload.projectId.toString(),
+                    )
+                }
+                return success(
+                    "Onboarded project ${result.project.id} (${result.project.title}) from ${payload.source}; repository is pinned at ${result.repository.path} on ${result.repository.branch}.",
+                    "REPOSITORY_ONBOARDING",
+                    result.project.id.toString(),
+                    json.encodeToString(result.repository),
+                )
+            }
+        }
+    },
+    modelProviderRegistry?.let { registry ->
+        object : ConversationCapability {
+            override val descriptor = descriptor(
+                CAPABILITY_INSPECT_MODEL_CONFIGURATION,
+                "Inspect installed model endpoints, bindings, provider policy, compatibility, and workload profile assignments.",
+                mutation = false,
+                payloadSchema = "{}",
+                owningService = "ModelProviderRegistry",
+                resultType = "MODEL_CONFIGURATION",
+                idempotencyStrategy = "READ_ONLY",
+            )
+
+            override suspend fun execute(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+                command: ConversationCommandProposal,
+            ): ConversationCapabilityResult {
+                requireEmptyPayload(payloadJson, json)
+                val catalog = registry.catalog()
+                val profiles = definitionIntelligence?.profileConfigurations().orEmpty()
+                val inspections = registry.inspect()
+                val summary = buildString {
+                    append("Model policy is ${catalog.policy}. Bindings: ")
+                    append(catalog.bindings.joinToString { "${it.bindingId}=${it.model}" }.ifBlank { "none" })
+                    append(". Profile assignments: ")
+                    append(profiles.joinToString { configuration ->
+                        "${configuration.defaultProfile.id}=${configuration.override?.preferredBindingId ?: "automatic"}"
+                    }.ifBlank { "unavailable" })
+                    append(". Endpoint health: ")
+                    append(inspections.joinToString { "${it.endpointId}=${if (it.reachable) "reachable" else "unreachable"}" }.ifBlank { "none" })
+                }
+                return success(
+                    summary,
+                    "MODEL_CONFIGURATION",
+                    "catalog",
+                    json.encodeToString(ModelConfigurationInspection(catalog, profiles, inspections)),
+                )
+            }
+        }
+    },
+    modelProviderRegistry?.let { registry ->
+        object : ConversationCapability {
+            override val descriptor = descriptor(
+                CAPABILITY_REGISTER_MODEL,
+                "Register or replace one model endpoint and binding. Secrets are accepted only as environment credential references and never as values.",
+                mutation = true,
+                payloadSchema = """{"endpoint":{"endpointId":"stable ID","displayName":"name","protocol":"OLLAMA_NATIVE|OPENAI_COMPATIBLE","baseUrl":"URL","locality":"LOCAL|REMOTE","credentialReference":"optional env:NAME","enabled":true},"binding":{"bindingId":"stable ID","endpointId":"matching endpoint ID","model":"model name","contextWindowTokens":integer,"capabilities":["STRICT_JSON"],"modelDigest":"optional","residentMemoryBytes":integer,"cpuUnits":integer,"configuration":{}},"providerPolicy":"optional LOCAL_ONLY|LOCAL_PREFERRED|CLOUD_ALLOWED|CLOUD_ESCALATION_ONLY"}""",
+                owningService = "ModelProviderRegistry",
+                resultType = "MODEL_BINDING",
+                idempotencyStrategy = "ENDPOINT_AND_BINDING_ID",
+            )
+
+            override suspend fun reconcile(
+                command: ConversationCommandProposal,
+                objective: ConversationObjectiveRevision?,
+            ): ConversationCapabilityResult? {
+                val payload = json.decodeFromString<RegisterModelCapabilityPayload>(command.payloadJson)
+                val catalog = registry.catalog()
+                val reference = commandReference(command)
+                val endpoint = catalog.endpoints.singleOrNull { it.endpointId == payload.endpoint.endpointId }
+                val binding = catalog.bindings.singleOrNull { it.bindingId == payload.binding.bindingId }
+                if (endpoint?.copy(conversationCommand = null) != payload.endpoint.copy(conversationCommand = null) ||
+                    binding?.copy(conversationCommand = null) != payload.binding.copy(conversationCommand = null) ||
+                    endpoint.conversationCommand != reference || binding.conversationCommand != reference ||
+                    (payload.providerPolicy != null && catalog.policy != payload.providerPolicy)
+                ) return null
+                return success(
+                    "Recovered model binding ${payload.binding.bindingId}.",
+                    "MODEL_BINDING",
+                    payload.binding.bindingId,
+                    json.encodeToString(payload.binding),
+                )
+            }
+
+            override suspend fun execute(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+                command: ConversationCommandProposal,
+            ): ConversationCapabilityResult {
+                val payload = json.decodeFromString<RegisterModelCapabilityPayload>(payloadJson)
+                require(payload.binding.endpointId == payload.endpoint.endpointId) { "Model binding endpoint does not match the registered endpoint." }
+                val current = registry.catalog()
+                val reference = commandReference(command)
+                val currentEndpoint = current.endpoints.singleOrNull { it.endpointId == payload.endpoint.endpointId }
+                val currentBinding = current.bindings.singleOrNull { it.bindingId == payload.binding.bindingId }
+                if (listOfNotNull(currentEndpoint?.conversationCommand, currentBinding?.conversationCommand)
+                    .any { it.commandId > command.commandId }) {
+                    return failure(
+                        "Model registration was superseded by a newer admitted command.",
+                        "MODEL_BINDING",
+                        payload.binding.bindingId,
+                    )
+                }
+                val admittedEndpoint = payload.endpoint.copy(conversationCommand = reference)
+                val admittedBinding = payload.binding.copy(conversationCommand = reference)
+                if (currentEndpoint == admittedEndpoint && currentBinding == admittedBinding &&
+                    (payload.providerPolicy == null || current.policy == payload.providerPolicy)) {
+                    return success(
+                        "Model binding ${payload.binding.bindingId} is already registered by this command.",
+                        "MODEL_BINDING",
+                        payload.binding.bindingId,
+                        json.encodeToString(admittedBinding),
+                    )
+                }
+                val updated = ModelProviderCatalog(
+                    policy = payload.providerPolicy ?: current.policy,
+                    endpoints = current.endpoints.filterNot { it.endpointId == payload.endpoint.endpointId } + admittedEndpoint,
+                    bindings = current.bindings.filterNot { it.bindingId == payload.binding.bindingId } + admittedBinding,
+                )
+                registry.update(updated)
+                return success(
+                    "Registered ${payload.binding.model} as ${payload.binding.bindingId} on ${payload.endpoint.displayName}.",
+                    "MODEL_BINDING",
+                    payload.binding.bindingId,
+                    json.encodeToString(admittedBinding),
+                )
+            }
+        }
+    },
+    if (modelProviderRegistry != null && definitionIntelligence != null) {
+        object : ConversationCapability {
+            override val descriptor = descriptor(
+                CAPABILITY_ASSIGN_MODEL_PROFILE,
+                "Assign one installed compatible model binding to a workload profile, optionally changing its token budgets.",
+                mutation = true,
+                payloadSchema = """{"profileId":"existing execution profile ID","preferredBindingId":"installed binding ID","inputBudgetTokens":"optional integer","outputBudgetTokens":"optional integer"}""",
+                owningService = "DefinitionIntelligenceService",
+                resultType = "MODEL_PROFILE_CONFIGURATION",
+                idempotencyStrategy = "PROFILE_OVERRIDE",
+            )
+
+            override suspend fun reconcile(
+                command: ConversationCommandProposal,
+                objective: ConversationObjectiveRevision?,
+            ): ConversationCapabilityResult? {
+                val payload = json.decodeFromString<AssignModelProfileCapabilityPayload>(command.payloadJson)
+                val configuration = definitionIntelligence.profileConfigurations()
+                    .singleOrNull { it.defaultProfile.id == payload.profileId } ?: return null
+                val override = configuration.override ?: return null
+                if (override.conversationCommand != commandReference(command) ||
+                    override.preferredBindingId != payload.preferredBindingId ||
+                    (payload.inputBudgetTokens != null && override.inputBudgetTokens != payload.inputBudgetTokens) ||
+                    (payload.outputBudgetTokens != null && override.outputBudgetTokens != payload.outputBudgetTokens)
+                ) return null
+                return success(
+                    "Recovered model assignment ${payload.profileId} -> ${payload.preferredBindingId}.",
+                    "MODEL_PROFILE_CONFIGURATION",
+                    payload.profileId,
+                    json.encodeToString(configuration),
+                )
+            }
+
+            override suspend fun execute(
+                payloadJson: String,
+                objective: ConversationObjectiveRevision?,
+                command: ConversationCommandProposal,
+            ): ConversationCapabilityResult {
+                val payload = json.decodeFromString<AssignModelProfileCapabilityPayload>(payloadJson)
+                val current = definitionIntelligence.profileConfigurations()
+                    .singleOrNull { it.defaultProfile.id == payload.profileId }
+                    ?: return failure("Model profile ${payload.profileId} does not exist.", "MODEL_PROFILE_CONFIGURATION", payload.profileId)
+                val currentOverride = current.override
+                if (currentOverride?.conversationCommand?.commandId?.let { it > command.commandId } == true) {
+                    return failure(
+                        "Model profile assignment was superseded by a newer admitted command.",
+                        "MODEL_PROFILE_CONFIGURATION",
+                        payload.profileId,
+                    )
+                }
+                val result = definitionIntelligence.updateProfile(ModelProfileOverride(
+                    profileId = payload.profileId,
+                    inputBudgetTokens = payload.inputBudgetTokens ?: current.effectiveProfile.inputBudgetTokens,
+                    outputBudgetTokens = payload.outputBudgetTokens ?: current.effectiveProfile.outputBudgetTokens,
+                    preferredBindingId = payload.preferredBindingId,
+                    conversationCommand = commandReference(command),
+                ))
+                if (result.status != ModelProfileUpdateStatus.UPDATED) {
+                    return failure("Model profile was not assigned: ${result.status}.", "MODEL_PROFILE_CONFIGURATION", payload.profileId)
+                }
+                val configuration = result.configurations.single { it.defaultProfile.id == payload.profileId }
+                return success(
+                    "Assigned ${payload.preferredBindingId} to ${payload.profileId} with ${configuration.effectiveProfile.inputBudgetTokens}/${configuration.effectiveProfile.outputBudgetTokens} input/output tokens.",
+                    "MODEL_PROFILE_CONFIGURATION",
+                    payload.profileId,
+                    json.encodeToString(configuration),
+                )
+            }
+        }
+    } else null,
     object : ConversationCapability {
         override val descriptor = descriptor(
             CAPABILITY_CREATE_WORK_ITEM,

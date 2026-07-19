@@ -83,6 +83,7 @@ import com.orchard.backend.workspace.ProjectGenesisStatus
 import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.DesignSubmission
 import com.orchard.backend.workspace.RepositoryBindStatus
+import com.orchard.backend.workspace.RepositoryOnboardingService
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowMutationStatus
 import com.orchard.backend.workspace.EvidenceSubmission
@@ -230,6 +231,7 @@ fun main() {
         LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR)),
         resourceController,
     )
+    val repositoryOnboarding = RepositoryOnboardingService(workspace, OrchardPaths.LOCAL_REPOSITORIES_DIR)
     val conversationConductor = ConversationConductorService(
         FileConversationStore(OrchardPaths.WORKSPACE_DIR),
         ModelConversationInterpreter(modelProviders, resourceController),
@@ -239,6 +241,8 @@ fun main() {
             circuitIntelligence,
             companyControl,
             companyCircuit,
+            repositoryOnboarding,
+            modelProviderRegistry,
         ),
     )
     val dispatchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

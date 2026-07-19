@@ -39,6 +39,34 @@ class ConversationConductorTest {
     }
 
     @Test
+    fun `configured registry exposes admitted onboarding and model authority`() {
+        val workspace = WorkspaceStore()
+        val modelRegistry = com.orchard.backend.vector.ModelProviderRegistry(
+            com.orchard.backend.vector.TransientModelProviderCatalogStore(),
+        )
+        val descriptors = defaultConversationCapabilities(
+            workspace = workspace,
+            definitionIntelligence = com.orchard.backend.agent.DefinitionIntelligenceService(
+                workspace,
+                modelRegistry.providers(),
+                com.orchard.backend.vector.TransientModelProfileSettingsStore(),
+            ),
+            repositoryOnboarding = com.orchard.backend.workspace.RepositoryOnboardingService(
+                workspace,
+                kotlin.io.path.createTempDirectory("orchard-capability-onboarding-"),
+            ),
+            modelProviderRegistry = modelRegistry,
+        ).descriptors().associateBy { it.id }
+
+        assertEquals("EXACT_COMMAND_HASH", descriptors.getValue(CAPABILITY_ONBOARD_REPOSITORY).admissionRule)
+        assertTrue(descriptors.getValue(CAPABILITY_ONBOARD_REPOSITORY).allowedObjectiveStates.isEmpty())
+        assertEquals("NONE", descriptors.getValue(CAPABILITY_INSPECT_MODEL_CONFIGURATION).admissionRule)
+        assertEquals("EXACT_COMMAND_HASH", descriptors.getValue(CAPABILITY_REGISTER_MODEL).admissionRule)
+        assertTrue(descriptors.getValue(CAPABILITY_ASSIGN_MODEL_PROFILE).allowedObjectiveStates.isEmpty())
+        modelRegistry.close()
+    }
+
+    @Test
     fun `message retry is idempotent and mutation requires exact admission`() = runBlocking {
         val store = TransientConversationStore()
         val executions = AtomicInteger()

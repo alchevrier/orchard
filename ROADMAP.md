@@ -151,7 +151,13 @@ Delivery slices:
   - One restored chronological transcript with an objective rail, focus switching, state, dependencies, priority, pending admissions, diagnostics, and correlated evidence.
   - Inline review and admission of exact proposed actions plus links into existing detailed authority projections.
   - Cursor-based refresh is sufficient initially; transport streaming is not required for correctness.
-6. **Orchard-on-Orchard replacement proof**
+6. **Repository and model onboarding gate**
+  - Accept either an absolute local Git folder or a credential-free HTTP(S) Git URL through one admitted `ONBOARD_REPOSITORY` command.
+  - Clone URLs only into deterministic Orchard-managed storage with prompts, submodules, and LFS smudging disabled; never execute repository code during onboarding.
+  - Create or select the project, bind the canonical repository, preserve exact command identity, and recover retries without duplicate projects or clones.
+  - Inspect installed model endpoints and bindings, register environment-referenced local or remote providers, and assign compatible bindings independently to conversation, definition, design synthesis, repository analysis, coding, and audit profiles.
+  - Treat model installation or download as explicit machine setup; onboarding registers and verifies models but does not run package managers or `ollama pull`.
+7. **Orchard-on-Orchard replacement proof**
   - Use one conversation to deliver three consecutive Orchard changes: a bounded defect, a cross-backend/frontend contract, and an authority change with persistence compatibility, tests, and an ADR.
   - Each change passes through planning, coding, verification, independent audit, acceptance, and local promotion.
   - Conversation, explicit admission, provider configuration, and inspection are allowed; repository source edits outside Orchard's admitted coding worktrees are not.
@@ -171,6 +177,8 @@ Exit evidence:
 - A compatible cloud-provider change preserves conversation, objective, and authority continuity.
 - One conversation can plan one objective, execute another, observe an audit, and resolve a blocked objective without context leakage.
 - Backend and desktop restart restore exact chronology, objective state, admissions, and correlated activity.
+- Local-folder and URL onboarding produce one canonical bound project after retry or restart, reject credential-bearing URLs, and execute no repository-owned code.
+- Workload-specific model assignments survive restart, reject incompatible context/capability budgets, and persist only credential references rather than secrets.
 - The three defined Orchard-on-Orchard proof changes reach local promotion with no source edits outside Orchard worktrees and no bypass of the conductor or existing governance gates.
 - Full backend/frontend build, clean diagnostics, compatibility tests, ADR acceptance, user/developer documentation, and committed milestone.
 
@@ -191,6 +199,14 @@ Implementation evidence recorded on 2026-07-18:
 - Conversational model provenance is structured and checksum-covered; capability descriptors expose ownership, admission, projected result, and idempotency contracts.
 - Conversation, coding-worker, company-circuit, desktop-client, compatibility, and full Gradle build validation pass with no editor diagnostics.
 - Remaining completion gate: initialize admitted Orchard-on-Orchard authority and record the three required locally promoted changes, including intervention, provider/token, elapsed-time, failure, evidence, and bypass reports. ADR 044 remains `Proposed` until this proof succeeds.
+
+Onboarding-gate evidence recorded on 2026-07-19:
+
+- The conductor exposes admitted repository onboarding from absolute local folders or credential-free HTTP(S) Git URLs, with exact project command references and deterministic managed clone destinations.
+- Managed cloning disables terminal prompts, submodule recursion, and LFS smudging and does not execute repository build or setup code.
+- The conductor can inspect model configuration, register validated endpoint/binding pairs, and assign compatible bindings per execution profile without persisting credential values.
+- Focused tests cover canonical local onboarding, restart idempotency, real HTTP Git cloning, embedded-credential rejection, model registration, compatible coding assignment, and incompatible-budget rejection.
+- The remaining completion gate is unchanged: run the three required Orchard-on-Orchard changes through the newly onboarded authority and record the proof report.
 
 ### Milestone 10.3: Identity, Delegation, Quorum, and Signed Decisions
 

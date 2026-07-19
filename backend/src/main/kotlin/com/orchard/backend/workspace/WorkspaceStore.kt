@@ -290,6 +290,9 @@ class WorkspaceStore(
     fun entityAt(index: Int): WorkspaceEntity = entities[index]
 
     @Synchronized
+    fun entities(): List<WorkspaceEntity> = entities.toList()
+
+    @Synchronized
     fun bindRepository(projectId: Int, path: String): RepositoryBindResult {
         if (entity(projectId, ENTITY_PROJECT) == null) {
             repositoryMessage = "The selected project does not exist."

@@ -147,6 +147,8 @@ The first vertical capability set is deliberately narrow:
 6. observe repository analysis, coding, verification, audit, acceptance, and promotion; and
 7. answer from correlated evidence.
 
+Before the replacement proof, the conductor also owns a bounded onboarding gate: it can create or select a project from an absolute local Git folder or a credential-free HTTP(S) Git URL, register validated model endpoint/binding pairs, and assign compatible bindings independently to execution profiles. URL cloning is confined to Orchard-managed storage and cannot execute repository-owned code, submodules, LFS smudging, package installation, or model download.
+
 Only after this one-objective path survives restart and reconciliation are additional genesis, standards, campaign, resolution, priority, dependency, and parallel scheduling capabilities enabled.
 
 ## Delivery Slices
@@ -156,7 +158,8 @@ Only after this one-objective path survives restart and reconciliation are addit
 3. **Domain action adapters**: a closed capability registry and exact command correlations for genesis, work definition, staged planning, workflow start/cancel, repository analysis, coding progression, audit, promotion, standards, campaigns, and resolution without bypassing owning services.
 4. **Multi-objective scheduler and recovery**: dependencies, priority, objective-scoped locking, worker selection beyond global mutexes, destination-repository serialization, pause/resume/cancel, asynchronous state projection, and crash reconciliation.
 5. **Conversational desktop**: chronological transcript, objective rail, admissions, activity updates, diagnostics, and restart restoration.
-6. **Orchard-on-Orchard proof**: use one conversation to deliver three consecutive Orchard changes through planning, coding, verification, independent audit, acceptance, and local promotion: one bounded defect, one cross-backend/frontend contract change, and one authority change requiring persistence compatibility, tests, and an ADR.
+6. **Repository and model onboarding**: admit one local-folder or HTTP(S)-URL repository onboarding command, preserve exact project identity across retry/restart, inspect/register model bindings without secret values, and assign compatible models per execution profile.
+7. **Orchard-on-Orchard proof**: use one conversation to deliver three consecutive Orchard changes through planning, coding, verification, independent audit, acceptance, and local promotion: one bounded defect, one cross-backend/frontend contract change, and one authority change requiring persistence compatibility, tests, and an ADR.
 
 Each slice must leave a usable vertical path and executable tests. The ledger is implemented before model interpretation; interpretation before mutation adapters; one objective end to end before parallel scheduling; backend recovery before desktop polish.
 

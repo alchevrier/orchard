@@ -1,5 +1,6 @@
 package com.orchard.backend.vector
 
+import com.orchard.backend.workspace.ConversationCommandReference
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -10,6 +11,7 @@ import java.security.MessageDigest
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 @Serializable
 data class ModelProfileOverride(
@@ -17,6 +19,7 @@ data class ModelProfileOverride(
     val inputBudgetTokens: Int,
     val outputBudgetTokens: Int,
     val preferredBindingId: String? = null,
+    val conversationCommand: ConversationCommandReference? = null,
 )
 
 @Serializable
@@ -66,11 +69,13 @@ class FileModelProfileSettingsStore(private val directory: Path) : ModelProfileS
     @Synchronized
     override fun load(): List<ModelProfileOverride> {
         if (!Files.exists(path)) return emptyList()
+        val encoded = Files.readString(path, Charsets.UTF_8)
         val envelope = runCatching {
-            json.decodeFromString<ModelProfileSettingsEnvelope>(Files.readString(path, Charsets.UTF_8))
+            json.decodeFromString<ModelProfileSettingsEnvelope>(encoded)
         }.getOrElse { throw IllegalStateException("Cannot decode model profile settings at $path", it) }
         require(envelope.version == FORMAT_VERSION) { "Unsupported model profile settings version ${envelope.version}" }
-        require(envelope.checksum == checksum(compactJson.encodeToString(envelope.overrides))) {
+        val serializedOverrides = json.parseToJsonElement(encoded).jsonObject.getValue("overrides").toString()
+        require(envelope.checksum == checksum(serializedOverrides)) {
             "Model profile settings checksum mismatch at $path"
         }
         require(envelope.overrides.map { it.profileId }.distinct().size == envelope.overrides.size) {
@@ -79,7 +84,8 @@ class FileModelProfileSettingsStore(private val directory: Path) : ModelProfileS
         require(envelope.overrides.all {
             it.profileId.isNotBlank() &&
                 it.inputBudgetTokens in 1_024..1_000_000 &&
-                it.outputBudgetTokens in 256..1_000_000
+                it.outputBudgetTokens in 256..1_000_000 &&
+                validCommandReference(it.conversationCommand)
         }) { "Model profile settings contain invalid budgets" }
         return envelope.overrides
     }
@@ -88,6 +94,9 @@ class FileModelProfileSettingsStore(private val directory: Path) : ModelProfileS
     override fun save(overrides: List<ModelProfileOverride>) {
         require(overrides.map { it.profileId }.distinct().size == overrides.size) {
             "Model profile settings contain duplicate profile IDs"
+        }
+        require(overrides.all { validCommandReference(it.conversationCommand) }) {
+            "Model profile settings contain an invalid command reference"
         }
         val sorted = overrides.sortedBy { it.profileId }
         val envelope = ModelProfileSettingsEnvelope(
@@ -118,6 +127,10 @@ class FileModelProfileSettingsStore(private val directory: Path) : ModelProfileS
         const val FORMAT_VERSION = 1
     }
 }
+
+private fun validCommandReference(reference: ConversationCommandReference?): Boolean = reference == null ||
+    (reference.commandId > 0 && reference.commandHash.matches(Regex("[0-9a-f]{64}")) &&
+        reference.capabilityId.matches(Regex("[A-Z][A-Z0-9_]{1,127}")))
 
 @Serializable
 private data class ModelProfileSettingsEnvelope(

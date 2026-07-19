@@ -1342,7 +1342,7 @@ data class ModelProfileConfigurationResponse(
 
 @Serializable
 data class ModelProviderCatalogResponse(
-    val policy: String,
+    val policy: String = "LOCAL_ONLY",
     val endpoints: List<ModelEndpointDefinitionResponse>,
     val bindings: List<CatalogModelBindingResponse>,
 )

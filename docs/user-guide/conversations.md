@@ -30,6 +30,37 @@ An empty Orchard authority root can be initialized without leaving the Conductor
 
 For an existing repository, bind its canonical local path before admitting an `EXISTING_LOCAL` genesis. For a greenfield project, the company circuit creates its governed local repository from the admitted blueprint.
 
+## Repository Onboarding
+
+Ask the Conductor to onboard either an absolute local folder or an HTTP(S) Git URL. Orchard materializes one exact `ONBOARD_REPOSITORY` proposal showing the source, project title, and whether it will create a project or bind an existing project. Review and admit that exact command before filesystem or workspace authority changes.
+
+Examples:
+
+```text
+Onboard the local repository at /Users/me/Repositories/payments as a new project named Payments.
+```
+
+```text
+Clone and onboard https://github.com/example/payments.git as Payments.
+```
+
+Local paths may point anywhere inside an existing Git repository; Orchard binds the canonical repository root. URL onboarding accepts credential-free HTTP(S) URLs and clones into `~/.orchard/projects/repositories/`. It disables interactive credential prompts, submodule recursion, and Git LFS smudging. It does not run repository scripts, builds, package managers, hooks, or setup commands.
+
+Credentials must not appear in URLs or conversation text. Private remote endpoints use an environment credential reference during model onboarding; repository credential delegation is not part of this slice. Model download and runtime installation also remain explicit local setup operations.
+
+## Model Routing
+
+The Conductor can inspect model endpoints, bindings, endpoint health, and current workload assignments. It can then propose exact admitted commands to register a model and assign it to one execution profile:
+
+- `bounded-conversation-conductor-v1` for conversation interpretation;
+- `bounded-definition-reasoning-v1` for requirements and work definitions;
+- `bounded-circuit-synthesis-v1` for architecture and staged-plan design;
+- `broad-repository-analysis-v1` for repository analysis;
+- `bounded-coding-patch-v1` for coding; and
+- `bounded-independent-audit-v1` for independent audit.
+
+For example, ask Orchard to inspect model configuration, register an already-running local LM Studio or Ollama model, then assign its binding to `bounded-coding-patch-v1`. Orchard rejects bindings that cannot satisfy the profile's context window or strict-JSON capability. Remote provider secrets remain in environment variables referenced as `env:NAME`; only the reference is persisted or shown to the model.
+
 ## Activity and Provenance
 
 Workflow state changes are projected into the originating objective without copying domain authority. Conversation inference activity persists the execution profile and version, provider/model binding fingerprint, configuration hash, prompt/output hashes, token counts, latency, budgets, and machine-resource decision.
