@@ -657,6 +657,7 @@ class OllamaRequestTest {
             prompt = "test",
             stream = false,
             format = "json",
+            think = false,
             options = OllamaOptions(temperature = 0, seed = 42),
         )
 
@@ -664,6 +665,7 @@ class OllamaRequestTest {
 
         assertTrue("\"stream\":false" in payload)
         assertTrue("\"format\":\"json\"" in payload)
+        assertTrue("\"think\":false" in payload)
     }
 
     @Test

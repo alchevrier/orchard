@@ -187,6 +187,13 @@ class CatalogModelProvider(
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
         return when (endpoint.protocol) {
             PROVIDER_PROTOCOL_OLLAMA_NATIVE -> json.decodeFromString<OllamaCatalogResponse>(body).let {
+                check(it.response.isNotBlank()) {
+                    if (it.thinking.isNullOrBlank()) {
+                        "Provider ${endpoint.endpointId} returned an empty structured response"
+                    } else {
+                        "Provider ${endpoint.endpointId} exhausted the generation in thinking without a structured response"
+                    }
+                }
                 ModelGeneration(it.response, it.promptEvalCount ?: estimateModelTokens(prompt), it.evalCount ?: estimateModelTokens(it.response))
             }
             else -> json.decodeFromString<OpenAiChatResponse>(body).let { decoded ->
@@ -321,6 +328,7 @@ private data class OllamaCatalogRequest(
     val prompt: String,
     val stream: Boolean = false,
     val format: String = "json",
+    val think: Boolean = false,
     val options: OllamaCatalogOptions,
 )
 
@@ -336,6 +344,7 @@ private data class OllamaCatalogOptions(
 @Serializable
 private data class OllamaCatalogResponse(
     val response: String,
+    val thinking: String? = null,
     @SerialName("prompt_eval_count") val promptEvalCount: Int? = null,
     @SerialName("eval_count") val evalCount: Int? = null,
 )

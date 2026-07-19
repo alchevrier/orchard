@@ -129,7 +129,27 @@ class ModelProviderCatalogTest {
         assertEquals(7, generation.promptTokens)
         assertEquals(listOf("analyst:70b", "coder:14b"), inspection.discoveredModels)
         assertTrue(requests.first().contains("\"format\":\"json\""))
+        assertTrue(requests.first().contains("\"think\":false"))
         assertTrue(requests.first().contains("\"num_ctx\":4096"))
+    }
+
+    @Test
+    fun `Ollama adapter reports thinking-only generation instead of JSON EOF`() = runTest {
+        val engine = MockEngine {
+            respond(
+                """{"response":"","thinking":"I should formulate JSON","prompt_eval_count":7,"eval_count":128}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+
+        val error = assertFailsWith<IllegalStateException> {
+            provider.executeConversation("onboard https://example.com/repository.git", 128, 4_096)
+        }
+        provider.close()
+
+        assertTrue(error.message.orEmpty().contains("exhausted the generation in thinking"))
     }
 
     @Test

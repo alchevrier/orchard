@@ -164,6 +164,7 @@ class OllamaClient(
                     prompt = prompt,
                     stream = false,
                     format = "json",
+                    think = false,
                     options = OllamaOptions(
                         temperature = 0,
                         seed = 42,
@@ -178,6 +179,10 @@ class OllamaClient(
         check(response.status.isSuccess()) { "Ollama returned HTTP ${response.status.value}: ${body.take(512)}" }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Ollama response exceeded $MAX_RESPONSE_BYTES bytes" }
         val decoded = json.decodeFromString<OllamaGenerateResponse>(body)
+        check(decoded.response.isNotBlank()) {
+            if (decoded.thinking.isNullOrBlank()) "Ollama returned an empty structured response"
+            else "Ollama exhausted the generation in thinking without a structured response"
+        }
         return ModelGeneration(
             text = decoded.response,
             promptTokens = decoded.promptEvalCount ?: estimateModelTokens(prompt),
@@ -213,6 +218,7 @@ internal data class OllamaGenerateRequest(
     val prompt: String,
     val stream: Boolean,
     val format: String,
+    val think: Boolean,
     val options: OllamaOptions,
 )
 
@@ -228,6 +234,7 @@ internal data class OllamaOptions(
 @Serializable
 private data class OllamaGenerateResponse(
     val response: String,
+    val thinking: String? = null,
     @SerialName("prompt_eval_count") val promptEvalCount: Int? = null,
     @SerialName("eval_count") val evalCount: Int? = null,
 )
