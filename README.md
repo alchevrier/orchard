@@ -16,6 +16,10 @@ Orchard is a local-first engineering workspace for turning natural-language inte
 - [Documentation Portal](docs/README.md): documentation authority and maintenance rules.
 - [Roadmap](ROADMAP.md): dependency-ordered product intent and exit evidence.
 
+## License
+
+Orchard is licensed under the [Apache License 2.0](LICENSE).
+
 ## Milestone 10.1: Scoped Standards Overlays and Exception Authority
 
 Engineering policy now composes deterministically instead of relying on a single project-wide document or informal team memory. Exceptions are separate, explicit authority: a request remains a candidate until admitted, and continued effect depends on scope, policy, Git ancestry, time, revocation, and unchanged compensating-control evidence.
