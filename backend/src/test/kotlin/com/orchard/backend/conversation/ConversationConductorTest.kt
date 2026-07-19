@@ -33,6 +33,7 @@ class ConversationConductorTest {
     @Test
     fun `small onboarding turn admits actual context demand instead of full aperture`() = runBlocking {
         var admittedInputTokens = 0
+        var executionContextTokens = 0
         val provider = object : ModelProvider {
             override suspend fun triage(prompt: String): String = error("unused")
             override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
@@ -48,8 +49,10 @@ class ConversationConductorTest {
                 admittedInputTokens = inputTokens
                 return ModelResourceDemand(inputTokens.toLong() + profile.outputBudgetTokens, 1)
             }
-            override suspend fun executeConversation(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int) =
-                ModelGeneration("{\"speechAct\":\"INFORMATION\",\"response\":\"Ready.\"}", admittedInputTokens, 8)
+            override suspend fun executeConversation(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration {
+                executionContextTokens = contextWindowTokens
+                return ModelGeneration("{\"speechAct\":\"INFORMATION\",\"response\":\"Ready.\"}", admittedInputTokens, 8)
+            }
         }
         val resources = MachineResourceController(
             TransientMachineUsagePolicyStore(MachineUsagePolicy(100, 0, 1)),
@@ -65,6 +68,7 @@ class ConversationConductorTest {
 
         assertEquals("Ready.", result.interpretation.response)
         assertTrue(admittedInputTokens in 1 until 26_000)
+        assertEquals(admittedInputTokens + 4_000, executionContextTokens)
         assertEquals("ADMITTED", result.resourceDecision)
     }
 

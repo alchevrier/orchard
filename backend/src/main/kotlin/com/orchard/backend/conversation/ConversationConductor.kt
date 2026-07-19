@@ -274,7 +274,7 @@ class ModelConversationInterpreter(
             provider.executeConversation(
                 prompt,
                 profile.outputBudgetTokens,
-                profile.inputBudgetTokens + profile.outputBudgetTokens,
+                promptTokens + profile.outputBudgetTokens,
             )
         }
         require(generation.promptTokens <= profile.inputBudgetTokens &&
