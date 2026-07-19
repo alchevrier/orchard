@@ -5,9 +5,9 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `3` |
+| Version | `4` |
 | Status | `ACTIVE` |
-| Updated | `2026-07-18` |
+| Updated | `2026-07-19` |
 | Delivered baseline | Milestone 10.1 |
 | Next milestone | `10.2` Durable Multi-Objective Conversational Conductor |
 | Canonical path | `ROADMAP.md` |
@@ -396,18 +396,40 @@ Deliverables:
 - User-delegated budgets and fail-closed admission when exhausted.
 - Outcome-linked efficiency metrics that do not reward bypassing quality gates.
 
-### Milestone 13.2: Multi-Client and Remote Architect Control
+### Milestone 13.2: Self-Hosted Organizational Control Plane and Remote Runners
 
 - State: `CANDIDATE`
-- Depends on: `10.2`, `10.3`, `13.0`
+- Depends on: `10.2`, `10.3`, `13.0`, `13.1`
 
-Goal: support multiple authenticated clients and remote control without losing single-writer authority or local-first custody.
+Goal: let an organization host Orchard on its own servers as the shared engineering control plane through which authenticated teams pilot projects, objectives, models, policy, evidence, audit, acceptance, and promotion without surrendering repository or model custody.
 
 Candidate scope:
 
-- Concurrency control, leases, and conflict projections for multiple clients.
-- Authenticated remote Architect protocol.
-- Explicit policy for remote model execution, repository mutation, and optional remote Git publication.
+- A self-hosted organization deployment with durable conversation, objective, policy, admission, evidence-correlation, audit, and acceptance authority shared across teams and repositories.
+- Organization, team, project, and repository tenancy derived from Milestone 10.3 identities, roles, scoped delegation, quorum, revocation, and signed decisions.
+- Authenticated web, desktop, API, and automation clients with optimistic concurrency, leases, conflict projection, monotonic event cursors, and complete actor attribution.
+- Organization-managed runners that connect outbound to the control plane, advertise repository, toolchain, model, and resource capabilities, and execute leased work near private source and local inference.
+- Signed runner evidence, heartbeats, cancellation, bounded retry, reconnect adoption, and duplicate-safe completion when either runner or control plane restarts.
+- Explicit per-project custody policy selecting local runner, organization-hosted runner, or admitted managed execution for repository access, model inference, artifacts, and optional remote Git publication.
+- Short-lived repository and service credentials resolved only at the execution boundary; secret values never enter conversation context, model prompts, authority records, or hosted logs.
+- Tenant-isolated transactional authority storage and immutable artifact retention that preserve Orchard's append-only semantics while supporting backup, disaster recovery, audit, and governed lifecycle policy.
+- Complete export of conversations, authority records, policy, evidence manifests, and cryptographic verification material so an organization can migrate or return to standalone operation without losing history.
+- Deployment and upgrade procedures for one organization to operate Orchard on its own infrastructure without requiring an Orchard-operated cloud service.
+
+Exit evidence:
+
+- Two authenticated users from separate teams can conduct independent objectives concurrently while unauthorized cross-team reads, admissions, mutations, and evidence access fail closed.
+- An organization-managed runner completes one repository workflow through analysis, coding, verification, independent audit, acceptance, and promotion without exposing source or secret values to the control plane.
+- Runner disconnect, duplicate delivery, lease expiry, control-plane restart, and stale completion recover without duplicate repository mutation or authority records.
+- Organization policy and quorum requirements are enforced identically through web, desktop, API, and automation clients.
+- A complete authority export can be verified and restored into a clean self-hosted deployment with chronology, signatures, correlations, and terminal project state intact.
+
+Non-goals:
+
+- Requiring a public Orchard SaaS or Orchard-operated infrastructure.
+- General internet identity federation beyond explicitly admitted organization providers.
+- Silent remote Git publication, unrestricted inbound access to runner networks, or transfer of private source into model context without explicit custody policy.
+- Distributed agent swarms whose coordination is not justified by admitted objectives and resource accountability.
 
 ## Deferred Directions
 
@@ -453,6 +475,7 @@ Update this file in the same change that alters roadmap intent.
 
 | Date | Version | Change |
 | --- | --- | --- |
+| 2026-07-19 | 4 | Expanded Milestone 13.2 from remote Architect access into a self-hosted organizational control plane with authenticated multi-client use, organization-managed runners, source custody, recovery, and authority export. |
 | 2026-07-18 | 3 | Prioritized a durable multi-objective conversational conductor as Milestone 10.2 and moved identity and later policy work behind the workflow-replacement proof. |
 | 2026-07-18 | 2 | Completed scoped standards overlays and exception authority; selected identity, delegation, quorum, and signed decisions as Milestone 10.2. |
 | 2026-07-18 | 1 | Established the canonical roadmap after Milestone 10.0; selected scoped standards overlays and exception authority as Milestone 10.1. |
