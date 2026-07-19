@@ -150,24 +150,24 @@ class CatalogModelProvider(
 
     private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int): ModelGeneration {
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
-        val response = when (endpoint.protocol) {
-            PROVIDER_PROTOCOL_OLLAMA_NATIVE -> client.post(url("/api/generate")) {
-                authorize()
-                header(HttpHeaders.ContentType, ContentType.Application.Json)
-                setBody(
-                    OllamaCatalogRequest(
-                        binding.model,
-                        prompt,
-                        options = OllamaCatalogOptions(
-                            temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
-                            seed = binding.configuration["seed"]?.toIntOrNull() ?: 42,
-                            numPredict = maxOutputTokens,
-                            numContext = contextWindowTokens,
-                            numThread = binding.cpuUnits,
-                        ),
-                    )
-                )
+        if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
+            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true)
+            val completed = if (structured.response.isBlank()) {
+                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false)
+            } else {
+                structured
             }
+            check(completed.response.isNotBlank()) {
+                "Provider ${endpoint.endpointId} returned an empty response after structured and plain retries " +
+                    "(structured=${structured.doneReason.orEmpty()}, plain=${completed.doneReason.orEmpty()})"
+            }
+            return ModelGeneration(
+                completed.response,
+                completed.promptEvalCount ?: estimateModelTokens(prompt),
+                completed.evalCount ?: estimateModelTokens(completed.response),
+            )
+        }
+        val response = when (endpoint.protocol) {
             PROVIDER_PROTOCOL_OPENAI_COMPATIBLE -> client.post(url("/v1/chat/completions")) {
                 authorize()
                 header(HttpHeaders.ContentType, ContentType.Application.Json)
@@ -185,23 +185,39 @@ class CatalogModelProvider(
         val body = response.bodyAsText()
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
-        return when (endpoint.protocol) {
-            PROVIDER_PROTOCOL_OLLAMA_NATIVE -> json.decodeFromString<OllamaCatalogResponse>(body).let {
-                check(it.response.isNotBlank()) {
-                    if (it.thinking.isNullOrBlank()) {
-                        "Provider ${endpoint.endpointId} returned an empty structured response"
-                    } else {
-                        "Provider ${endpoint.endpointId} exhausted the generation in thinking without a structured response"
-                    }
-                }
-                ModelGeneration(it.response, it.promptEvalCount ?: estimateModelTokens(prompt), it.evalCount ?: estimateModelTokens(it.response))
-            }
-            else -> json.decodeFromString<OpenAiChatResponse>(body).let { decoded ->
-                val text = decoded.choices.singleOrNull()?.message?.content
-                    ?: error("Provider returned no single completion")
-                ModelGeneration(text, decoded.usage?.promptTokens ?: estimateModelTokens(prompt), decoded.usage?.completionTokens ?: estimateModelTokens(text))
+        return json.decodeFromString<OpenAiChatResponse>(body).let { decoded ->
+            val text = decoded.choices.singleOrNull()?.message?.content
+                ?: error("Provider returned no single completion")
+            ModelGeneration(text, decoded.usage?.promptTokens ?: estimateModelTokens(prompt), decoded.usage?.completionTokens ?: estimateModelTokens(text))
+        }
+    }
+
+    private suspend fun generateOllama(
+        prompt: String,
+        maxOutputTokens: Int?,
+        contextWindowTokens: Int,
+        structured: Boolean,
+    ): OllamaCatalogResponse {
+        val options = OllamaCatalogOptions(
+            temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
+            seed = binding.configuration["seed"]?.toIntOrNull() ?: 42,
+            numPredict = maxOutputTokens,
+            numContext = contextWindowTokens,
+            numThread = binding.cpuUnits,
+        )
+        val response = client.post(url("/api/generate")) {
+            authorize()
+            header(HttpHeaders.ContentType, ContentType.Application.Json)
+            if (structured) {
+                setBody(OllamaCatalogRequest(binding.model, prompt, options = options))
+            } else {
+                setBody(OllamaCatalogPlainRequest(binding.model, prompt, options = options))
             }
         }
+        val body = response.bodyAsText()
+        check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
+        check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
+        return json.decodeFromString(body)
     }
 
     private fun HttpClientConfig<*>.configure() {
@@ -333,6 +349,15 @@ private data class OllamaCatalogRequest(
 )
 
 @Serializable
+private data class OllamaCatalogPlainRequest(
+    val model: String,
+    val prompt: String,
+    val stream: Boolean = false,
+    val think: Boolean = false,
+    val options: OllamaCatalogOptions,
+)
+
+@Serializable
 private data class OllamaCatalogOptions(
     val temperature: Double,
     val seed: Int,
@@ -345,6 +370,7 @@ private data class OllamaCatalogOptions(
 private data class OllamaCatalogResponse(
     val response: String,
     val thinking: String? = null,
+    @SerialName("done_reason") val doneReason: String? = null,
     @SerialName("prompt_eval_count") val promptEvalCount: Int? = null,
     @SerialName("eval_count") val evalCount: Int? = null,
 )

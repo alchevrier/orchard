@@ -134,22 +134,33 @@ class ModelProviderCatalogTest {
     }
 
     @Test
-    fun `Ollama adapter reports thinking-only generation instead of JSON EOF`() = runTest {
-        val engine = MockEngine {
-            respond(
-                """{"response":"","thinking":"I should formulate JSON","prompt_eval_count":7,"eval_count":128}""",
-                headers = headersOf(HttpHeaders.ContentType, "application/json"),
-            )
+    fun `Ollama adapter retries empty JSON mode without weakening strict decoding`() = runTest {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += (request.body as? TextContent)?.text.orEmpty()
+            if (requests.size == 1) {
+                respond(
+                    """{"response":"","done_reason":"stop","prompt_eval_count":7,"eval_count":0}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            } else {
+                respond(
+                    """{"response":"{\"speechAct\":\"PROPOSE_DOMAIN_ACTION\",\"response\":\"Ready\"}","done_reason":"stop","prompt_eval_count":7,"eval_count":12}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
         }
         val catalog = defaultLocalModelProviderCatalog()
         val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
 
-        val error = assertFailsWith<IllegalStateException> {
-            provider.executeConversation("onboard https://example.com/repository.git", 128, 4_096)
-        }
+        val generation = provider.executeConversation("onboard https://example.com/repository.git", 128, 4_096)
         provider.close()
 
-        assertTrue(error.message.orEmpty().contains("exhausted the generation in thinking"))
+        assertEquals(2, requests.size)
+        assertTrue(requests.first().contains("\"format\":\"json\""))
+        assertFalse(requests.last().contains("\"format\""))
+        assertTrue(requests.all { it.contains("\"think\":false") })
+        assertTrue(generation.text.contains("PROPOSE_DOMAIN_ACTION"))
     }
 
     @Test
