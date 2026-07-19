@@ -2,11 +2,11 @@
 
 **Plant intent, harvest software.**
 
-Orchard is a local-first engineering workspace for turning natural-language intent into governed, evidence-producing software workflows. Its current MVP combines a Compose Desktop project center, a Ktor backend, deterministic workflow validation, and configurable local or explicitly permitted remote inference.
+Orchard is a cloneable, runnable work-in-progress prototype for turning natural-language intent into governed, evidence-producing software workflows. Its local-first stack combines a durable conversational conductor, a Compose Desktop control surface, a Ktor backend, deterministic workflow validation, repository execution, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 10.1 complete - Scoped Standards Overlays and Exception Authority. Orchard now composes effective engineering policy across organization, project, module, and work-item scopes, protects mandatory floors, and applies only admitted, evidence-bound, expiring exceptions.
+> **Project status:** Milestone 10.2 is in progress. The durable multi-objective conductor, repository onboarding, workload-specific model onboarding, and hardware-aware local model presets are implemented and validated. Completion remains intentionally blocked on the three-change Orchard-on-Orchard replacement proof.
 
-> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The single next milestone is 10.2: Durable Multi-Objective Conversational Conductor.
+> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The active milestone is 10.2: Durable Multi-Objective Conversational Conductor.
 
 ## Documentation
 
@@ -19,6 +19,35 @@ Orchard is a local-first engineering workspace for turning natural-language inte
 ## License
 
 Orchard is licensed under the [Apache License 2.0](LICENSE).
+
+## Milestone 10.2: Durable Multi-Objective Conversational Conductor (`IN_PROGRESS`)
+
+Orchard now exposes one restart-safe conversation as the primary control surface for several governed engineering objectives. Conversation records prove what was proposed, admitted, dispatched, and correlated; existing product, workflow, repository, evidence, audit, standards, and promotion records remain the owning authorities.
+
+Implemented and validated:
+
+- Checksummed append-only conversations, messages, objective revisions, exact command proposals, admissions, downstream correlations, idempotency keys, and restart recovery.
+- Bounded conversation reconstruction with source-linked summaries, strict typed interpretation, model provenance, token and latency evidence, and no unbounded transcript replay.
+- Objective-scoped state, dependencies, priority, pause, resume, redirect, cancellation, and concurrent scheduling without a conversation-wide worker lock.
+- A closed capability registry for project genesis, work definition, staged planning, workflow control, company start, local promotion, repository inspection, and status.
+- Exact mutation admission: model output remains candidate data, and only the admitted command ID and content hash may invoke an owning domain service.
+- Durable dispatch intent and exact downstream correlation with restart reconciliation when a domain mutation succeeds before conversation correlation is appended.
+- Repository onboarding from an absolute local Git folder or credential-free HTTP(S) URL into deterministic Orchard-managed storage without executing repository code.
+- Model configuration inspection, endpoint and binding registration, and independent assignment across conversation, definition, circuit synthesis, repository analysis, coding, and audit workloads.
+- Hardware-aware Ollama presets for classic PCs and Apple silicon from 8 GiB through 128 GiB, with complete stage routing and admission-safe context apertures.
+- A restored Compose Desktop transcript, objective rail, pending admissions, activity projection, diagnostics, and links into detailed authority views.
+
+Completion gate:
+
+- Orchard must use the conductor to deliver three consecutive changes to Orchard itself: a bounded defect, a backend/frontend contract change, and a persistence-compatible authority change.
+- Each change must reach local promotion through planning, coding, verification, independent audit, and acceptance with no source edits outside admitted Orchard worktrees.
+- The proof must report human interventions, failed attempts, elapsed time, provider and token usage, final evidence, and any attempted bypass. Until then, ADR 044 remains `Proposed` and Milestone 10.2 remains `IN_PROGRESS`.
+
+See [Durable Conversations](docs/user-guide/conversations.md) for operation and [ADR 044](docs/adrs/044-durable-multi-objective-conversational-conductor.md) for the proposed architectural decision.
+
+## Delivered Milestone History
+
+The sections below record what each milestone delivered and the boundaries that applied at that point in Orchard's development. For current operation and limits, use the project status above and the [User Guide](docs/user-guide/README.md).
 
 ## Milestone 10.1: Scoped Standards Overlays and Exception Authority
 
@@ -393,7 +422,7 @@ Milestone 7 boundaries:
 
 - Profile memory influences executor selection only; it cannot signal `READY`, accept a definition, or complete a workflow.
 - Pre-inference token counting is a conservative estimate until providers expose tokenizer-specific counting.
-- The production installation currently binds the definition profile to local `phi3:mini`; multi-binding routing is implemented and tested through provider contracts.
+- At delivery, the production installation bound the definition profile to local `phi3:mini`; current installations use hardware-aware, workload-specific routing.
 - Satisfaction currently derives from feedback and acceptance behavior rather than a general rating control.
 - Generic benchmarks, leaderboards, fine-tuning, and autonomous code execution remain separate work.
 
@@ -502,7 +531,7 @@ Milestone 8.1 boundaries:
 - Synthesis organizes existing children; it does not materialize new Stories, Tasks, or Bugs.
 - Epic synthesis emits completion dependencies only until Story output aggregation has an explicit authority model.
 - Regeneration appends a new proposal; feedback-threaded circuit revisions and proposal history UX remain future work.
-- The existing profile API can configure synthesis apertures, while the desktop settings dialog currently focuses on the primary Work Definition profile.
+- At delivery, the profile API configured synthesis apertures while the desktop settings dialog focused on the primary Work Definition profile; current settings expose every workload stage.
 - Generation does not start eligible nodes. Durable queues, automatic dispatch, worktree isolation, and integration ownership belong to Milestone 8.2.
 
 ### Milestone 8.2: Durable Circuit Dispatch
@@ -617,7 +646,7 @@ Milestone 9.2 boundaries:
 - Candidate branches are not merged, rebased, pushed, published, conflict-resolved, archived, or cleaned up automatically.
 - Verification is bounded but not isolated by an OS filesystem/network sandbox; repository build scripts remain trusted local code.
 - The first proposal format replaces complete UTF-8 files rather than applying semantic or language-server edits.
-- The production binding remains `phi3:mini`; a code-specialized local binding can be routed later through the coding profile.
+- At delivery, the production binding remained `phi3:mini`; current hardware presets assign a code-specialized binding where machine capacity permits.
 - Context assembly uses bounded lexical ranking over tracked text files; source-bound RAG and symbol-aware retrieval remain future work.
 - A dedicated Compose coding-worker surface remains part of the upcoming UX effort.
 
