@@ -175,7 +175,7 @@ fun defaultConversationCapabilities(
                 val repository = existing.repository ?: return null
                 return success(
                     "Repository is already onboarded as project ${project.id} (${project.title}) at ${repository.path} on ${repository.branch}. " +
-                        "No new admission is needed. Next: inspect repository for project ${project.id}, then define an objective for the work you want Orchard to perform.",
+                        "No new admission is needed. Next: establish this project's engineering standards and foundation in the conversation.",
                     "REPOSITORY_ONBOARDING",
                     project.id.toString(),
                     json.encodeToString(repository),
@@ -206,7 +206,7 @@ fun defaultConversationCapabilities(
                 }
                 return success(
                     "Onboarded project ${result.project.id} (${result.project.title}) from ${payload.source}; repository is pinned at ${result.repository.path} on ${result.repository.branch}. " +
-                        "Next: inspect repository for project ${result.project.id}, then define an objective for the work you want Orchard to perform.",
+                        "Next: establish this project's engineering standards and foundation in the conversation.",
                     "REPOSITORY_ONBOARDING",
                     result.project.id.toString(),
                     json.encodeToString(result.repository),

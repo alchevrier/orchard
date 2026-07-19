@@ -127,11 +127,12 @@ private const val BUG = "BUG"
 @Composable
 fun App() {
     val networkClient = remember { DesktopNetworkClient() }
-    val binder = remember { OrchardCircuitBinder(networkClient) }
     DisposableEffect(networkClient) {
         onDispose { networkClient.close() }
     }
-    binder.render()
+    OrchardTheme {
+        DurableConversationWorkspace(networkClient)
+    }
 }
 
 private data class WorkspaceEntity(
@@ -232,7 +233,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 
         OrchardTheme {
             if (workspaceMode == "CONDUCTOR") {
-                DurableConversationWorkspace(networkClient) { workspaceMode = "AUTHORITY" }
+                DurableConversationWorkspace(networkClient)
             } else Column(Modifier.fillMaxSize()) {
                 Row(
                     Modifier.fillMaxWidth().height(44.dp).background(OrchardColors.surface).padding(horizontal = 14.dp),

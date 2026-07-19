@@ -15,6 +15,7 @@ import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -58,7 +59,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -68,6 +68,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -77,13 +78,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.ControlConversationObjectiveRequest
+import com.orchard.frontend.network.ConversationActivityResponse
 import com.orchard.frontend.network.ConversationCommandViewResponse
 import com.orchard.frontend.network.ConversationListItemResponse
 import com.orchard.frontend.network.ConversationMessageResponse
 import com.orchard.frontend.network.ConversationObjectiveResponse
 import com.orchard.frontend.network.ConversationProjectionResponse
 import com.orchard.frontend.network.DesktopNetworkClient
+import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
+import com.orchard.frontend.network.EngineeringStandardsViewResponse
+import com.orchard.frontend.network.GenesisProposalResponse
+import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.SubmitConversationMessageRequest
+import com.orchard.frontend.network.WorkspaceSnapshotResponse
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -105,7 +112,6 @@ private val ConductorRed = Color(0xFFB64A45)
 @Composable
 internal fun DurableConversationWorkspace(
     networkClient: DesktopNetworkClient,
-    onOpenAuthority: () -> Unit,
 ) {
     var conversations by remember { mutableStateOf(emptyList<ConversationListItemResponse>()) }
     var projection by remember { mutableStateOf<ConversationProjectionResponse?>(null) }
@@ -117,6 +123,10 @@ internal fun DurableConversationWorkspace(
     var isRefreshing by remember { mutableStateOf(false) }
     var showNewConversation by remember { mutableStateOf(false) }
     var showOnboardRepository by remember { mutableStateOf(false) }
+    var projectSetup by remember { mutableStateOf<ConductorProjectSetupState?>(null) }
+    var genesisProposal by remember { mutableStateOf<GenesisProposalResponse?>(null) }
+    var isSetupSubmitting by remember { mutableStateOf(false) }
+    var setupError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     suspend fun loadConversations(createWhenEmpty: Boolean = false) {
@@ -141,6 +151,12 @@ internal fun DurableConversationWorkspace(
         }
     }
 
+    suspend fun refreshProjectSetup(projectId: Int) {
+        val workspace = networkClient.getWorkspace()
+        val standards = networkClient.getEngineeringStandards(projectId)
+        projectSetup = conductorProjectSetupState(projectId, workspace, standards)
+    }
+
     LaunchedEffect(Unit) {
         runCatching { loadConversations(createWhenEmpty = true) }
             .onFailure { error = it.message ?: "Unable to load conversations." }
@@ -152,6 +168,19 @@ internal fun DurableConversationWorkspace(
                 .onFailure { error = it.message ?: "Conversation refresh failed." }
             delay(1_500)
         }
+    }
+    val setupProjectId = projection?.let { latestOnboardedProjectId(it.commands, it.activities) }
+    LaunchedEffect(setupProjectId) {
+        if (setupProjectId == null) {
+            projectSetup = null
+            genesisProposal = null
+        } else {
+            runCatching { refreshProjectSetup(setupProjectId) }
+                .onFailure { setupError = it.message ?: "Unable to load project setup." }
+        }
+    }
+    LaunchedEffect(projectSetup?.genesis?.phase, projectSetup?.genesis?.revision?.hash) {
+        genesisProposal = null
     }
 
     fun submitMessage(message: String) {
@@ -181,6 +210,33 @@ internal fun DurableConversationWorkspace(
     }
 
     fun submit() = submitMessage(prompt)
+
+    fun runSetupMutation(operation: suspend (ConductorProjectSetupState) -> Unit) {
+        val current = projectSetup ?: return
+        if (isSetupSubmitting) return
+        isSetupSubmitting = true
+        setupError = null
+        scope.launch {
+            runCatching {
+                operation(current)
+                refreshProjectSetup(current.projectId)
+            }.onFailure { setupError = it.message ?: "Project setup could not advance." }
+            isSetupSubmitting = false
+        }
+    }
+
+    fun generateGenesisProposal(content: String) {
+        val current = projectSetup ?: return
+        if (isSetupSubmitting || content.isBlank()) return
+        isSetupSubmitting = true
+        setupError = null
+        scope.launch {
+            runCatching { networkClient.proposeProjectGenesis(current.projectId, content) }
+                .onSuccess { genesisProposal = it }
+                .onFailure { setupError = it.message ?: "The Architect could not form a proposal." }
+            isSetupSubmitting = false
+        }
+    }
 
     fun control(objective: ConversationObjectiveResponse, action: String, priority: Int? = null, dependencies: List<Long>? = null) {
         scope.launch {
@@ -217,7 +273,6 @@ internal fun DurableConversationWorkspace(
                     isRefreshing = false
                 }
             },
-            onOpenAuthority = onOpenAuthority,
         )
         Divider(color = ConductorLine)
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -251,6 +306,40 @@ internal fun DurableConversationWorkspace(
                         onSubmit = ::submit,
                         onOnboardRepository = { showOnboardRepository = true },
                         onSuggestedAction = ::submitMessage,
+                        projectSetup = projectSetup,
+                        genesisProposal = genesisProposal,
+                        isSetupSubmitting = isSetupSubmitting,
+                        setupError = setupError,
+                        onAdoptStandards = { submission ->
+                            runSetupMutation { setup ->
+                                val result = networkClient.updateEngineeringStandard(setup.projectId, submission)
+                                check(result.status == "UPDATED") {
+                                    result.diagnostic.ifBlank { "Engineering standards were not recorded: ${result.status}." }
+                                }
+                            }
+                        },
+                        onAdvanceGenesis = { submission ->
+                            runSetupMutation { setup -> networkClient.advanceProjectGenesis(setup.projectId, submission) }
+                        },
+                        onGenerateGenesisProposal = ::generateGenesisProposal,
+                        onApplyGenesisProposal = {
+                            genesisProposal?.let { proposal ->
+                                runSetupMutation { setup ->
+                                    check(proposal.projectId == setup.projectId && proposal.phase == setup.genesis.phase) {
+                                        "The Genesis proposal is stale."
+                                    }
+                                    networkClient.advanceProjectGenesis(setup.projectId, proposal.submission)
+                                }
+                            }
+                        },
+                        onAdmitGenesis = {
+                            runSetupMutation { setup -> networkClient.admitProjectGenesis(setup.projectId) }
+                        },
+                        onProposeEpic = { title ->
+                            projectSetup?.let { setup ->
+                                submitMessage("Create an epic named \"$title\" in project ID ${setup.projectId}.")
+                            }
+                        },
                     )
                     Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
                     AuthorityRail(
@@ -262,8 +351,11 @@ internal fun DurableConversationWorkspace(
                             scope.launch {
                                 runCatching {
                                     val response = networkClient.admitConversationCommand(command.proposal.commandId, command.proposal.hash)
-                                    projection = response.projection ?: projection
+                                    val updated = response.projection ?: projection
+                                    projection = updated
                                     if (response.diagnostic.isNotBlank()) error = response.diagnostic
+                                    updated?.let { latestOnboardedProjectId(it.commands, it.activities) }
+                                        ?.let { refreshProjectSetup(it) }
                                 }.onFailure { error = it.message ?: "Command admission failed." }
                             }
                         },
@@ -321,7 +413,6 @@ private fun ConductorHeader(
     onCreate: () -> Unit,
     onOnboardRepository: () -> Unit,
     onRefresh: () -> Unit,
-    onOpenAuthority: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selected = conversations.singleOrNull { it.conversation.conversationId == selectedConversationId }
@@ -329,68 +420,79 @@ private fun ConductorHeader(
         Modifier.fillMaxWidth().height(60.dp).background(ConductorSurface).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.width(320.dp)) {
+        Column {
             Text("Orchard", color = ConductorInk, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-            Box {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(28.dp)
-                        .background(ConductorRaised, RoundedCornerShape(6.dp))
-                        .clickable { expanded = true }
-                        .padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    ConversationTitleTooltip(
-                        title = selected?.conversation?.title ?: "Select conversation",
-                        modifier = Modifier.weight(1f),
-                        color = ConductorMuted,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Icon(
-                        Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Switch conversation",
-                        modifier = Modifier.size(16.dp),
-                        tint = ConductorMuted,
-                    )
-                }
-                DropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false },
-                    modifier = Modifier.width(420.dp),
-                ) {
-                    conversations.forEach { item ->
-                        val isSelected = item.conversation.conversationId == selectedConversationId
-                        DropdownMenuItem(
-                            onClick = { expanded = false; onSelect(item.conversation.conversationId) },
-                            modifier = Modifier.background(if (isSelected) ConductorGreenSoft else Color.Transparent),
-                        ) {
-                            ConversationTitleTooltip(
-                                title = item.conversation.title,
-                                modifier = Modifier.weight(1f),
-                                color = if (isSelected) ConductorGreen else ConductorInk,
-                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Text(
-                                "${item.objectiveCount} objectives",
-                                color = ConductorMuted,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            if (isSelected) {
-                                Icon(
-                                    Icons.Default.Check,
-                                    contentDescription = "Current conversation",
-                                    modifier = Modifier.size(16.dp),
-                                    tint = ConductorGreen,
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(320.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(28.dp)
+                            .background(ConductorRaised, RoundedCornerShape(6.dp))
+                            .clickable { expanded = true }
+                            .padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ConversationTitleTooltip(
+                            title = selected?.conversation?.title ?: "Select conversation",
+                            modifier = Modifier.weight(1f),
+                            color = ConductorMuted,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Switch conversation",
+                            modifier = Modifier.size(16.dp),
+                            tint = ConductorMuted,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
+                        modifier = Modifier.width(420.dp),
+                    ) {
+                        conversations.forEach { item ->
+                            val isSelected = item.conversation.conversationId == selectedConversationId
+                            DropdownMenuItem(
+                                onClick = { expanded = false; onSelect(item.conversation.conversationId) },
+                                modifier = Modifier.background(if (isSelected) ConductorGreenSoft else Color.Transparent),
+                            ) {
+                                ConversationTitleTooltip(
+                                    title = item.conversation.title,
+                                    modifier = Modifier.weight(1f),
+                                    color = if (isSelected) ConductorGreen else ConductorInk,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                                 )
-                            } else {
-                                Spacer(Modifier.size(16.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    "${item.objectiveCount} objectives",
+                                    color = ConductorMuted,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                if (isSelected) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "Current conversation",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = ConductorGreen,
+                                    )
+                                } else {
+                                    Spacer(Modifier.size(16.dp))
+                                }
                             }
                         }
                     }
+                }
+                Spacer(Modifier.width(2.dp))
+                PlainHeaderIconButton(onClick = onCreate) {
+                    Icon(Icons.Default.Add, "New conversation", Modifier.size(17.dp), tint = ConductorInk)
+                }
+                Spacer(Modifier.width(2.dp))
+                PlainHeaderIconButton(onClick = onRefresh, enabled = !isRefreshing) {
+                    if (isRefreshing) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = ConductorGreen)
+                    else Icon(Icons.Default.Refresh, "Refresh", Modifier.size(17.dp), tint = ConductorInk)
                 }
             }
         }
@@ -400,19 +502,29 @@ private fun ConductorHeader(
             Spacer(Modifier.width(6.dp))
             Text("Onboard", color = ConductorGreen, fontSize = 12.sp)
         }
-        Spacer(Modifier.width(6.dp))
-        TextButton(onClick = onOpenAuthority, modifier = Modifier.height(36.dp)) {
-            Text("Authority", color = ConductorMuted, fontSize = 12.sp)
-        }
-        Spacer(Modifier.width(6.dp))
-        ToolbarIconButton(onClick = onCreate, label = "New conversation") {
-            Icon(Icons.Default.Add, "New conversation", Modifier.size(17.dp), tint = ConductorInk)
-        }
-        Spacer(Modifier.width(6.dp))
-        ToolbarIconButton(onClick = onRefresh, label = "Refresh", enabled = !isRefreshing) {
-            if (isRefreshing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = ConductorGreen)
-            else Icon(Icons.Default.Refresh, "Refresh", Modifier.size(17.dp), tint = ConductorInk)
-        }
+    }
+}
+
+@Composable
+private fun PlainHeaderIconButton(
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
     }
 }
 
@@ -451,25 +563,6 @@ private fun ConversationTitleTooltip(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-    }
-}
-
-@Composable
-private fun ToolbarIconButton(
-    onClick: () -> Unit,
-    label: String,
-    enabled: Boolean = true,
-    content: @Composable () -> Unit,
-) {
-    Surface(
-        modifier = Modifier.size(36.dp),
-        shape = RoundedCornerShape(8.dp),
-        color = ConductorRaised,
-        border = BorderStroke(1.dp, ConductorLine),
-    ) {
-        IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(36.dp)) {
-            Box(contentAlignment = Alignment.Center) { content() }
-        }
     }
 }
 
@@ -606,9 +699,20 @@ private fun Transcript(
     onSubmit: () -> Unit,
     onOnboardRepository: () -> Unit,
     onSuggestedAction: (String) -> Unit,
+    projectSetup: ConductorProjectSetupState?,
+    genesisProposal: GenesisProposalResponse?,
+    isSetupSubmitting: Boolean,
+    setupError: String?,
+    onAdoptStandards: (EngineeringStandardSubmissionRequest) -> Unit,
+    onAdvanceGenesis: (ProjectGenesisSubmissionRequest) -> Unit,
+    onGenerateGenesisProposal: (String) -> Unit,
+    onApplyGenesisProposal: () -> Unit,
+    onAdmitGenesis: () -> Unit,
+    onProposeEpic: (String) -> Unit,
 ) {
     val transcriptScroll = rememberScrollState()
-    LaunchedEffect(messages.size, isSubmitting) {
+    val setupStep = projectSetup?.let(::conductorSetupStep)
+    LaunchedEffect(messages.size, isSubmitting, setupStep, genesisProposal?.phase) {
         delay(40)
         transcriptScroll.animateScrollTo(transcriptScroll.maxValue)
     }
@@ -634,19 +738,19 @@ private fun Transcript(
                     }
                 }
             }
-            latestOnboardedProjectId(commands)?.let { projectId ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { onSuggestedAction("Inspect repository for project $projectId") }) {
-                        Icon(Icons.Default.Search, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Inspect repository")
-                    }
-                    TextButton(onClick = { onPromptChange("For project $projectId, I want to ") }) {
-                        Icon(Icons.Default.Add, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Define objective")
-                    }
-                }
+            projectSetup?.let { setup ->
+                ConductorProjectSetupCard(
+                    state = setup,
+                    proposal = genesisProposal,
+                    isSubmitting = isSubmitting || isSetupSubmitting,
+                    error = setupError,
+                    onAdoptStandards = onAdoptStandards,
+                    onAdvance = onAdvanceGenesis,
+                    onGenerateProposal = onGenerateGenesisProposal,
+                    onApplyProposal = onApplyGenesisProposal,
+                    onAdmit = onAdmitGenesis,
+                    onProposeEpic = onProposeEpic,
+                )
             }
         }
         AnimatedVisibility(
@@ -666,7 +770,16 @@ private fun Transcript(
                 value = prompt,
                 onValueChange = onPromptChange,
                 modifier = Modifier.weight(1f).heightIn(min = 56.dp, max = 132.dp),
-                placeholder = { Text(if (selectedObjectiveId == null) "Discuss or propose an objective" else "Continue objective $selectedObjectiveId", fontSize = 12.sp) },
+                placeholder = {
+                    Text(
+                        when {
+                            setupStep != null && setupStep != ConductorSetupStep.READY -> "Ask a question or add context for project setup"
+                            selectedObjectiveId == null -> "Discuss or propose an objective"
+                            else -> "Continue objective $selectedObjectiveId"
+                        },
+                        fontSize = 12.sp,
+                    )
+                },
                 enabled = !isSubmitting,
                 minLines = 2,
                 maxLines = 5,
@@ -866,13 +979,48 @@ private fun OnboardRepositoryDialog(
     )
 }
 
-internal fun latestOnboardedProjectId(commands: List<ConversationCommandViewResponse>): Int? = commands
-    .asReversed()
-    .firstNotNullOfOrNull { command ->
-        command.executions.asReversed().firstOrNull {
+internal fun onboardedProjectId(command: ConversationCommandViewResponse): Int? =
+    if (command.proposal.capabilityId != "ONBOARD_REPOSITORY") null
+    else command.executions.asReversed().firstOrNull {
             it.state == "CORRELATED" && it.downstreamType == "REPOSITORY_ONBOARDING"
         }?.downstreamId?.toIntOrNull()
+
+internal fun latestOnboardedProjectId(commands: List<ConversationCommandViewResponse>): Int? =
+    commands.asReversed().firstNotNullOfOrNull(::onboardedProjectId)
+
+internal fun latestOnboardedProjectId(
+    commands: List<ConversationCommandViewResponse>,
+    activities: List<ConversationActivityResponse>,
+): Int? = latestOnboardedProjectId(commands)
+    ?: activities.asReversed().firstOrNull { it.authorityType == "REPOSITORY_ONBOARDING" }
+        ?.authorityId?.toIntOrNull()
+
+internal fun conductorProjectSetupState(
+    projectId: Int,
+    workspace: WorkspaceSnapshotResponse,
+    standards: EngineeringStandardsViewResponse,
+): ConductorProjectSetupState {
+    val resources = workspace.resources.values
+    val project = requireNotNull(resources.singleOrNull {
+        it.type == "PROJECT" && workspaceActionValue(it.action, "id") == projectId
+    }) { "Project $projectId is not present in workspace authority." }
+    val genesis = requireNotNull(workspace.projectGenesis.singleOrNull { it.projectId == projectId }) {
+        "Project $projectId has no Genesis projection."
     }
+    val epics = resources.filter {
+        it.type == "EPIC" && workspaceActionValue(it.action, "parent") == projectId
+    }.map { workspaceActionValue(it.action, "id") to it.path }
+    return ConductorProjectSetupState(projectId, project.path, genesis, standards, epics)
+}
+
+private fun workspaceActionValue(action: String, key: String): Int {
+    val marker = "$key="
+    val start = action.indexOf(marker)
+    if (start == -1) return 0
+    val valueStart = start + marker.length
+    val valueEnd = action.indexOf(';', valueStart).let { if (it == -1) action.length else it }
+    return action.substring(valueStart, valueEnd).toIntOrNull() ?: 0
+}
 
 private fun objectiveStateColor(state: String) = when (state) {
     "ACTIVE", "READY", "COMPLETED" -> ConductorGreen
