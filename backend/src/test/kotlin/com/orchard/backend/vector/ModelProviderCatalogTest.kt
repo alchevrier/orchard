@@ -29,6 +29,20 @@ import kotlinx.serialization.json.Json
 
 class ModelProviderCatalogTest {
     @Test
+    fun `local provider sizes KV demand to actual input tokens`() {
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single())
+        val profile = DefaultModelExecutionProfiles.boundedConversationConductor
+
+        val fullAperture = provider.resourceDemand(profile)
+        val shortTurn = provider.resourceDemand(profile, 100)
+        provider.close()
+
+        assertTrue(shortTurn.memoryBytes < fullAperture.memoryBytes)
+        assertEquals(fullAperture.cpuUnits, shortTurn.cpuUnits)
+    }
+
+    @Test
     fun `catalog bootstraps local Ollama and recovers without secrets`() {
         val directory = createTempDirectory("orchard-provider-catalog-")
         val store = FileModelProviderCatalogStore(directory)

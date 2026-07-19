@@ -113,9 +113,13 @@ class CatalogModelProvider(
         modelDigest = binding.modelDigest,
     )
 
-    override fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand = if (endpoint.locality == PROVIDER_LOCALITY_LOCAL) {
+    override fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand =
+        resourceDemand(profile, profile.inputBudgetTokens)
+
+    override fun resourceDemand(profile: ModelExecutionProfile, inputTokens: Int): ModelResourceDemand = if (endpoint.locality == PROVIDER_LOCALITY_LOCAL) {
+        require(inputTokens in 0..profile.inputBudgetTokens) { "Model input token demand exceeds the execution profile" }
         ModelResourceDemand(
-            binding.residentMemoryBytes + (profile.inputBudgetTokens + profile.outputBudgetTokens).toLong() * KV_CACHE_BYTES_PER_TOKEN,
+            binding.residentMemoryBytes + (inputTokens + profile.outputBudgetTokens).toLong() * KV_CACHE_BYTES_PER_TOKEN,
             binding.cpuUnits,
         )
     } else {
@@ -298,6 +302,9 @@ class ModelProviderRegistry(
     override fun bindingProfile(): ModelBindingProfile = primary().bindingProfile()
 
     override fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand = primary().resourceDemand(profile)
+
+    override fun resourceDemand(profile: ModelExecutionProfile, inputTokens: Int): ModelResourceDemand =
+        primary().resourceDemand(profile, inputTokens)
 
     override fun architectResourceDemand(): ModelResourceDemand = primary().architectResourceDemand()
 

@@ -56,6 +56,7 @@ interface ModelProvider : AutoCloseable {
         contextWindowTokens: Int,
     ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
     fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand = ModelResourceDemand(0, 1)
+    fun resourceDemand(profile: ModelExecutionProfile, inputTokens: Int): ModelResourceDemand = resourceDemand(profile)
     fun architectResourceDemand(): ModelResourceDemand = ModelResourceDemand(0, 1)
     override fun close() = Unit
 }
@@ -119,9 +120,12 @@ class OllamaClient(
         contextWindowTokens: Int,
     ): ModelGeneration = generate(prompt, maxOutputTokens, contextWindowTokens)
 
-    override fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand = ModelResourceDemand(
+    override fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand =
+        resourceDemand(profile, profile.inputBudgetTokens)
+
+    override fun resourceDemand(profile: ModelExecutionProfile, inputTokens: Int): ModelResourceDemand = ModelResourceDemand(
         memoryBytes = MODEL_RESIDENT_MEMORY_BYTES +
-            (profile.inputBudgetTokens + profile.outputBudgetTokens).toLong() * KV_CACHE_BYTES_PER_TOKEN,
+            (inputTokens + profile.outputBudgetTokens).toLong() * KV_CACHE_BYTES_PER_TOKEN,
         cpuUnits = MODEL_CPU_UNITS,
     )
 

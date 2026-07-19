@@ -258,8 +258,9 @@ class ModelConversationInterpreter(
             append("\n\nNew user message:\n")
             append(json.encodeToString(message))
         }
-        require(estimateModelTokens(prompt) <= profile.inputBudgetTokens) { "Conversation context budget exceeded" }
-        val admission = resourceController.tryAcquire(provider.resourceDemand(profile))
+        val promptTokens = estimateModelTokens(prompt)
+        require(promptTokens <= profile.inputBudgetTokens) { "Conversation context budget exceeded" }
+        val admission = resourceController.tryAcquire(provider.resourceDemand(profile, promptTokens))
         val lease = admission.lease ?: error(
             if (admission.evidence.decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE) {
                 "Conversation resource telemetry unavailable"
@@ -295,7 +296,7 @@ class ModelConversationInterpreter(
                 provider = binding.provider,
                 model = binding.model,
                 modelDigest = binding.modelDigest,
-                configurationHash = conversationAuthorityHash(json.encodeToString(binding.configuration.toSortedMap())),
+                configurationHash = conversationAuthorityHash(json.encodeToString<Map<String, String>>(binding.configuration.toSortedMap())),
                 promptHash = conversationAuthorityHash(prompt),
                 outputHash = conversationAuthorityHash(generation.text),
                 promptTokens = generation.promptTokens,

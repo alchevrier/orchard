@@ -6,6 +6,17 @@ import com.orchard.backend.company.CompanyAcceptance
 import com.orchard.backend.company.CompanyProjectView
 import com.orchard.backend.company.LocalPromotion
 import com.orchard.backend.company.ROLE_ARCHITECTURE_AUDITOR
+import com.orchard.backend.resource.MachineCapacityMonitor
+import com.orchard.backend.resource.MachineCapacitySnapshot
+import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.MachineUsagePolicy
+import com.orchard.backend.resource.ModelResourceDemand
+import com.orchard.backend.resource.TransientMachineUsagePolicyStore
+import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
+import com.orchard.backend.vector.ModelBindingProfile
+import com.orchard.backend.vector.ModelExecutionProfile
+import com.orchard.backend.vector.ModelGeneration
+import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.workspace.WorkspaceStore
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
@@ -19,6 +30,44 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 class ConversationConductorTest {
+    @Test
+    fun `small onboarding turn admits actual context demand instead of full aperture`() = runBlocking {
+        var admittedInputTokens = 0
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "local-model",
+                "ollama-local",
+                "qwen3-coder:30b",
+                131_072,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override fun resourceDemand(profile: ModelExecutionProfile) = ModelResourceDemand(52_000, 1)
+            override fun resourceDemand(profile: ModelExecutionProfile, inputTokens: Int): ModelResourceDemand {
+                admittedInputTokens = inputTokens
+                return ModelResourceDemand(inputTokens.toLong() + profile.outputBudgetTokens, 1)
+            }
+            override suspend fun executeConversation(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int) =
+                ModelGeneration("{\"speechAct\":\"INFORMATION\",\"response\":\"Ready.\"}", admittedInputTokens, 8)
+        }
+        val resources = MachineResourceController(
+            TransientMachineUsagePolicyStore(MachineUsagePolicy(100, 0, 1)),
+            object : MachineCapacityMonitor {
+                override fun snapshot() = MachineCapacitySnapshot(30_000, 30_000, 8, 0.0)
+            },
+        )
+        val interpreter = ModelConversationInterpreter(listOf(provider), resources)
+        val context = ConversationContextManifest(1, recentMessages = emptyList(), objectives = emptyList(), commandStates = emptyList(), summaries = emptyList(), capabilities = emptyList())
+        val message = ConversationMessage(1, 1, 1, "client-onboarding-0001", MESSAGE_ROLE_USER, "Onboard https://example.com/acme/repository.git", actor = "HUMAN", createdAt = NOW, hash = HASH)
+
+        val result = interpreter.interpret(context, message)
+
+        assertEquals("Ready.", result.interpretation.response)
+        assertTrue(admittedInputTokens in 1 until 26_000)
+        assertEquals("ADMITTED", result.resourceDecision)
+    }
+
     @Test
     fun `default registry exposes typed project setup authority`() {
         val descriptors = defaultConversationCapabilities(WorkspaceStore()).descriptors().associateBy { it.id }
