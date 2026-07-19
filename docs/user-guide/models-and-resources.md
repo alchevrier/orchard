@@ -24,7 +24,7 @@ Cloud escalation is not an automatic retry after arbitrary local generation fail
 
 ## Configure Ollama
 
-On first launch, Orchard recommends a complete `LOCAL_ONLY` catalog and all six workload assignments from the machine's memory. The recommendation includes exact `ollama pull` commands and remains candidate configuration until you apply it.
+On first launch, Orchard applies a complete `LOCAL_ONLY` catalog and all six workload assignments from the machine's memory before constructing the model runtime. An untouched legacy catalog is migrated automatically, while any customized catalog or profile aperture is preserved. Execution settings show the exact `ollama pull` commands and allow deliberate replacement afterward.
 
 | Hardware tier | General, analysis, and audit | Coding | Notes |
 | --- | --- | --- | --- |
@@ -91,7 +91,7 @@ Orchard currently separates reasoning by bounded profiles:
 
 A binding must expose strict JSON and enough total context for the selected profile. Per-profile input/output overrides are durable configuration, but incompatible reductions can prevent routing or validation.
 
-Hardware presets resize these apertures when the default would exceed safe admission capacity. Applying a preset replaces all six assignments together; selecting a workload stage in execution settings then permits deliberate per-stage customization.
+Hardware presets resize these apertures when the default would exceed safe admission capacity. Startup installs the detected preset as one complete catalog/profile unit; applying a different preset later replaces all six assignments together. Selecting a workload stage in execution settings then permits deliberate per-stage customization.
 
 ## Machine Resource Policy
 

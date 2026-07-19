@@ -3371,7 +3371,7 @@ class WorkspaceStore(
     private fun message(messageCode: Int): String = when (messageCode) {
         MESSAGE_CREATED -> "Created ${typeLabel(lastCreatedType)}: ${entities.lastOrNull()?.title.orEmpty()}"
         MESSAGE_REJECTED -> "The Architect rejected operation $lastRejectedOperation: ${planRejectionLabel(lastPlanRejectionReason)}."
-        MESSAGE_OLLAMA_UNAVAILABLE -> "The local Ollama planner is unavailable. Check that phi3:mini is running."
+        MESSAGE_OLLAMA_UNAVAILABLE -> "The configured local Ollama model is unavailable. Check the endpoint and installed model bindings."
         MESSAGE_CLARIFY -> "I could not identify both the action and item. Include project, epic, story, task, or bug plus what you want done."
         MESSAGE_UNSUPPORTED_ACTION -> "I understood the request, but this MVP currently supports creation only. Update, delete, and query actions are classified but not yet applied."
         MESSAGE_BUSY -> "The Architect is still processing the previous request. Please send this again when it completes."

@@ -167,7 +167,7 @@ Delivered and verified:
 - Live registry wiring for Architect, Genesis, work definition, circuit synthesis, repository analysis, coding, and company staffing.
 - Catalog retrieval/replacement and explicit model-discovery health APIs.
 - Hardware-aware classic PC and Apple silicon presets covering 8, 16, 32, 64, 96, and 128 GiB tiers with complete workload-to-model routing and admission-safe apertures.
-- First-run recommendation and one-shot application in the cockpit, followed by independent customization of every workload stage.
+- Automatic first-run bootstrap from detected hardware, guarded migration of untouched legacy configuration, and independent customization of every workload stage in the cockpit.
 - Setup and launch scripts that install and verify the complete recommended role-model set while preserving explicit model overrides.
 - Cockpit configuration for Ollama, LM Studio, other OpenAI-compatible servers, and optional remote endpoints.
 - Deterministic tests for persistence recovery, secret rejection, remote-policy rejection, both transport protocols, discovery, bearer resolution, live API replacement, and local-preferred routing.

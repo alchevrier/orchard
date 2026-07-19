@@ -39,6 +39,7 @@ import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProfileUpdateStatus
 import com.orchard.backend.vector.LocalModelSetupRecommendations
 import com.orchard.backend.vector.ModelSetupApplication
+import com.orchard.backend.vector.bootstrapDetectedLocalModelSetup
 import com.orchard.backend.resource.FileMachineUsagePolicyStore
 import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.MachineUsagePolicy
@@ -147,22 +148,32 @@ fun main() {
         FileProjectGenesisStore(OrchardPaths.WORKSPACE_DIR),
         enforceProjectGenesis = true,
     )
-    val modelProviderRegistry = ModelProviderRegistry(FileModelProviderCatalogStore(OrchardPaths.WORKSPACE_DIR))
+    val machineCapacityMonitor = SystemMachineCapacityMonitor()
+    val modelProviderCatalogStore = FileModelProviderCatalogStore(OrchardPaths.WORKSPACE_DIR)
+    val modelProfileSettingsStore = FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR)
+    val machineCapacity = machineCapacityMonitor.snapshot()
+    bootstrapDetectedLocalModelSetup(
+        modelProviderCatalogStore,
+        modelProfileSettingsStore,
+        LocalModelSetupRecommendations.detectPlatform(),
+        machineCapacity.totalMemoryBytes,
+    )
+    val modelProviderRegistry = ModelProviderRegistry(modelProviderCatalogStore)
     val modelProviders = modelProviderRegistry.providers()
     val resourceController = MachineResourceController(
         FileMachineUsagePolicyStore(OrchardPaths.WORKSPACE_DIR),
-        SystemMachineCapacityMonitor(),
+        machineCapacityMonitor,
     )
     val definitionIntelligence = DefinitionIntelligenceService(
         workspace,
         modelProviders,
-        FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
+        modelProfileSettingsStore,
         resourceController,
     )
     val circuitIntelligence = CircuitIntelligenceService(
         workspace,
         modelProviders,
-        FileModelProfileSettingsStore(OrchardPaths.WORKSPACE_DIR),
+        modelProfileSettingsStore,
         resourceController,
     )
     val genesisIntelligence = GenesisIntelligenceService(workspace, modelProviderRegistry, resourceController)

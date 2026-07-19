@@ -39,6 +39,32 @@ data class ModelSetupApplication(
     val profiles: List<ModelProfileConfiguration>,
 )
 
+enum class ModelSetupBootstrapStatus {
+    APPLIED,
+    PRESERVED_CUSTOM_CONFIGURATION,
+}
+
+fun bootstrapDetectedLocalModelSetup(
+    catalogStore: ModelProviderCatalogStore,
+    profileSettingsStore: ModelProfileSettingsStore,
+    platform: String,
+    usableMemoryBytes: Long,
+): ModelSetupBootstrapStatus {
+    val recommendations = LocalModelSetupRecommendations.forMachine(platform, usableMemoryBytes)
+    val preset = LocalModelSetupRecommendations.resolve(recommendations.recommendedPresetId)
+    val currentCatalog = catalogStore.load()
+    val currentOverrides = profileSettingsStore.load()
+    val legacyCatalog = defaultLocalModelProviderCatalog()
+    val resumablePresetWrite = currentOverrides == preset.profileOverrides
+    if (currentCatalog != legacyCatalog || (currentOverrides.isNotEmpty() && !resumablePresetWrite)) {
+        return ModelSetupBootstrapStatus.PRESERVED_CUSTOM_CONFIGURATION
+    }
+
+    profileSettingsStore.save(preset.profileOverrides)
+    catalogStore.save(preset.catalog)
+    return ModelSetupBootstrapStatus.APPLIED
+}
+
 object LocalModelSetupRecommendations {
     private val LOCAL_OLLAMA_ENDPOINT = ModelEndpointDefinition(
         endpointId = "local-ollama",

@@ -72,7 +72,7 @@ ORCHARD_MODELS=qwen3:8b,qwen2.5-coder:7b ./run_orchard.sh
 
 `ORCHARD_MODELS` changes the models installed or checked by the scripts. The legacy single-model `ORCHARD_MODEL` variable remains supported. Script overrides do not replace Orchard's durable provider catalog by themselves; select the corresponding preset or customize bindings in execution settings.
 
-On first launch with an untouched legacy catalog, Orchard opens execution settings automatically. Review the detected hardware preset, apply it once, and inspect the local endpoint. Every workload stage remains independently editable afterward.
+On first launch, Orchard applies the detected hardware preset before constructing the model runtime. An untouched legacy `phi3:mini` catalog is migrated the same way; customized catalogs or profile apertures are preserved. Open execution settings to inspect the local endpoint or independently customize any workload stage.
 
 ## First Project
 

@@ -59,9 +59,11 @@ The setup and run scripts do not automate Windows. Build and run through a JDK 2
 For the default stack:
 
 ```bash
-ollama serve
-ollama pull phi3:mini
+./setup_orchard.sh
+./run_orchard.sh
 ```
+
+The setup script detects the hardware tier and installs every model referenced by its preset. In execution settings, inspect the Ollama endpoint to compare configured bindings with the models currently installed.
 
 If you intentionally use another provider, start with `./run_orchard.sh --skip-ollama` and configure that provider in Orchard.
 

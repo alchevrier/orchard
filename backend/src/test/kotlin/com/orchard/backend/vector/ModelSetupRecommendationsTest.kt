@@ -12,6 +12,7 @@ import io.ktor.client.request.post
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -96,6 +97,79 @@ class ModelSetupRecommendationsTest {
         assertEquals(MODEL_SETUP_PLATFORM_APPLE_SILICON, LocalModelSetupRecommendations.detectPlatform("Mac OS X", "aarch64"))
         assertEquals(MODEL_SETUP_PLATFORM_CLASSIC_PC, LocalModelSetupRecommendations.detectPlatform("Mac OS X", "x86_64"))
         assertEquals(MODEL_SETUP_PLATFORM_CLASSIC_PC, LocalModelSetupRecommendations.detectPlatform("Linux", "aarch64"))
+    }
+
+    @Test
+    fun `startup replaces only untouched legacy model configuration`() {
+        val catalogStore = TransientModelProviderCatalogStore()
+        val profileStore = TransientModelProfileSettingsStore()
+
+        val status = bootstrapDetectedLocalModelSetup(
+            catalogStore,
+            profileStore,
+            MODEL_SETUP_PLATFORM_APPLE_SILICON,
+            32 * GIBIBYTE,
+        )
+
+        assertEquals(ModelSetupBootstrapStatus.APPLIED, status)
+        assertEquals(setOf("qwen3:14b", "qwen2.5-coder:14b"), catalogStore.load().bindings.map { it.model }.toSet())
+        assertEquals(6, profileStore.load().size)
+    }
+
+    @Test
+    fun `startup migrates persisted legacy catalog and profiles together`() {
+        val directory = createTempDirectory("orchard-model-bootstrap-")
+        val catalogStore = FileModelProviderCatalogStore(directory)
+        val profileStore = FileModelProfileSettingsStore(directory)
+        assertEquals("phi3:mini", catalogStore.load().bindings.single().model)
+
+        val status = bootstrapDetectedLocalModelSetup(
+            catalogStore,
+            profileStore,
+            MODEL_SETUP_PLATFORM_APPLE_SILICON,
+            64 * GIBIBYTE,
+        )
+
+        assertEquals(ModelSetupBootstrapStatus.APPLIED, status)
+        assertEquals("qwen3-coder:30b", FileModelProviderCatalogStore(directory).load().bindings.single().model)
+        val recoveredProfiles = FileModelProfileSettingsStore(directory).load()
+        assertEquals(6, recoveredProfiles.size)
+        assertTrue(recoveredProfiles.all { it.preferredBindingId == "ollama:qwen3-coder-30b:json:t0:s42" })
+    }
+
+    @Test
+    fun `startup completes interrupted preset write but preserves customization`() {
+        val preset = LocalModelSetupRecommendations.resolve("apple-silicon-32gb")
+        val interruptedCatalogStore = TransientModelProviderCatalogStore()
+        val interruptedProfileStore = TransientModelProfileSettingsStore().also { it.save(preset.profileOverrides) }
+
+        assertEquals(
+            ModelSetupBootstrapStatus.APPLIED,
+            bootstrapDetectedLocalModelSetup(
+                interruptedCatalogStore,
+                interruptedProfileStore,
+                MODEL_SETUP_PLATFORM_APPLE_SILICON,
+                32 * GIBIBYTE,
+            ),
+        )
+        assertEquals(preset.catalog, interruptedCatalogStore.load())
+
+        val customCatalog = defaultLocalModelProviderCatalog().copy(
+            bindings = defaultLocalModelProviderCatalog().bindings.map { it.copy(model = "my-model") },
+        )
+        val customCatalogStore = TransientModelProviderCatalogStore(customCatalog)
+        val customProfileStore = TransientModelProfileSettingsStore()
+        assertEquals(
+            ModelSetupBootstrapStatus.PRESERVED_CUSTOM_CONFIGURATION,
+            bootstrapDetectedLocalModelSetup(
+                customCatalogStore,
+                customProfileStore,
+                MODEL_SETUP_PLATFORM_APPLE_SILICON,
+                32 * GIBIBYTE,
+            ),
+        )
+        assertEquals(customCatalog, customCatalogStore.load())
+        assertTrue(customProfileStore.load().isEmpty())
     }
 
     @Test
