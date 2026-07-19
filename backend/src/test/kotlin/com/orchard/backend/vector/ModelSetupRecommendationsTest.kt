@@ -114,10 +114,14 @@ class ModelSetupRecommendationsTest {
 
         val recommendations = client.get("/api/model-setup/recommendations")
         assertEquals(HttpStatusCode.OK, recommendations.status)
+        val decodedRecommendations = Json.decodeFromString<ModelSetupRecommendations>(recommendations.bodyAsText())
+        val expectedPlatform = LocalModelSetupRecommendations.detectPlatform()
         assertEquals(
-            "classic-pc-32gb",
-            Json.decodeFromString<ModelSetupRecommendations>(recommendations.bodyAsText()).recommendedPresetId,
+            expectedPlatform,
+            decodedRecommendations.detectedPlatform,
         )
+        val expectedPresetPrefix = if (expectedPlatform == MODEL_SETUP_PLATFORM_APPLE_SILICON) "apple-silicon" else "classic-pc"
+        assertEquals("$expectedPresetPrefix-32gb", decodedRecommendations.recommendedPresetId)
 
         val applied = client.post("/api/model-setup/presets/apple-silicon-32gb/apply")
         assertEquals(HttpStatusCode.OK, applied.status)
