@@ -22,6 +22,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
 import java.time.Duration
@@ -162,7 +163,7 @@ class CatalogModelProvider(
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
         if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
             val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true)
-            val completed = if (structured.response.isBlank() || structured.done != true) {
+            val completed = if (structured.done != true || !isJsonObject(structured.response)) {
                 generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false)
             } else {
                 structured
@@ -275,6 +276,9 @@ class CatalogModelProvider(
     }
 
     private fun url(path: String): String = endpoint.baseUrl.trimEnd('/') + path
+
+    private fun isJsonObject(value: String): Boolean = runCatching { json.parseToJsonElement(value) is JsonObject }
+        .getOrDefault(false)
 
     private fun ollamaThinkControl(): JsonPrimitive = if (binding.model.substringBefore(':').equals("gpt-oss", ignoreCase = true)) {
         JsonPrimitive("low")

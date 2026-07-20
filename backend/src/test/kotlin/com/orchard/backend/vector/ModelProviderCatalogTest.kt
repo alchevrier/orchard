@@ -244,6 +244,35 @@ class ModelProviderCatalogTest {
     }
 
     @Test
+    fun `Ollama adapter retries completed malformed structured response`() = runTest {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += (request.body as? TextContent)?.text.orEmpty()
+            if (requests.size == 1) {
+                respond(
+                    """{"response":"{not-json}","done":true,"done_reason":"stop","eval_count":8}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            } else {
+                respond(
+                    """{"response":"{\"ok\":true}","done":true,"done_reason":"stop","prompt_eval_count":7,"eval_count":3}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+
+        val generation = provider.executeWorkDefinition("prompt", 128, 4_096)
+        provider.close()
+
+        assertEquals("{\"ok\":true}", generation.text)
+        assertEquals(2, requests.size)
+        assertTrue(requests.first().contains("\"format\":\"json\""))
+        assertFalse(requests.last().contains("\"format\""))
+    }
+
+    @Test
     fun `OpenAI compatible adapter resolves bearer at request time and uses JSON mode`() = runTest {
         var authorization: String? = null
         var body = ""
