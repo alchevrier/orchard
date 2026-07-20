@@ -359,7 +359,7 @@ private fun ProposalStep(
 
     if (step == ConductorSetupStep.ARCHITECTURE && state.epics.isEmpty()) {
         Text(
-            "Start with one concrete outcome people should be able to complete. Name it here; Orchard will create the implementation milestone and continue to architecture planning.",
+            "Start with one concrete outcome people should be able to complete. Orchard will record it, form the technical plan, and present that plan for your review.",
             Modifier.padding(top = 12.dp),
             color = SetupMuted,
             fontSize = 11.sp,
@@ -374,8 +374,8 @@ private fun ProposalStep(
             label = { Text("First working outcome") },
         )
         SetupAction(
-            label = "Create first outcome",
-            loadingLabel = "Creating outcome...",
+            label = "Create outcome and form plan",
+            loadingLabel = "Creating outcome and forming plan...",
             isSubmitting = isSubmitting,
             enabled = epicTitle.isNotBlank(),
             onClick = { onCreateFirstOutcome(epicTitle.trim()) },

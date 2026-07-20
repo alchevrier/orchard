@@ -238,6 +238,37 @@ internal fun DurableConversationWorkspace(
         }
     }
 
+    fun createFirstOutcome(title: String) {
+        val current = projectSetup ?: return
+        val revision = current.genesis.revision ?: return
+        if (isSetupSubmitting || title.isBlank()) return
+        isSetupSubmitting = true
+        setupError = null
+        scope.launch {
+            var outcomeCreated = false
+            runCatching {
+                networkClient.createProjectGenesisFirstOutcome(
+                    current.projectId,
+                    title,
+                    revision.revision,
+                    revision.hash,
+                )
+                outcomeCreated = true
+                refreshProjectSetup(current.projectId)
+                networkClient.proposeProjectGenesis(current.projectId, title)
+            }.onSuccess { genesisProposal = it }
+                .onFailure { failure ->
+                    setupError = if (outcomeCreated) {
+                        "The first working outcome was recorded, but the Architect could not form the technical plan. " +
+                            (failure.message ?: "Edit the prompt and choose Form proposal to retry.")
+                    } else {
+                        failure.message ?: "The first working outcome could not be created."
+                    }
+                }
+            isSetupSubmitting = false
+        }
+    }
+
     fun control(objective: ConversationObjectiveResponse, action: String, priority: Int? = null, dependencies: List<Long>? = null) {
         scope.launch {
             runCatching {
@@ -335,17 +366,7 @@ internal fun DurableConversationWorkspace(
                         onAdmitGenesis = {
                             runSetupMutation { setup -> networkClient.admitProjectGenesis(setup.projectId) }
                         },
-                        onCreateFirstOutcome = { title ->
-                            runSetupMutation { setup ->
-                                val revision = requireNotNull(setup.genesis.revision)
-                                networkClient.createProjectGenesisFirstOutcome(
-                                    setup.projectId,
-                                    title,
-                                    revision.revision,
-                                    revision.hash,
-                                )
-                            }
-                        },
+                        onCreateFirstOutcome = ::createFirstOutcome,
                     )
                     Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
                     AuthorityRail(
