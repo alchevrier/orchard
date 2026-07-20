@@ -138,7 +138,7 @@ class ModelProviderCatalogTest {
             requests += "${request.method.value} ${request.url.encodedPath} ${(request.body as? TextContent)?.text.orEmpty()}"
             when (request.url.encodedPath) {
                 "/api/generate" -> respond(
-                    """{"response":"{\"ok\":true}","prompt_eval_count":7,"eval_count":3}""",
+                    """{"response":"{\"ok\":true}","done":true,"prompt_eval_count":7,"eval_count":3}""",
                     headers = headersOf(HttpHeaders.ContentType, "application/json"),
                 )
                 "/api/tags" -> respond(
@@ -207,6 +207,35 @@ class ModelProviderCatalogTest {
         assertTrue(diagnostics.last().contains("\"formatPresent\":false"))
         assertTrue(diagnostics.all { it.contains("\"httpStatus\":200") && it.contains("\"think\":false") })
         assertTrue(diagnostics.none { it.contains(privatePrompt) || it.contains("private reasoning") || it.contains("PROPOSE_DOMAIN_ACTION") })
+    }
+
+    @Test
+    fun `Ollama adapter retries incomplete structured response`() = runTest {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += (request.body as? TextContent)?.text.orEmpty()
+            if (requests.size == 1) {
+                respond(
+                    """{"response":"{\"partial\":", "done":false}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            } else {
+                respond(
+                    """{"response":"{\"ok\":true}","done":true,"done_reason":"stop","prompt_eval_count":7,"eval_count":3}""",
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+
+        val generation = provider.executeWorkDefinition("prompt", 128, 4_096)
+        provider.close()
+
+        assertEquals("{\"ok\":true}", generation.text)
+        assertEquals(2, requests.size)
+        assertTrue(requests.first().contains("\"format\":\"json\""))
+        assertFalse(requests.last().contains("\"format\""))
     }
 
     @Test

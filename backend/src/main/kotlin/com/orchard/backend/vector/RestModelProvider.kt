@@ -160,14 +160,14 @@ class CatalogModelProvider(
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
         if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
             val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true)
-            val completed = if (structured.response.isBlank()) {
+            val completed = if (structured.response.isBlank() || structured.done != true) {
                 generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false)
             } else {
                 structured
             }
-            check(completed.response.isNotBlank()) {
-                "Provider ${endpoint.endpointId} returned an empty response after structured and plain retries " +
-                    "(structured=${structured.doneReason.orEmpty()}, plain=${completed.doneReason.orEmpty()})"
+            check(completed.response.isNotBlank() && completed.done == true) {
+                "Provider ${endpoint.endpointId} did not complete after structured and plain retries " +
+                    "(structuredDone=${structured.done}, plainDone=${completed.done})"
             }
             return ModelGeneration(
                 completed.response,
