@@ -110,6 +110,14 @@ class DurableConversationWorkspaceTest {
             "Plan the first working outcome",
             proposalStepHeading(ConductorSetupStep.ARCHITECTURE, hasProposal = false),
         )
+        assertEquals(
+            "Design how to deliver the first outcome",
+            proposalStepHeading(
+                ConductorSetupStep.ARCHITECTURE,
+                hasProposal = false,
+                hasFirstOutcome = true,
+            ),
+        )
     }
 
     @Test
@@ -125,6 +133,25 @@ class DurableConversationWorkspaceTest {
         assertEquals(
             "Who is this for?",
             proposalPromptDefault(ConductorSetupStep.EXPERIENCE, "", "Who is this for?"),
+        )
+    }
+
+    @Test
+    fun `architecture prompt changes from question to recorded outcome`() {
+        val question = "What should people be able to accomplish first?"
+
+        assertEquals(
+            question,
+            proposalPromptDefault(ConductorSetupStep.ARCHITECTURE, "", question),
+        )
+        assertEquals(
+            "Complete the first user journey",
+            proposalPromptDefault(
+                ConductorSetupStep.ARCHITECTURE,
+                "",
+                question,
+                "Complete the first user journey",
+            ),
         )
     }
 

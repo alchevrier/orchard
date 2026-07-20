@@ -313,22 +313,29 @@ private fun ProposalStep(
     onApply: () -> Unit,
     onCreateFirstOutcome: (String) -> Unit,
 ) {
-    var prompt by remember(state.genesis.phase, state.genesis.revision?.hash) {
+    val firstOutcome = state.epics.firstOrNull()?.second.orEmpty()
+    var prompt by remember(state.genesis.phase, state.genesis.revision?.hash, firstOutcome) {
         mutableStateOf(
             proposalPromptDefault(
                 step,
                 state.genesis.revision?.productIntent.orEmpty(),
                 state.genesis.nextQuestion,
+                firstOutcome,
             )
         )
     }
     var epicTitle by remember(state.projectId, state.epics) { mutableStateOf("") }
     var showManualExperience by remember(state.genesis.revision?.hash) { mutableStateOf(false) }
     val candidate = proposal?.takeIf { it.phase == state.genesis.phase }
-    val heading = proposalStepHeading(step, candidate != null)
+    val heading = proposalStepHeading(step, candidate != null, firstOutcome.isNotEmpty())
     Text(heading, color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
     Text(
-        if (candidate == null) state.genesis.nextQuestion else "The candidate is ready for review. Apply it to record this decision and continue to the next step.",
+        when {
+            candidate != null -> "The candidate is ready for review. Apply it to record this decision and continue to the next step."
+            step == ConductorSetupStep.ARCHITECTURE && firstOutcome.isNotEmpty() ->
+                "The first working outcome is recorded. Now form the technical plan needed to deliver it."
+            else -> state.genesis.nextQuestion
+        },
         Modifier.padding(top = 7.dp),
         color = SetupMuted,
         fontSize = 12.sp,
@@ -377,13 +384,12 @@ private fun ProposalStep(
     }
 
     if (step == ConductorSetupStep.ARCHITECTURE) {
-        Text(
-            "First outcome: ${state.epics.first().second}",
-            Modifier.padding(top = 12.dp).background(SetupGreenSoft, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
-            color = SetupGreen,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-        )
+        Column(
+            Modifier.fillMaxWidth().padding(top = 12.dp).background(SetupGreenSoft, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Text("OUTCOME RECORDED", color = SetupGreen, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Text(firstOutcome, Modifier.padding(top = 4.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
+        }
     }
     OutlinedTextField(
         value = prompt,
@@ -428,9 +434,17 @@ private fun ProposalStep(
     }
 }
 
-internal fun proposalStepHeading(step: ConductorSetupStep, hasProposal: Boolean): String = when (step) {
+internal fun proposalStepHeading(
+    step: ConductorSetupStep,
+    hasProposal: Boolean,
+    hasFirstOutcome: Boolean = false,
+): String = when (step) {
     ConductorSetupStep.EXPERIENCE -> if (hasProposal) "Review the experience proposal" else "Describe the experience"
-    ConductorSetupStep.ARCHITECTURE -> if (hasProposal) "Review the architecture proposal" else "Plan the first working outcome"
+    ConductorSetupStep.ARCHITECTURE -> when {
+        hasProposal -> "Review the architecture proposal"
+        hasFirstOutcome -> "Design how to deliver the first outcome"
+        else -> "Plan the first working outcome"
+    }
     ConductorSetupStep.BLUEPRINT -> if (hasProposal) "Review the repository proposal" else "Confirm the repository plan"
     else -> error("Proposal heading requested for $step")
 }
@@ -439,9 +453,10 @@ internal fun proposalPromptDefault(
     step: ConductorSetupStep,
     productIntent: String,
     nextQuestion: String,
+    firstOutcome: String = "",
 ): String = when (step) {
     ConductorSetupStep.EXPERIENCE -> productIntent.trim().ifEmpty { nextQuestion.trim() }
-    ConductorSetupStep.ARCHITECTURE,
+    ConductorSetupStep.ARCHITECTURE -> firstOutcome.trim().ifEmpty { nextQuestion.trim() }
     ConductorSetupStep.BLUEPRINT -> nextQuestion.trim()
     else -> ""
 }
@@ -513,7 +528,7 @@ private fun setupLines(value: String): List<String> =
 
 private fun proposalPromptLabel(step: ConductorSetupStep): String = when (step) {
     ConductorSetupStep.EXPERIENCE -> "Who is this for, what should they accomplish, and how should it feel?"
-    ConductorSetupStep.ARCHITECTURE -> "Describe the first working outcome, constraints, and important technical decisions"
+    ConductorSetupStep.ARCHITECTURE -> "What technical approach and decisions will deliver this outcome?"
     else -> "Describe the modules, toolchain, and verification commands this repository should use"
 }
 
