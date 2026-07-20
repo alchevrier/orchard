@@ -53,7 +53,7 @@ class CodingWorkspaceGatewayTest {
         val context = LocalCodingWorkspaceGateway().collectGenesisContext(repository.toString(), "component")
 
         assertTrue(context.files.size <= 6)
-        assertTrue(context.files.sumOf { it.content.encodeToByteArray().size } <= 24 * 1024)
+        assertTrue(context.files.sumOf { it.content.encodeToByteArray().size } <= 4 * 1024)
         assertTrue(context.omittedFileCount >= 6)
     }
 

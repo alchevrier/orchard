@@ -395,7 +395,7 @@ class LocalCodingWorkspaceGateway(
         const val MAX_ANALYSIS_CONTEXT_FILES = 96
         const val MAX_ANALYSIS_CONTEXT_BYTES = 768 * 1024
         const val MAX_GENESIS_CONTEXT_FILES = 6
-        const val MAX_GENESIS_CONTEXT_BYTES = 24 * 1024
+        const val MAX_GENESIS_CONTEXT_BYTES = 4 * 1024
         const val MAX_OPERATIONS = 32
         const val MAX_PATCH_BYTES = 512 * 1024
         const val MAX_PATH_LENGTH = 512
