@@ -57,6 +57,32 @@ class CodingWorkspaceGatewayTest {
         assertTrue(context.omittedFileCount >= 6)
     }
 
+    @Test
+    fun `genesis context excludes illustrative and verification code`() {
+        val repository = createTempDirectory("orchard-genesis-production-context-")
+        git(repository, "init")
+        val production = repository.resolve("core/src/main/kotlin/OrderBook.kt")
+        Files.createDirectories(production.parent)
+        Files.writeString(production, "class OrderBook\n")
+        listOf(
+            "autumn-sandbox/src/main/kotlin/ShardedITCHSandbox.kt",
+            "benchmarks/src/jvmMain/kotlin/ItchBenchmark.kt",
+            "core/src/test/kotlin/OrderBookTest.kt",
+            "examples/src/main/kotlin/OrderBookExample.kt",
+            "docs/order-book.md",
+        ).forEach { relative ->
+            repository.resolve(relative).also { file ->
+                Files.createDirectories(file.parent)
+                Files.writeString(file, "class OrderBookFixture\n")
+            }
+        }
+        git(repository, "add", ".")
+
+        val context = LocalCodingWorkspaceGateway().collectGenesisContext(repository.toString(), "order book")
+
+        assertEquals(listOf("core/src/main/kotlin/OrderBook.kt"), context.files.map { it.path })
+    }
+
     private fun git(directory: Path, vararg arguments: String) {
         val process = ProcessBuilder(listOf("git", "-C", directory.toString()) + arguments)
             .redirectErrorStream(true)

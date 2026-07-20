@@ -80,7 +80,13 @@ class LocalCodingWorkspaceGateway(
         collectContext(workspacePath, query, MAX_ANALYSIS_CONTEXT_FILES, MAX_ANALYSIS_CONTEXT_BYTES)
 
     override fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext =
-        collectContext(workspacePath, query, MAX_GENESIS_CONTEXT_FILES, MAX_GENESIS_CONTEXT_BYTES)
+        collectContext(
+            workspacePath,
+            query,
+            MAX_GENESIS_CONTEXT_FILES,
+            MAX_GENESIS_CONTEXT_BYTES,
+            includePath = ::isGenesisImplementationPath,
+        )
 
     override fun currentRevision(workspacePath: String): String? {
         val root = validatedRoot(workspacePath)
@@ -90,13 +96,20 @@ class LocalCodingWorkspaceGateway(
             ?.output
     }
 
-    private fun collectContext(workspacePath: String, query: String, maxFiles: Int, maxBytes: Int): CodingRepositoryContext {
+    private fun collectContext(
+        workspacePath: String,
+        query: String,
+        maxFiles: Int,
+        maxBytes: Int,
+        includePath: (String) -> Boolean = { true },
+    ): CodingRepositoryContext {
         val root = validatedRoot(workspacePath)
         requireGitWorkspace(root)
         val tracked = run(root, listOf("git", "ls-files"), CONTEXT_COMMAND_TIMEOUT_SECONDS).output
             .lineSequence()
             .map(String::trim)
             .filter(String::isNotEmpty)
+            .filter(includePath)
             .mapNotNull { relative -> runCatching { validatedRelative(root, relative, mustExist = true) }.getOrNull() }
             .filter { Files.isRegularFile(it) && !Files.isSymbolicLink(it) }
             .toList()
@@ -127,6 +140,17 @@ class LocalCodingWorkspaceGateway(
         }
         return CodingRepositoryContext(selected, (tracked.size - selected.size).coerceAtLeast(0))
     }
+
+    private fun isGenesisImplementationPath(path: String): Boolean = path
+        .replace('\\', '/')
+        .split('/')
+        .map(String::lowercase)
+        .none { segment ->
+            segment == "docs" || segment == "doc" || segment == "examples" || segment == "example" ||
+                segment == "samples" || segment == "sample" || segment.contains("sandbox") ||
+                segment.contains("benchmark") || segment == "test" || segment.endsWith("test") ||
+                segment == "tests" || segment.endsWith("tests")
+        }
 
     override fun applyAndCommit(
         workspacePath: String,
