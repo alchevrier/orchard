@@ -21,6 +21,8 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
 import java.time.Duration
 
@@ -206,6 +208,7 @@ class CatalogModelProvider(
         contextWindowTokens: Int,
         structured: Boolean,
     ): OllamaCatalogResponse {
+        val think = ollamaThinkControl()
         val options = OllamaCatalogOptions(
             temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
             seed = binding.configuration["seed"]?.toIntOrNull() ?: 42,
@@ -217,9 +220,9 @@ class CatalogModelProvider(
             authorize()
             header(HttpHeaders.ContentType, ContentType.Application.Json)
             if (structured) {
-                setBody(OllamaCatalogRequest(binding.model, prompt, options = options))
+                setBody(OllamaCatalogRequest(binding.model, prompt, think = think, options = options))
             } else {
-                setBody(OllamaCatalogPlainRequest(binding.model, prompt, options = options))
+                setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options))
             }
         }
         val body = response.bodyAsText()
@@ -244,7 +247,7 @@ class CatalogModelProvider(
                             numContext = contextWindowTokens,
                             numPredict = maxOutputTokens,
                             formatPresent = structured,
-                            think = false,
+                            think = think,
                         )
                     )
                 )
@@ -272,6 +275,12 @@ class CatalogModelProvider(
     }
 
     private fun url(path: String): String = endpoint.baseUrl.trimEnd('/') + path
+
+    private fun ollamaThinkControl(): JsonPrimitive = if (binding.model.substringBefore(':').equals("gpt-oss", ignoreCase = true)) {
+        JsonPrimitive("low")
+    } else {
+        JsonPrimitive(false)
+    }
 
     private fun ollamaModelRecentlyLoaded(): Boolean {
         val residentUntil = ollamaResidentUntilNanos
@@ -383,7 +392,7 @@ private data class OllamaCatalogRequest(
     val prompt: String,
     val stream: Boolean = false,
     val format: String = "json",
-    val think: Boolean = false,
+    val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
 )
 
@@ -392,7 +401,7 @@ private data class OllamaCatalogPlainRequest(
     val model: String,
     val prompt: String,
     val stream: Boolean = false,
-    val think: Boolean = false,
+    val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
 )
 
@@ -430,7 +439,7 @@ private data class OllamaAttemptDiagnostic(
     val numContext: Int,
     val numPredict: Int? = null,
     val formatPresent: Boolean,
-    val think: Boolean,
+    val think: JsonElement,
 )
 
 @Serializable

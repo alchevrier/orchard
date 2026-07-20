@@ -227,7 +227,11 @@ class ModelProviderCatalogTest {
             }
         }
         val catalog = defaultLocalModelProviderCatalog()
-        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+        val provider = CatalogModelProvider(
+            catalog.endpoints.single(),
+            catalog.bindings.single().copy(model = "gpt-oss:120b"),
+            engine = engine,
+        )
 
         val generation = provider.executeWorkDefinition("prompt", 128, 4_096)
         provider.close()
@@ -236,6 +240,7 @@ class ModelProviderCatalogTest {
         assertEquals(2, requests.size)
         assertTrue(requests.first().contains("\"format\":\"json\""))
         assertFalse(requests.last().contains("\"format\""))
+        assertTrue(requests.all { it.contains("\"think\":\"low\"") })
     }
 
     @Test
