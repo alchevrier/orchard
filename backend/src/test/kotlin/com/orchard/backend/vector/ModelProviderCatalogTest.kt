@@ -43,6 +43,36 @@ class ModelProviderCatalogTest {
     }
 
     @Test
+    fun `recent Ollama generation does not charge resident model twice`() = runTest {
+        var now = 1L
+        val engine = MockEngine {
+            respond(
+                """{"response":"{\"ok\":true}","done":true,"prompt_eval_count":7,"eval_count":3}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val binding = catalog.bindings.single()
+        val provider = CatalogModelProvider(
+            catalog.endpoints.single(),
+            binding,
+            engine = engine,
+            nanoTime = { now },
+        )
+        val profile = DefaultModelExecutionProfiles.boundedDefinitionReasoning
+        val coldDemand = provider.resourceDemand(profile, 100)
+
+        provider.executeWorkDefinition("prompt", profile.outputBudgetTokens, 4_096)
+        val residentDemand = provider.resourceDemand(profile, 100)
+        now += java.time.Duration.ofMinutes(5).toNanos()
+        val expiredDemand = provider.resourceDemand(profile, 100)
+        provider.close()
+
+        assertEquals(binding.residentMemoryBytes, coldDemand.memoryBytes - residentDemand.memoryBytes)
+        assertEquals(coldDemand, expiredDemand)
+    }
+
+    @Test
     fun `catalog bootstraps local Ollama and recovers without secrets`() {
         val directory = createTempDirectory("orchard-provider-catalog-")
         val store = FileModelProviderCatalogStore(directory)

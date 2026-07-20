@@ -22,6 +22,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.time.Duration
 
 @Serializable
 data class ModelEndpointInspection(
@@ -51,10 +52,13 @@ class CatalogModelProvider(
     private val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
     private val providerDiagnosticsEnabled: Boolean = System.getenv("ORCHARD_PROVIDER_DIAGNOSTICS") == "1",
     private val diagnosticSink: (String) -> Unit = ::println,
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : ModelProvider {
     private val client = if (engine == null) HttpClient(CIO) { configure() } else HttpClient(engine) { configure() }
     private val triagePrompt = loadPrompt("architect_phase0_triage.md")
     private val planningPrompt = loadPrompt("architect_phase2_planning.md")
+    @Volatile
+    private var ollamaResidentUntilNanos = 0L
 
     init {
         validateModelProviderCatalog(
@@ -121,8 +125,9 @@ class CatalogModelProvider(
 
     override fun resourceDemand(profile: ModelExecutionProfile, inputTokens: Int): ModelResourceDemand = if (endpoint.locality == PROVIDER_LOCALITY_LOCAL) {
         require(inputTokens in 0..profile.inputBudgetTokens) { "Model input token demand exceeds the execution profile" }
+        val residentDemand = if (ollamaModelRecentlyLoaded()) 0 else binding.residentMemoryBytes
         ModelResourceDemand(
-            binding.residentMemoryBytes + (inputTokens + profile.outputBudgetTokens).toLong() * KV_CACHE_BYTES_PER_TOKEN,
+            residentDemand + (inputTokens + profile.outputBudgetTokens).toLong() * KV_CACHE_BYTES_PER_TOKEN,
             binding.cpuUnits,
         )
     } else {
@@ -221,6 +226,7 @@ class CatalogModelProvider(
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
         return json.decodeFromString<OllamaCatalogResponse>(body).also { decoded ->
+            ollamaResidentUntilNanos = nanoTime() + OLLAMA_RESIDENCY_WINDOW_NANOS
             if (providerDiagnosticsEnabled) {
                 diagnosticSink(
                     "ORCHARD_PROVIDER_DIAGNOSTIC " + json.encodeToString(
@@ -267,6 +273,12 @@ class CatalogModelProvider(
 
     private fun url(path: String): String = endpoint.baseUrl.trimEnd('/') + path
 
+    private fun ollamaModelRecentlyLoaded(): Boolean {
+        val residentUntil = ollamaResidentUntilNanos
+        return endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE &&
+            residentUntil != 0L && residentUntil - nanoTime() > 0
+    }
+
     private fun loadPrompt(name: String): String = requireNotNull(
         CatalogModelProvider::class.java.getResourceAsStream("/default-system-prompts/$name")
     ).bufferedReader().use { it.readText() }
@@ -278,6 +290,7 @@ class CatalogModelProvider(
         const val MAX_RESPONSE_BYTES = 2 * 1024 * 1024
         const val MAX_DISCOVERY_BYTES = 512 * 1024
         const val KV_CACHE_BYTES_PER_TOKEN = 393_216L
+        val OLLAMA_RESIDENCY_WINDOW_NANOS = Duration.ofMinutes(4).toNanos()
     }
 }
 
