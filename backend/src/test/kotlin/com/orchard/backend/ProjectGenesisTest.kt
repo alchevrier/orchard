@@ -254,6 +254,50 @@ class ProjectGenesisTest {
     }
 
     @Test
+    fun validArchitectureUsesProviderTokenCountInsteadOfJsonByteLength() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val longResponsibility = "Deliver the admitted working outcome. ".repeat(80)
+        val output = """{
+            "submission": {
+                "components": [{
+                    "componentId": "core",
+                    "name": "Core component",
+                    "responsibility": "$longResponsibility",
+                    "repositoryPaths": ["src"]
+                }],
+                "decisions": [{
+                    "decisionId": "ADR-GENESIS-1",
+                    "title": "Founding decision",
+                    "context": "The first outcome needs one bounded implementation path.",
+                    "decision": "Use the core component.",
+                    "consequences": ["The first delivery remains focused."],
+                    "componentIds": ["core"]
+                }],
+                "firstEpicId": 2,
+                "baseRevision": 2
+            }
+        }""".trimIndent()
+        assertTrue(output.encodeToByteArray().size > 2_000)
+
+        val result = GenesisIntelligenceService(workspace, FakeGenesisModel(output, completionTokens = 1_800))
+            .propose(1, GenesisProposalRequest("Deliver the first working outcome."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertEquals(2, result.proposal?.submission?.firstEpicId)
+    }
+
+    @Test
     fun firstWorkingOutcomeIsRevisionPinnedAndCreatedWithoutConversationObjective() = testApplication {
         val workspace = WorkspaceStore()
         workspace.beginBatch()
@@ -520,7 +564,10 @@ class ProjectGenesisTest {
         }
     }
 
-    private class FakeGenesisModel(private val output: String) : ModelProvider {
+    private class FakeGenesisModel(
+        private val output: String,
+        private val completionTokens: Int = output.length,
+    ) : ModelProvider {
         var lastPrompt: String = ""
             private set
 
@@ -538,7 +585,7 @@ class ProjectGenesisTest {
             contextWindowTokens: Int,
         ): ModelGeneration {
             lastPrompt = prompt
-            return ModelGeneration(output, prompt.length, output.length)
+            return ModelGeneration(output, prompt.length, completionTokens)
         }
     }
 }

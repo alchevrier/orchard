@@ -148,8 +148,7 @@ class GenesisIntelligenceService(
         }
         if (
             generation.promptTokens > profile.inputBudgetTokens ||
-            generation.completionTokens > profile.outputBudgetTokens ||
-            estimateModelTokens(generation.text) > profile.outputBudgetTokens
+            generation.completionTokens > profile.outputBudgetTokens
         ) return GenesisProposalResult(GenesisProposalStatus.INVALID_OUTPUT)
         val decoded = decodeProposalOutput(generation.text)
         val output = decoded.output
