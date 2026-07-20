@@ -10,7 +10,9 @@ import com.orchard.frontend.network.EngineeringStandardsViewResponse
 import com.orchard.frontend.network.ProjectGenesisViewResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class DurableConversationWorkspaceTest {
     @Test
@@ -151,6 +153,24 @@ class DurableConversationWorkspaceTest {
                 "",
                 question,
                 "Complete the first user journey",
+            ),
+        )
+    }
+
+    @Test
+    fun `proposal feedback creates an explicit refinement turn`() {
+        assertTrue(proposalNeedsRefinement(listOf("Which transport is authoritative?"), null))
+        assertTrue(proposalNeedsRefinement(emptyList(), "The proposal is missing a storage decision."))
+        assertFalse(proposalNeedsRefinement(emptyList(), null))
+        assertEquals("Refine proposal", proposalActionLabel(hasProposal = true, needsRefinement = true))
+        assertEquals("Regenerate proposal", proposalActionLabel(hasProposal = true, needsRefinement = false))
+        assertEquals(
+            "Complete the architecture proposal",
+            proposalStepHeading(
+                ConductorSetupStep.ARCHITECTURE,
+                hasProposal = true,
+                hasFirstOutcome = true,
+                needsRefinement = true,
             ),
         )
     }

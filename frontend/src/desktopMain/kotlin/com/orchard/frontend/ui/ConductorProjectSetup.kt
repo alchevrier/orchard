@@ -90,6 +90,7 @@ internal fun conductorSetupStep(state: ConductorProjectSetupState): ConductorSet
 internal fun ConductorProjectSetupCard(
     state: ConductorProjectSetupState,
     proposal: GenesisProposalResponse?,
+    proposalFeedback: String?,
     isSubmitting: Boolean,
     error: String?,
     onAdoptStandards: (EngineeringStandardSubmissionRequest) -> Unit,
@@ -121,6 +122,7 @@ internal fun ConductorProjectSetupCard(
                         step,
                         proposal,
                         isSubmitting,
+                        proposalFeedback,
                         onAdvance,
                         onGenerateProposal,
                         onApplyProposal,
@@ -130,15 +132,8 @@ internal fun ConductorProjectSetupCard(
                     ConductorSetupStep.READY -> ReadyStep(state)
                 }
                 if (!error.isNullOrBlank()) {
-                    val recovery = if (step in setOf(
-                            ConductorSetupStep.EXPERIENCE,
-                            ConductorSetupStep.ARCHITECTURE,
-                            ConductorSetupStep.BLUEPRINT,
-                        )) {
-                        "\n\nYour description is preserved. Edit it and choose Form proposal again."
-                    } else ""
                     Text(
-                        error + recovery,
+                        error,
                         Modifier.fillMaxWidth().padding(top = 12.dp).background(SetupAmberSoft, RoundedCornerShape(6.dp)).padding(10.dp),
                         color = SetupAmber,
                         fontSize = 11.sp,
@@ -308,6 +303,7 @@ private fun ProposalStep(
     step: ConductorSetupStep,
     proposal: GenesisProposalResponse?,
     isSubmitting: Boolean,
+    feedback: String?,
     onAdvance: (ProjectGenesisSubmissionRequest) -> Unit,
     onGenerate: (String) -> Unit,
     onApply: () -> Unit,
@@ -327,10 +323,13 @@ private fun ProposalStep(
     var epicTitle by remember(state.projectId, state.epics) { mutableStateOf("") }
     var showManualExperience by remember(state.genesis.revision?.hash) { mutableStateOf(false) }
     val candidate = proposal?.takeIf { it.phase == state.genesis.phase }
-    val heading = proposalStepHeading(step, candidate != null, firstOutcome.isNotEmpty())
+    val unresolvedQuestions = candidate?.unresolvedQuestions.orEmpty().filter(String::isNotBlank)
+    val needsRefinement = proposalNeedsRefinement(unresolvedQuestions, feedback)
+    val heading = proposalStepHeading(step, candidate != null, firstOutcome.isNotEmpty(), needsRefinement)
     Text(heading, color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
     Text(
         when {
+            needsRefinement -> "Add the missing details below, then ask the Architect to refine the proposal."
             candidate != null -> "The candidate is ready for review. Apply it to record this decision and continue to the next step."
             step == ConductorSetupStep.ARCHITECTURE && firstOutcome.isNotEmpty() ->
                 "The first working outcome is recorded. Now form the technical plan needed to deliver it."
@@ -391,6 +390,19 @@ private fun ProposalStep(
             Text(firstOutcome, Modifier.padding(top = 4.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
         }
     }
+    if (needsRefinement) {
+        Column(
+            Modifier.fillMaxWidth().padding(top = 12.dp).background(SetupAmberSoft, RoundedCornerShape(6.dp)).padding(10.dp),
+        ) {
+            Text("DETAILS NEEDED", color = SetupAmber, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            if (!feedback.isNullOrBlank()) {
+                Text(feedback, Modifier.padding(top = 5.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
+            }
+            unresolvedQuestions.forEach { question ->
+                Text("- $question", Modifier.padding(top = 5.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
+            }
+        }
+    }
     OutlinedTextField(
         value = prompt,
         onValueChange = { prompt = it },
@@ -398,17 +410,17 @@ private fun ProposalStep(
         enabled = !isSubmitting,
         minLines = 3,
         maxLines = 8,
-        label = { Text(proposalPromptLabel(step)) },
+        label = { Text(if (needsRefinement) "Description and answers" else proposalPromptLabel(step)) },
     )
     Text(
-        "One bounded proposal: read current authority  >  form one candidate  >  validate its phase and schema. Nothing is recorded until you apply it.",
+        "The Architect forms a draft from this description. Nothing is recorded until you apply it.",
         Modifier.padding(top = 8.dp),
         color = SetupMuted,
         fontSize = 10.sp,
         lineHeight = 15.sp,
     )
     SetupAction(
-        label = if (candidate == null) "Form proposal" else "Regenerate proposal",
+        label = proposalActionLabel(candidate != null, needsRefinement),
         loadingLabel = "Forming and validating proposal...",
         isSubmitting = isSubmitting,
         enabled = prompt.isNotBlank(),
@@ -416,36 +428,54 @@ private fun ProposalStep(
     )
     candidate?.let {
         Column(Modifier.fillMaxWidth().padding(top = 14.dp).background(SetupRaised, RoundedCornerShape(6.dp)).padding(12.dp)) {
-            Text("CANDIDATE", color = SetupBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+            Text(if (needsRefinement) "DRAFT" else "CANDIDATE", color = SetupBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
             proposalLines(it).forEach { line ->
                 Text(line, Modifier.padding(top = 6.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
             }
-            it.unresolvedQuestions.forEach { question ->
-                Text("Unresolved: $question", Modifier.padding(top = 6.dp), color = SetupAmber, fontSize = 10.sp, lineHeight = 15.sp)
+            if (!needsRefinement) {
+                SetupAction(
+                    label = "Apply proposal",
+                    loadingLabel = "Applying proposal...",
+                    isSubmitting = isSubmitting,
+                    enabled = true,
+                    onClick = onApply,
+                )
             }
-            SetupAction(
-                label = "Apply proposal",
-                loadingLabel = "Applying proposal...",
-                isSubmitting = isSubmitting,
-                enabled = true,
-                onClick = onApply,
-            )
         }
     }
+}
+
+internal fun proposalNeedsRefinement(unresolvedQuestions: List<String>, feedback: String?): Boolean =
+    unresolvedQuestions.any(String::isNotBlank) || !feedback.isNullOrBlank()
+
+internal fun proposalActionLabel(hasProposal: Boolean, needsRefinement: Boolean): String = when {
+    needsRefinement -> "Refine proposal"
+    hasProposal -> "Regenerate proposal"
+    else -> "Form proposal"
 }
 
 internal fun proposalStepHeading(
     step: ConductorSetupStep,
     hasProposal: Boolean,
     hasFirstOutcome: Boolean = false,
+    needsRefinement: Boolean = false,
 ): String = when (step) {
-    ConductorSetupStep.EXPERIENCE -> if (hasProposal) "Review the experience proposal" else "Describe the experience"
+    ConductorSetupStep.EXPERIENCE -> when {
+        needsRefinement -> "Complete the experience proposal"
+        hasProposal -> "Review the experience proposal"
+        else -> "Describe the experience"
+    }
     ConductorSetupStep.ARCHITECTURE -> when {
+        needsRefinement -> "Complete the architecture proposal"
         hasProposal -> "Review the architecture proposal"
         hasFirstOutcome -> "Design how to deliver the first outcome"
         else -> "Plan the first working outcome"
     }
-    ConductorSetupStep.BLUEPRINT -> if (hasProposal) "Review the repository proposal" else "Confirm the repository plan"
+    ConductorSetupStep.BLUEPRINT -> when {
+        needsRefinement -> "Complete the repository proposal"
+        hasProposal -> "Review the repository proposal"
+        else -> "Confirm the repository plan"
+    }
     else -> error("Proposal heading requested for $step")
 }
 

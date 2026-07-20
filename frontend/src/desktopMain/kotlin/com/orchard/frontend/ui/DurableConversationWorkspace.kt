@@ -87,6 +87,7 @@ import com.orchard.frontend.network.ConversationProjectionResponse
 import com.orchard.frontend.network.DesktopNetworkClient
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
+import com.orchard.frontend.network.GenesisProposalFailureException
 import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.SubmitConversationMessageRequest
@@ -125,6 +126,7 @@ internal fun DurableConversationWorkspace(
     var showOnboardRepository by remember { mutableStateOf(false) }
     var projectSetup by remember { mutableStateOf<ConductorProjectSetupState?>(null) }
     var genesisProposal by remember { mutableStateOf<GenesisProposalResponse?>(null) }
+    var genesisProposalFeedback by remember { mutableStateOf<String?>(null) }
     var isSetupSubmitting by remember { mutableStateOf(false) }
     var setupError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -181,6 +183,7 @@ internal fun DurableConversationWorkspace(
     }
     LaunchedEffect(projectSetup?.genesis?.phase, projectSetup?.genesis?.revision?.hash) {
         genesisProposal = null
+        genesisProposalFeedback = null
     }
 
     fun submitMessage(message: String) {
@@ -230,10 +233,17 @@ internal fun DurableConversationWorkspace(
         if (isSetupSubmitting || content.isBlank()) return
         isSetupSubmitting = true
         setupError = null
+        genesisProposalFeedback = null
         scope.launch {
             runCatching { networkClient.proposeProjectGenesis(current.projectId, content) }
                 .onSuccess { genesisProposal = it }
-                .onFailure { setupError = it.message ?: "The Architect could not form a proposal." }
+                .onFailure { failure ->
+                    if ((failure as? GenesisProposalFailureException)?.canRefinePrompt == true) {
+                        genesisProposalFeedback = failure.message ?: "The description needs more detail."
+                    } else {
+                        setupError = failure.message ?: "The Architect could not form a proposal."
+                    }
+                }
             isSetupSubmitting = false
         }
     }
@@ -244,6 +254,7 @@ internal fun DurableConversationWorkspace(
         if (isSetupSubmitting || title.isBlank()) return
         isSetupSubmitting = true
         setupError = null
+        genesisProposalFeedback = null
         scope.launch {
             var outcomeCreated = false
             runCatching {
@@ -258,7 +269,9 @@ internal fun DurableConversationWorkspace(
                 networkClient.proposeProjectGenesis(current.projectId, title)
             }.onSuccess { genesisProposal = it }
                 .onFailure { failure ->
-                    setupError = if (outcomeCreated) {
+                    if (outcomeCreated && (failure as? GenesisProposalFailureException)?.canRefinePrompt == true) {
+                        genesisProposalFeedback = "The first working outcome was recorded. ${failure.message.orEmpty()}"
+                    } else setupError = if (outcomeCreated) {
                         "The first working outcome was recorded, but the Architect could not form the technical plan. " +
                             (failure.message ?: "Edit the prompt and choose Form proposal to retry.")
                     } else {
@@ -339,6 +352,7 @@ internal fun DurableConversationWorkspace(
                         onSuggestedAction = ::submitMessage,
                         projectSetup = projectSetup,
                         genesisProposal = genesisProposal,
+                        genesisProposalFeedback = genesisProposalFeedback,
                         isSetupSubmitting = isSetupSubmitting,
                         setupError = setupError,
                         onAdoptStandards = { submission ->
@@ -728,6 +742,7 @@ private fun Transcript(
     onSuggestedAction: (String) -> Unit,
     projectSetup: ConductorProjectSetupState?,
     genesisProposal: GenesisProposalResponse?,
+    genesisProposalFeedback: String?,
     isSetupSubmitting: Boolean,
     setupError: String?,
     onAdoptStandards: (EngineeringStandardSubmissionRequest) -> Unit,
@@ -769,6 +784,7 @@ private fun Transcript(
                 ConductorProjectSetupCard(
                     state = setup,
                     proposal = genesisProposal,
+                    proposalFeedback = genesisProposalFeedback,
                     isSubmitting = isSubmitting || isSetupSubmitting,
                     error = setupError,
                     onAdoptStandards = onAdoptStandards,

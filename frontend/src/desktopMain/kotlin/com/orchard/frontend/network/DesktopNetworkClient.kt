@@ -169,7 +169,8 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
         }
         if (response.status.isSuccess()) return response.body()
         val failure = runCatching { response.body<GenesisProposalFailureResponse>() }.getOrNull()
-        error(failure?.diagnostic ?: "The Architect proposal failed with HTTP ${response.status.value}.")
+        if (failure != null) throw GenesisProposalFailureException(failure)
+        error("The Architect proposal failed with HTTP ${response.status.value}.")
     }
 
     suspend fun createProjectGenesisFirstOutcome(
@@ -1197,6 +1198,15 @@ data class GenesisProposalFailureResponse(
     val diagnostic: String,
     val retryable: Boolean,
 )
+
+class GenesisProposalFailureException(
+    val failure: GenesisProposalFailureResponse,
+) : IllegalStateException(failure.diagnostic) {
+    val canRefinePrompt: Boolean = failure.retryable && failure.status in setOf(
+        "INVALID_OUTPUT",
+        "CONTEXT_BUDGET_EXCEEDED",
+    )
+}
 
 @Serializable
 data class CircuitDispatchResponse(

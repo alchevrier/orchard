@@ -151,11 +151,13 @@ class DesktopNetworkClientTest {
         }
         val client = DesktopNetworkClient(httpClient)
 
-        val error = assertFailsWith<IllegalStateException> {
+        val error = assertFailsWith<GenesisProposalFailureException> {
             client.proposeProjectGenesis(4, "Describe the experience")
         }
 
         assertTrue(error.message.orEmpty().contains("Revise the description and retry"))
+        assertTrue(error.canRefinePrompt)
+        assertEquals("INVALID_OUTPUT", error.failure.status)
         client.close()
     }
 
