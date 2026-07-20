@@ -15,6 +15,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class DesktopNetworkClientTest {
@@ -128,6 +129,66 @@ class DesktopNetworkClientTest {
 
         assertEquals("EXPERIENCE", proposal.phase)
         assertEquals("Calm", proposal.submission.experience?.emotionalQualities?.single())
+        client.close()
+    }
+
+    @Test
+    fun surfacesActionableGenesisProposalFailure() = runBlocking {
+        val engine = MockEngine {
+            respond(
+                content = """{
+                    "status":"INVALID_OUTPUT",
+                    "diagnostic":"The Architect did not return valid structured JSON for experience. Revise the description and retry.",
+                    "retryable":true
+                }""".trimIndent(),
+                status = HttpStatusCode.UnprocessableEntity,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val error = assertFailsWith<IllegalStateException> {
+            client.proposeProjectGenesis(4, "Describe the experience")
+        }
+
+        assertTrue(error.message.orEmpty().contains("Revise the description and retry"))
+        client.close()
+    }
+
+    @Test
+    fun createsRevisionPinnedFirstWorkingOutcomeDirectly() = runBlocking {
+        val engine = MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("http://127.0.0.1:8085/api/projects/4/genesis/first-outcome", request.url.toString())
+            val body = request.body.toByteArray().decodeToString()
+            assertTrue(body.contains("\"title\":\"Complete the first user journey\""))
+            assertTrue(body.contains("\"baseRevision\":2"))
+            assertTrue(body.contains("\"baseHash\":\"${"a".repeat(64)}\""))
+            respond(
+                content = """{"status":"CREATED","outcomeId":9,"diagnostic":"First working outcome created."}""",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        val result = client.createProjectGenesisFirstOutcome(
+            4,
+            "Complete the first user journey",
+            2,
+            "a".repeat(64),
+        )
+
+        assertEquals("CREATED", result.status)
+        assertEquals(9, result.outcomeId)
         client.close()
     }
 

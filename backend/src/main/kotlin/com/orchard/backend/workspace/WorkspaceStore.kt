@@ -61,6 +61,23 @@ enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, 
 
 data class RepositoryBindResult(val status: RepositoryBindStatus, val snapshot: WorkspaceSnapshot)
 
+enum class ProjectGenesisFirstOutcomeStatus {
+    CREATED,
+    PROJECT_NOT_FOUND,
+    WRONG_PHASE,
+    STALE_REVISION,
+    ALREADY_EXISTS,
+    INVALID_TITLE,
+    WORKSPACE_REJECTED,
+    STORAGE_UNAVAILABLE,
+}
+
+data class ProjectGenesisFirstOutcomeResult(
+    val status: ProjectGenesisFirstOutcomeStatus,
+    val outcomeId: Int? = null,
+    val snapshot: WorkspaceSnapshot,
+)
+
 enum class WorkflowStartStatus {
     CREATED,
     WORK_ITEM_NOT_FOUND,
@@ -284,6 +301,59 @@ class WorkspaceStore(
             intent.boundWorkflowId,
             intent.conversationCommand,
         )
+    }
+
+    @Synchronized
+    fun createProjectGenesisFirstOutcome(
+        projectId: Int,
+        title: String,
+        baseRevision: Int,
+        baseHash: String?,
+    ): ProjectGenesisFirstOutcomeResult {
+        fun result(status: ProjectGenesisFirstOutcomeStatus, outcomeId: Int? = null) =
+            ProjectGenesisFirstOutcomeResult(status, outcomeId, snapshot(MESSAGE_READY))
+
+        val normalizedTitle = title.trim()
+        if (normalizedTitle.isEmpty() || normalizedTitle.length > MAX_PLAN_TEXT) {
+            return result(ProjectGenesisFirstOutcomeStatus.INVALID_TITLE)
+        }
+        if (entity(projectId, ENTITY_PROJECT) == null) {
+            return result(ProjectGenesisFirstOutcomeStatus.PROJECT_NOT_FOUND)
+        }
+        val genesis = currentProjectGenesis(projectId)
+        if (genesis?.phase != GENESIS_ARCHITECTURE) {
+            return result(ProjectGenesisFirstOutcomeStatus.WRONG_PHASE)
+        }
+        if (genesis.revision != baseRevision || genesis.hash != baseHash) {
+            return result(ProjectGenesisFirstOutcomeStatus.STALE_REVISION)
+        }
+        entities.singleOrNull { it.type == ENTITY_EPIC && it.parentId == projectId }?.let {
+            return result(ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS, it.id)
+        }
+
+        beginBatch()
+        return try {
+            val accepted = applyIntent(DocumentIntent(
+                ACTION_CREATE,
+                ENTITY_EPIC,
+                DEFAULT_DELIVERY_WORKFLOW_ID,
+                projectId,
+                0,
+                0,
+                normalizedTitle,
+            ))
+            if (!accepted) {
+                rollbackBatch()
+                result(ProjectGenesisFirstOutcomeStatus.WORKSPACE_REJECTED)
+            } else {
+                val outcomeId = lastCreatedId
+                commitBatch()
+                result(ProjectGenesisFirstOutcomeStatus.CREATED, outcomeId)
+            }
+        } catch (_: Exception) {
+            if (batchActive) rollbackBatch()
+            result(ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE)
+        }
     }
 
     @Synchronized
@@ -2307,7 +2377,7 @@ class WorkspaceStore(
             nextQuestion = when (phase) {
                 GENESIS_CLASSIFICATION -> "Is this a new local product, existing local work, or organization-governed work?"
                 GENESIS_EXPERIENCE -> "Who is this for, and what should the primary journey feel like?"
-                GENESIS_ARCHITECTURE -> "What is the first vertical slice, and which decisions make that experience possible?"
+                GENESIS_ARCHITECTURE -> "What should people be able to accomplish first, and which technical decisions make that possible?"
                 GENESIS_BLUEPRINT -> "Which repository shape and verification commands realize the admitted design?"
                 GENESIS_ADMISSION -> "Review the complete product genesis and admit it as implementation authority."
                 else -> "The product genesis is admitted. Implementation may proceed under this authority."

@@ -57,7 +57,7 @@ class DurableConversationWorkspaceTest {
             projectId = 42,
             phase = "ARCHITECTURE",
             progress = 40,
-            nextQuestion = "What is the first vertical slice?",
+            nextQuestion = "What should people be able to accomplish first?",
             permittedAction = "ADVANCE",
         )
         val withoutStandards = ConductorProjectSetupState(
@@ -94,6 +94,38 @@ class DurableConversationWorkspaceTest {
             )
         )
         assertEquals(ConductorSetupStep.ARCHITECTURE, conductorSetupStep(withStandards))
+    }
+
+    @Test
+    fun `generated candidate changes setup copy to explicit review state`() {
+        assertEquals(
+            "Describe the experience",
+            proposalStepHeading(ConductorSetupStep.EXPERIENCE, hasProposal = false),
+        )
+        assertEquals(
+            "Review the experience proposal",
+            proposalStepHeading(ConductorSetupStep.EXPERIENCE, hasProposal = true),
+        )
+        assertEquals(
+            "Plan the first working outcome",
+            proposalStepHeading(ConductorSetupStep.ARCHITECTURE, hasProposal = false),
+        )
+    }
+
+    @Test
+    fun `experience proposal prompt recovers from durable product intent`() {
+        assertEquals(
+            "Find gaps between ADRs and implementation.",
+            proposalPromptDefault(
+                ConductorSetupStep.EXPERIENCE,
+                "Find gaps between ADRs and implementation.",
+                "Who is this for?",
+            ),
+        )
+        assertEquals(
+            "Who is this for?",
+            proposalPromptDefault(ConductorSetupStep.EXPERIENCE, "", "Who is this for?"),
+        )
     }
 
     private fun command(

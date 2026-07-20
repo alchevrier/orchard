@@ -83,6 +83,7 @@ import com.orchard.backend.workspace.FileDesignGovernanceStore
 import com.orchard.backend.workspace.FileProjectGenesisStore
 import com.orchard.backend.workspace.DesignGovernanceStatus
 import com.orchard.backend.workspace.ProjectGenesisStatus
+import com.orchard.backend.workspace.ProjectGenesisFirstOutcomeStatus
 import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.DesignSubmission
 import com.orchard.backend.workspace.RepositoryBindStatus
@@ -714,8 +715,47 @@ fun Application.workspaceApi(
             }
             val result = genesisIntelligence.propose(projectId, request)
             val proposal = result.proposal
-            if (proposal == null) call.respond(genesisProposalStatus(result.status))
+            if (proposal == null) call.respond(
+                genesisProposalStatus(result.status),
+                GenesisProposalFailureResponse(
+                    status = result.status.name,
+                    diagnostic = result.diagnostic,
+                    retryable = result.status !in setOf(
+                        GenesisProposalStatus.PROJECT_NOT_FOUND,
+                        GenesisProposalStatus.PHASE_NOT_PROPOSABLE,
+                    ),
+                ),
+            )
             else call.respond(genesisProposalStatus(result.status), proposal)
+        }
+        post("/api/projects/{projectId}/genesis/first-outcome") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val request = runCatching { call.receive<ProjectGenesisFirstOutcomeRequest>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.createProjectGenesisFirstOutcome(
+                projectId,
+                request.title,
+                request.baseRevision,
+                request.baseHash,
+            )
+            val status = when (result.status) {
+                ProjectGenesisFirstOutcomeStatus.CREATED -> HttpStatusCode.Created
+                ProjectGenesisFirstOutcomeStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+                ProjectGenesisFirstOutcomeStatus.INVALID_TITLE -> HttpStatusCode.UnprocessableEntity
+                ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+                else -> HttpStatusCode.Conflict
+            }
+            call.respond(
+                status,
+                ProjectGenesisFirstOutcomeResponse(
+                    result.status.name,
+                    result.outcomeId,
+                    projectGenesisFirstOutcomeDiagnostic(result.status),
+                ),
+            )
         }
         post("/api/projects/{projectId}/design-governance") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
@@ -1255,6 +1295,38 @@ private fun genesisProposalStatus(status: GenesisProposalStatus): HttpStatusCode
 
 @Serializable
 data class BindRepositoryRequest(val path: String)
+
+@Serializable
+data class GenesisProposalFailureResponse(
+    val status: String,
+    val diagnostic: String,
+    val retryable: Boolean,
+)
+
+@Serializable
+data class ProjectGenesisFirstOutcomeRequest(
+    val title: String,
+    val baseRevision: Int,
+    val baseHash: String? = null,
+)
+
+@Serializable
+data class ProjectGenesisFirstOutcomeResponse(
+    val status: String,
+    val outcomeId: Int? = null,
+    val diagnostic: String,
+)
+
+private fun projectGenesisFirstOutcomeDiagnostic(status: ProjectGenesisFirstOutcomeStatus): String = when (status) {
+    ProjectGenesisFirstOutcomeStatus.CREATED -> "First working outcome created."
+    ProjectGenesisFirstOutcomeStatus.PROJECT_NOT_FOUND -> "The selected project no longer exists. Refresh and retry."
+    ProjectGenesisFirstOutcomeStatus.WRONG_PHASE -> "The project is no longer planning its first working outcome. Refresh to load the current step."
+    ProjectGenesisFirstOutcomeStatus.STALE_REVISION -> "Project setup changed before this outcome was created. Refresh and retry."
+    ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS -> "A first working outcome already exists. Refresh to continue."
+    ProjectGenesisFirstOutcomeStatus.INVALID_TITLE -> "Name the first working outcome in 256 characters or fewer."
+    ProjectGenesisFirstOutcomeStatus.WORKSPACE_REJECTED -> "The project hierarchy rejected this first working outcome."
+    ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE -> "The first working outcome could not be stored. Check Orchard storage and retry."
+}
 
 @Serializable
 data class DefinitionFeedbackRequest(val content: String)

@@ -162,11 +162,30 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun admitProjectGenesis(projectId: Int): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis/admission").successBody()
 
-    suspend fun proposeProjectGenesis(projectId: Int, prompt: String): GenesisProposalResponse =
-        client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis/proposal") {
+    suspend fun proposeProjectGenesis(projectId: Int, prompt: String): GenesisProposalResponse {
+        val response = client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis/proposal") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             setBody(GenesisProposalRequest(prompt))
-        }.successBody()
+        }
+        if (response.status.isSuccess()) return response.body()
+        val failure = runCatching { response.body<GenesisProposalFailureResponse>() }.getOrNull()
+        error(failure?.diagnostic ?: "The Architect proposal failed with HTTP ${response.status.value}.")
+    }
+
+    suspend fun createProjectGenesisFirstOutcome(
+        projectId: Int,
+        title: String,
+        baseRevision: Int,
+        baseHash: String?,
+    ): ProjectGenesisFirstOutcomeResponse {
+        val response = client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis/first-outcome") {
+            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody(ProjectGenesisFirstOutcomeRequest(title, baseRevision, baseHash))
+        }
+        val result = runCatching { response.body<ProjectGenesisFirstOutcomeResponse>() }.getOrNull()
+        if (response.status.isSuccess() && result != null) return result
+        error(result?.diagnostic ?: "Creating the first working outcome failed with HTTP ${response.status.value}.")
+    }
 
     suspend fun getModelProfileConfigurations(): List<ModelProfileConfigurationResponse> =
         client.get("http://127.0.0.1:8085/api/model-profiles").successBody()
@@ -1147,6 +1166,20 @@ data class ProjectGenesisViewResponse(
 private data class GenesisProposalRequest(val prompt: String)
 
 @Serializable
+private data class ProjectGenesisFirstOutcomeRequest(
+    val title: String,
+    val baseRevision: Int,
+    val baseHash: String? = null,
+)
+
+@Serializable
+data class ProjectGenesisFirstOutcomeResponse(
+    val status: String,
+    val outcomeId: Int? = null,
+    val diagnostic: String = "",
+)
+
+@Serializable
 data class GenesisProposalResponse(
     val projectId: Int,
     val phase: String,
@@ -1156,6 +1189,13 @@ data class GenesisProposalResponse(
     val observations: List<String> = emptyList(),
     val unresolvedQuestions: List<String> = emptyList(),
     val model: String,
+)
+
+@Serializable
+data class GenesisProposalFailureResponse(
+    val status: String,
+    val diagnostic: String,
+    val retryable: Boolean,
 )
 
 @Serializable

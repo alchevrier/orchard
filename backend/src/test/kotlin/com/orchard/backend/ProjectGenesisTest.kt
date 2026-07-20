@@ -25,6 +25,7 @@ import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.PROJECT_GREENFIELD_LOCAL
 import com.orchard.backend.workspace.PROJECT_ORGANIZATION_GOVERNED
 import com.orchard.backend.workspace.ProjectGenesisStatus
+import com.orchard.backend.workspace.ProjectGenesisFirstOutcomeStatus
 import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.RepositoryBlueprint
 import com.orchard.backend.workspace.WorkflowStartStatus
@@ -36,7 +37,12 @@ import com.orchard.backend.agent.GenesisProposalRequest
 import com.orchard.backend.agent.GenesisProposalStatus
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
+import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
 import java.nio.file.Files
@@ -82,6 +88,206 @@ class ProjectGenesisTest {
             .propose(1, GenesisProposalRequest("Skip directly to repository setup."))
         assertEquals(GenesisProposalStatus.INVALID_OUTPUT, invalid.status)
         assertEquals(GENESIS_CLASSIFICATION, workspace.snapshot(MESSAGE_READY).projectGenesis.single().phase)
+    }
+
+    @Test
+    fun experienceProposalReceivesExactStructuredOutputExample() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        val output = """{
+            "submission":{
+                "experience":{
+                    "audience":"Local developers",
+                    "productPromise":"Decisions become visible authority.",
+                    "primaryJourney":["Describe","Review","Admit"],
+                    "interactionPrinciples":["Show one next decision"],
+                    "emotionalQualities":["Calm"],
+                    "mustNotFeelLike":["A dashboard"],
+                    "accessibility":["Keyboard accessible"]
+                },
+                "baseRevision":1
+            }
+        }""".trimIndent()
+        val model = FakeGenesisModel(output)
+
+        val result = GenesisIntelligenceService(workspace, model)
+            .propose(1, GenesisProposalRequest("Make the experience calm and guided."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertTrue(model.lastPrompt.contains("\"productPromise\""))
+        assertTrue(model.lastPrompt.contains("\"mustNotFeelLike\""))
+        assertTrue(model.lastPrompt.contains("\"requiredOutputExample\":{\"submission\""))
+    }
+
+    @Test
+    fun plainProviderJsonFenceIsDecodedBeforeStrictValidation() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        val output = """```json
+            {
+              "submission": {
+                "classification": "GREENFIELD_LOCAL",
+                "productIntent": "A guided local product.",
+                "baseRevision": 0
+              }
+            }
+            ```""".trimIndent()
+
+        val result = GenesisIntelligenceService(workspace, FakeGenesisModel(output))
+            .propose(1, GenesisProposalRequest("Create a local product."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertEquals("A guided local product.", result.proposal?.submission?.productIntent)
+    }
+
+    @Test
+    fun knownSubmissionMetadataMisplacedAtRootIsCanonicalized() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        val output = """{
+            "submission": {
+                "classification": null,
+                "productIntent": null,
+                "experience": {
+                    "audience": "Local developers",
+                    "productPromise": "Decisions become visible authority.",
+                    "primaryJourney": ["Describe", "Review", "Admit"],
+                    "interactionPrinciples": ["Show one next decision"],
+                    "emotionalQualities": ["Calm"],
+                    "mustNotFeelLike": ["A dashboard"],
+                    "accessibility": ["Keyboard accessible"]
+                }
+            },
+            "baseRevision": 1,
+            "baseHash": "misplaced",
+            "components": null,
+            "decisions": null,
+            "firstEpicId": null,
+            "blueprint": null,
+            "observations": [],
+            "unresolvedQuestions": []
+        }""".trimIndent()
+
+        val result = GenesisIntelligenceService(workspace, FakeGenesisModel(output))
+            .propose(1, GenesisProposalRequest("Make the experience calm and guided."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertNotNull(result.proposal?.submission?.experience)
+        assertEquals(1, result.proposal?.baseRevision)
+    }
+
+    @Test
+    fun unknownRootFieldStillFailsStrictDecoding() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        val output = """{
+            "submission": {
+                "classification": "GREENFIELD_LOCAL",
+                "productIntent": "A guided local product."
+            },
+            "unexpectedAuthority": true
+        }""".trimIndent()
+
+        val result = GenesisIntelligenceService(workspace, FakeGenesisModel(output))
+            .propose(1, GenesisProposalRequest("Create a local product."))
+
+        assertEquals(GenesisProposalStatus.INVALID_OUTPUT, result.status)
+        assertTrue(result.diagnostic.contains("unexpectedAuthority:boolean"))
+    }
+
+    @Test
+    fun invalidArchitectOutputReturnsActionableFailureBody() = testApplication {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        val service = GenesisIntelligenceService(workspace, FakeGenesisModel("not-json"))
+        application { workspaceApi(workspace, genesisIntelligence = service) }
+
+        val response = client.post("/api/projects/1/genesis/proposal") {
+            header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody("""{"prompt":"Describe the experience"}""")
+        }
+
+        assertEquals(HttpStatusCode.UnprocessableEntity, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("\"status\":\"INVALID_OUTPUT\""))
+        assertTrue(body.contains("required schema"))
+        assertTrue(body.contains("\"retryable\":true"))
+    }
+
+    @Test
+    fun schemaFailureReportsOnlyFieldNamesAndJsonTypes() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        val output = """{
+            "submission": {
+                "classification": ["wrong-type"],
+                "productIntent": "private product details",
+                "baseRevision": 0
+            }
+        }""".trimIndent()
+
+        val result = GenesisIntelligenceService(workspace, FakeGenesisModel(output))
+            .propose(1, GenesisProposalRequest("Create a local product."))
+
+        assertEquals(GenesisProposalStatus.INVALID_OUTPUT, result.status)
+        assertTrue(result.diagnostic.contains("classification:array"))
+        assertTrue(result.diagnostic.contains("productIntent:string"))
+        assertTrue(!result.diagnostic.contains("private product details"))
+    }
+
+    @Test
+    fun firstWorkingOutcomeIsRevisionPinnedAndCreatedWithoutConversationObjective() = testApplication {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Orchard")))
+        workspace.commitBatch()
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        application { workspaceApi(workspace) }
+
+        val response = client.post("/api/projects/1/genesis/first-outcome") {
+            header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody("""{"title":"Complete the first user journey","baseRevision":2,"baseHash":"${workspace.snapshot(MESSAGE_READY).projectGenesis.single().revision?.hash}"}""")
+        }
+
+        assertEquals(HttpStatusCode.Created, response.status)
+        assertTrue(response.bodyAsText().contains("\"status\":\"CREATED\""))
+        assertEquals("Complete the first user journey", workspace.entities().single { it.type == ENTITY_EPIC }.title)
+        assertEquals(
+            ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS,
+            workspace.createProjectGenesisFirstOutcome(
+                1,
+                "A competing outcome",
+                2,
+                workspace.snapshot(MESSAGE_READY).projectGenesis.single().revision?.hash,
+            ).status,
+        )
     }
 
     @Test
@@ -315,6 +521,9 @@ class ProjectGenesisTest {
     }
 
     private class FakeGenesisModel(private val output: String) : ModelProvider {
+        var lastPrompt: String = ""
+            private set
+
         override suspend fun triage(prompt: String): String = error("unused")
         override suspend fun plan(
             prompt: String,
@@ -327,6 +536,9 @@ class ProjectGenesisTest {
             prompt: String,
             maxOutputTokens: Int,
             contextWindowTokens: Int,
-        ): ModelGeneration = ModelGeneration(output, prompt.length, output.length)
+        ): ModelGeneration {
+            lastPrompt = prompt
+            return ModelGeneration(output, prompt.length, output.length)
+        }
     }
 }

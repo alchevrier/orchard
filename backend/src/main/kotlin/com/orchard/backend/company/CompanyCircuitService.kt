@@ -120,7 +120,7 @@ class CompanyCircuitService(
                 task.id,
                 WorkDefinitionSubmission(
                     requestedOutcome = genesis.experience.productPromise,
-                    currentBehavior = "The admitted product experience has no implemented vertical slice yet.",
+                    currentBehavior = "The admitted product experience has no working user outcome implemented yet.",
                     requiredBehavior = genesis.experience.primaryJourney.joinToString(" -> ")
                         .ifBlank { genesis.experience.productPromise },
                     scope = genesis.components.flatMap { it.repositoryPaths }.distinct().ifEmpty { listOf("src") },
@@ -161,7 +161,7 @@ class CompanyCircuitService(
             val result = workspace.acceptStagedPlan(
                 StagedDeliveryPlanSubmission(
                     scopeId = story.id,
-                    title = "First vertical slice",
+                    title = "First working outcome",
                     stages = listOf(
                         StagedPlanStageSubmission(
                             "implementation",

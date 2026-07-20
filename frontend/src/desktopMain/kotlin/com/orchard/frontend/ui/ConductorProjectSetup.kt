@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.EngineeringPracticeResponse
 import com.orchard.frontend.network.EngineeringStandardSubmissionRequest
 import com.orchard.frontend.network.EngineeringStandardsViewResponse
+import com.orchard.frontend.network.ExperienceContractRequest
 import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.ProjectGenesisViewResponse
@@ -96,7 +97,7 @@ internal fun ConductorProjectSetupCard(
     onGenerateProposal: (String) -> Unit,
     onApplyProposal: () -> Unit,
     onAdmit: () -> Unit,
-    onProposeEpic: (String) -> Unit,
+    onCreateFirstOutcome: (String) -> Unit,
 ) {
     val step = conductorSetupStep(state)
     Column(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
@@ -120,16 +121,24 @@ internal fun ConductorProjectSetupCard(
                         step,
                         proposal,
                         isSubmitting,
+                        onAdvance,
                         onGenerateProposal,
                         onApplyProposal,
-                        onProposeEpic,
+                        onCreateFirstOutcome,
                     )
                     ConductorSetupStep.ADMISSION -> AdmissionStep(state, isSubmitting, onAdmit)
                     ConductorSetupStep.READY -> ReadyStep(state)
                 }
                 if (!error.isNullOrBlank()) {
+                    val recovery = if (step in setOf(
+                            ConductorSetupStep.EXPERIENCE,
+                            ConductorSetupStep.ARCHITECTURE,
+                            ConductorSetupStep.BLUEPRINT,
+                        )) {
+                        "\n\nYour description is preserved. Edit it and choose Form proposal again."
+                    } else ""
                     Text(
-                        error,
+                        error + recovery,
                         Modifier.fillMaxWidth().padding(top = 12.dp).background(SetupAmberSoft, RoundedCornerShape(6.dp)).padding(10.dp),
                         color = SetupAmber,
                         fontSize = 11.sp,
@@ -299,23 +308,51 @@ private fun ProposalStep(
     step: ConductorSetupStep,
     proposal: GenesisProposalResponse?,
     isSubmitting: Boolean,
+    onAdvance: (ProjectGenesisSubmissionRequest) -> Unit,
     onGenerate: (String) -> Unit,
     onApply: () -> Unit,
-    onProposeEpic: (String) -> Unit,
+    onCreateFirstOutcome: (String) -> Unit,
 ) {
-    var prompt by remember(state.genesis.phase, state.genesis.revision?.hash) { mutableStateOf("") }
-    var epicTitle by remember(state.projectId, state.epics) { mutableStateOf("") }
-    val heading = when (step) {
-        ConductorSetupStep.EXPERIENCE -> "Describe the experience"
-        ConductorSetupStep.ARCHITECTURE -> "Shape the first vertical slice"
-        else -> "Confirm the repository plan"
+    var prompt by remember(state.genesis.phase, state.genesis.revision?.hash) {
+        mutableStateOf(
+            proposalPromptDefault(
+                step,
+                state.genesis.revision?.productIntent.orEmpty(),
+                state.genesis.nextQuestion,
+            )
+        )
     }
+    var epicTitle by remember(state.projectId, state.epics) { mutableStateOf("") }
+    var showManualExperience by remember(state.genesis.revision?.hash) { mutableStateOf(false) }
+    val candidate = proposal?.takeIf { it.phase == state.genesis.phase }
+    val heading = proposalStepHeading(step, candidate != null)
     Text(heading, color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-    Text(state.genesis.nextQuestion, Modifier.padding(top = 7.dp), color = SetupMuted, fontSize = 12.sp, lineHeight = 18.sp)
+    Text(
+        if (candidate == null) state.genesis.nextQuestion else "The candidate is ready for review. Apply it to record this decision and continue to the next step.",
+        Modifier.padding(top = 7.dp),
+        color = SetupMuted,
+        fontSize = 12.sp,
+        lineHeight = 18.sp,
+    )
+
+    if (step == ConductorSetupStep.EXPERIENCE) {
+        TextButton(
+            onClick = { showManualExperience = !showManualExperience },
+            enabled = !isSubmitting,
+            modifier = Modifier.padding(top = 4.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = SetupBlue),
+        ) {
+            Text(if (showManualExperience) "Use Architect instead" else "Enter experience details manually")
+        }
+        if (showManualExperience) {
+            ManualExperienceStep(state, isSubmitting, onAdvance)
+            return
+        }
+    }
 
     if (step == ConductorSetupStep.ARCHITECTURE && state.epics.isEmpty()) {
         Text(
-            "Architecture needs one experience-proving epic. Name it here; Orchard will propose it in this conversation for your admission.",
+            "Start with one concrete outcome people should be able to complete. Name it here; Orchard will create the implementation milestone and continue to architecture planning.",
             Modifier.padding(top = 12.dp),
             color = SetupMuted,
             fontSize = 11.sp,
@@ -327,21 +364,21 @@ private fun ProposalStep(
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
             enabled = !isSubmitting,
             minLines = 2,
-            label = { Text("First experience-proving epic") },
+            label = { Text("First working outcome") },
         )
         SetupAction(
-            label = "Propose first epic",
-            loadingLabel = "Forming proposal...",
+            label = "Create first outcome",
+            loadingLabel = "Creating outcome...",
             isSubmitting = isSubmitting,
             enabled = epicTitle.isNotBlank(),
-            onClick = { onProposeEpic(epicTitle.trim()) },
+            onClick = { onCreateFirstOutcome(epicTitle.trim()) },
         )
         return
     }
 
     if (step == ConductorSetupStep.ARCHITECTURE) {
         Text(
-            "First epic: ${state.epics.first().second}",
+            "First outcome: ${state.epics.first().second}",
             Modifier.padding(top = 12.dp).background(SetupGreenSoft, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 7.dp),
             color = SetupGreen,
             fontSize = 11.sp,
@@ -357,20 +394,27 @@ private fun ProposalStep(
         maxLines = 8,
         label = { Text(proposalPromptLabel(step)) },
     )
+    Text(
+        "One bounded proposal: read current authority  >  form one candidate  >  validate its phase and schema. Nothing is recorded until you apply it.",
+        Modifier.padding(top = 8.dp),
+        color = SetupMuted,
+        fontSize = 10.sp,
+        lineHeight = 15.sp,
+    )
     SetupAction(
-        label = if (proposal == null) "Form proposal" else "Regenerate proposal",
-        loadingLabel = "Architect is reasoning...",
+        label = if (candidate == null) "Form proposal" else "Regenerate proposal",
+        loadingLabel = "Forming and validating proposal...",
         isSubmitting = isSubmitting,
         enabled = prompt.isNotBlank(),
         onClick = { onGenerate(prompt.trim()) },
     )
-    proposal?.takeIf { it.phase == state.genesis.phase }?.let { candidate ->
+    candidate?.let {
         Column(Modifier.fillMaxWidth().padding(top = 14.dp).background(SetupRaised, RoundedCornerShape(6.dp)).padding(12.dp)) {
             Text("CANDIDATE", color = SetupBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
-            proposalLines(candidate).forEach { line ->
+            proposalLines(it).forEach { line ->
                 Text(line, Modifier.padding(top = 6.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
             }
-            candidate.unresolvedQuestions.forEach { question ->
+            it.unresolvedQuestions.forEach { question ->
                 Text("Unresolved: $question", Modifier.padding(top = 6.dp), color = SetupAmber, fontSize = 10.sp, lineHeight = 15.sp)
             }
             SetupAction(
@@ -384,9 +428,92 @@ private fun ProposalStep(
     }
 }
 
+internal fun proposalStepHeading(step: ConductorSetupStep, hasProposal: Boolean): String = when (step) {
+    ConductorSetupStep.EXPERIENCE -> if (hasProposal) "Review the experience proposal" else "Describe the experience"
+    ConductorSetupStep.ARCHITECTURE -> if (hasProposal) "Review the architecture proposal" else "Plan the first working outcome"
+    ConductorSetupStep.BLUEPRINT -> if (hasProposal) "Review the repository proposal" else "Confirm the repository plan"
+    else -> error("Proposal heading requested for $step")
+}
+
+internal fun proposalPromptDefault(
+    step: ConductorSetupStep,
+    productIntent: String,
+    nextQuestion: String,
+): String = when (step) {
+    ConductorSetupStep.EXPERIENCE -> productIntent.trim().ifEmpty { nextQuestion.trim() }
+    ConductorSetupStep.ARCHITECTURE,
+    ConductorSetupStep.BLUEPRINT -> nextQuestion.trim()
+    else -> ""
+}
+
+@Composable
+private fun ManualExperienceStep(
+    state: ConductorProjectSetupState,
+    isSubmitting: Boolean,
+    onAdvance: (ProjectGenesisSubmissionRequest) -> Unit,
+) {
+    var audience by remember(state.genesis.revision?.hash) { mutableStateOf("") }
+    var promise by remember(state.genesis.revision?.hash) { mutableStateOf("") }
+    var journey by remember(state.genesis.revision?.hash) { mutableStateOf("") }
+    var principles by remember(state.genesis.revision?.hash) { mutableStateOf("") }
+    var qualities by remember(state.genesis.revision?.hash) { mutableStateOf("") }
+    var exclusions by remember(state.genesis.revision?.hash) { mutableStateOf("") }
+    var accessibility by remember(state.genesis.revision?.hash) { mutableStateOf("") }
+    val required = listOf(audience, promise, journey, principles, qualities, exclusions)
+    ManualExperienceField("Who is it for?", audience, { audience = it }, isSubmitting)
+    ManualExperienceField("What promise does it make?", promise, { promise = it }, isSubmitting)
+    ManualExperienceField("Primary journey, one step per line", journey, { journey = it }, isSubmitting)
+    ManualExperienceField("Interaction principles, one per line", principles, { principles = it }, isSubmitting)
+    ManualExperienceField("How should it feel?", qualities, { qualities = it }, isSubmitting)
+    ManualExperienceField("What must it never feel like?", exclusions, { exclusions = it }, isSubmitting)
+    ManualExperienceField("Accessibility commitments", accessibility, { accessibility = it }, isSubmitting)
+    SetupAction(
+        label = "Apply experience",
+        loadingLabel = "Recording experience...",
+        isSubmitting = isSubmitting,
+        enabled = required.all(String::isNotBlank),
+        onClick = {
+            onAdvance(ProjectGenesisSubmissionRequest(
+                experience = ExperienceContractRequest(
+                    audience = audience.trim(),
+                    productPromise = promise.trim(),
+                    primaryJourney = setupLines(journey),
+                    interactionPrinciples = setupLines(principles),
+                    emotionalQualities = setupLines(qualities),
+                    mustNotFeelLike = setupLines(exclusions),
+                    accessibility = setupLines(accessibility),
+                ),
+                baseRevision = requireNotNull(state.genesis.revision).revision,
+                baseHash = state.genesis.revision.hash,
+            ))
+        },
+    )
+}
+
+@Composable
+private fun ManualExperienceField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    isSubmitting: Boolean,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = Modifier.fillMaxWidth().padding(top = 9.dp),
+        enabled = !isSubmitting,
+        minLines = 2,
+        maxLines = 5,
+        label = { Text(label) },
+    )
+}
+
+private fun setupLines(value: String): List<String> =
+    value.lines().map(String::trim).filter(String::isNotEmpty).distinct()
+
 private fun proposalPromptLabel(step: ConductorSetupStep): String = when (step) {
     ConductorSetupStep.EXPERIENCE -> "Who is this for, what should they accomplish, and how should it feel?"
-    ConductorSetupStep.ARCHITECTURE -> "Describe the slice, constraints, and important technical decisions"
+    ConductorSetupStep.ARCHITECTURE -> "Describe the first working outcome, constraints, and important technical decisions"
     else -> "Describe the modules, toolchain, and verification commands this repository should use"
 }
 

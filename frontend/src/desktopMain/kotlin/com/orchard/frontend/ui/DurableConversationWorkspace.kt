@@ -335,9 +335,15 @@ internal fun DurableConversationWorkspace(
                         onAdmitGenesis = {
                             runSetupMutation { setup -> networkClient.admitProjectGenesis(setup.projectId) }
                         },
-                        onProposeEpic = { title ->
-                            projectSetup?.let { setup ->
-                                submitMessage("Create an epic named \"$title\" in project ID ${setup.projectId}.")
+                        onCreateFirstOutcome = { title ->
+                            runSetupMutation { setup ->
+                                val revision = requireNotNull(setup.genesis.revision)
+                                networkClient.createProjectGenesisFirstOutcome(
+                                    setup.projectId,
+                                    title,
+                                    revision.revision,
+                                    revision.hash,
+                                )
                             }
                         },
                     )
@@ -708,7 +714,7 @@ private fun Transcript(
     onGenerateGenesisProposal: (String) -> Unit,
     onApplyGenesisProposal: () -> Unit,
     onAdmitGenesis: () -> Unit,
-    onProposeEpic: (String) -> Unit,
+    onCreateFirstOutcome: (String) -> Unit,
 ) {
     val transcriptScroll = rememberScrollState()
     val setupStep = projectSetup?.let(::conductorSetupStep)
@@ -749,7 +755,7 @@ private fun Transcript(
                     onGenerateProposal = onGenerateGenesisProposal,
                     onApplyProposal = onApplyGenesisProposal,
                     onAdmit = onAdmitGenesis,
-                    onProposeEpic = onProposeEpic,
+                    onCreateFirstOutcome = onCreateFirstOutcome,
                 )
             }
         }

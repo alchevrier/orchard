@@ -512,7 +512,7 @@ private fun NewProjectConversation(isSubmitting: Boolean, onCreateProject: (Stri
     Column(Modifier.fillMaxSize()) {
         GuidedField("Product name", name, { name = it }, minLines = 2)
         Text(
-            "Orchard will create only the project shell. Its experience, first vertical slice, architecture, and repository remain unresolved until you design them here.",
+            "Orchard will create only the project shell. Its experience, first working outcome, architecture, and repository remain unresolved until you design them here.",
             color = GenesisMuted,
             fontSize = 11.sp,
             lineHeight = 17.sp,
@@ -630,11 +630,11 @@ private fun ArchitectureConversation(
     val valid = epicId != 0 && listOf(componentName, responsibility, adrTitle, context, decision).all(String::isNotBlank)
     val componentId = slug(componentName)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        Text("FIRST VERTICAL SLICE", color = GenesisMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        Text("FIRST WORKING OUTCOME", color = GenesisMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         if (epics.isEmpty()) {
-            GuidedField("Name the first experience-proving epic", firstEpicTitle, { firstEpicTitle = it }, minLines = 2)
-            PrimaryAction("Create first epic", isSubmitting, firstEpicTitle.isNotBlank()) {
+            GuidedField("Name the first working outcome", firstEpicTitle, { firstEpicTitle = it }, minLines = 2)
+            PrimaryAction("Create first outcome", isSubmitting, firstEpicTitle.isNotBlank()) {
                 onCreateEpic(firstEpicTitle.trim())
             }
         } else {
