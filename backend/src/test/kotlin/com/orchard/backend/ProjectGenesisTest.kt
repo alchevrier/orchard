@@ -28,13 +28,20 @@ import com.orchard.backend.workspace.ProjectGenesisStatus
 import com.orchard.backend.workspace.ProjectGenesisFirstOutcomeStatus
 import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.RepositoryBlueprint
+import com.orchard.backend.workspace.RepositoryBindingStore
+import com.orchard.backend.workspace.RepositoryHead
+import com.orchard.backend.workspace.RepositoryView
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkDefinitionSubmission
 import com.orchard.backend.workspace.WorkspaceSnapshot
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.agent.CodingContextFile
+import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.GenesisIntelligenceService
 import com.orchard.backend.agent.GenesisProposalRequest
 import com.orchard.backend.agent.GenesisProposalStatus
+import com.orchard.backend.agent.GenesisRepositoryContextProvider
+import com.orchard.backend.agent.GenesisRepositoryObservation
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
 import io.ktor.client.request.header
@@ -298,6 +305,66 @@ class ProjectGenesisTest {
     }
 
     @Test
+    fun architectureProposalIsGroundedInRevisionPinnedRepositoryEvidence() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val model = FakeGenesisModel(validArchitectureOutput())
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+
+        val result = GenesisIntelligenceService(
+            workspace,
+            model,
+            repositoryContextProvider = contextProvider,
+        ).propose(1, GenesisProposalRequest("Use the existing Architect service."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertTrue(model.lastPrompt.contains("\"repositoryContext\""))
+        assertTrue(model.lastPrompt.contains("GenesisIntelligenceService"))
+        assertTrue(model.lastPrompt.contains(contextProvider.observation.revision))
+        assertEquals(contextProvider.observation.revision, result.proposal?.repositoryRevision)
+        assertEquals(
+            contextProvider.observation.context.files.single().contentHash,
+            result.proposal?.repositoryEvidence?.single()?.contentHash,
+        )
+    }
+
+    @Test
+    fun repositoryChangeInvalidatesGeneratedProposal() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val contextProvider = FakeGenesisRepositoryContextProvider(current = false)
+
+        val result = GenesisIntelligenceService(
+            workspace,
+            FakeGenesisModel(validArchitectureOutput()),
+            repositoryContextProvider = contextProvider,
+        ).propose(1, GenesisProposalRequest("Use the existing Architect service."))
+
+        assertEquals(GenesisProposalStatus.REPOSITORY_CHANGED, result.status)
+        assertEquals(null, result.proposal)
+    }
+
+    @Test
     fun firstWorkingOutcomeIsRevisionPinnedAndCreatedWithoutConversationObjective() = testApplication {
         val workspace = WorkspaceStore()
         workspace.beginBatch()
@@ -448,6 +515,58 @@ class ProjectGenesisTest {
         assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Experience formation", projectId = 1, epicId = 2)))
         assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Build genesis circuit", projectId = 1, epicId = 2, storyId = 3)))
         workspace.commitBatch()
+    }
+
+    private fun boundRepository() = object : RepositoryBindingStore {
+        override fun bind(projectId: Int, requestedPath: String) = Unit
+        override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = projectIds.associateWith {
+            RepositoryView(it, "/workspace/project", available = true)
+        }
+        override fun resolveHead(projectId: Int): RepositoryHead? = null
+    }
+
+    private fun validArchitectureOutput() = """{
+        "submission": {
+            "components": [{
+                "componentId": "architect",
+                "name": "Architect",
+                "responsibility": "Form revision-correlated proposals.",
+                "repositoryPaths": ["backend/src/main/kotlin/com/orchard/backend/agent"]
+            }],
+            "decisions": [{
+                "decisionId": "ADR-GENESIS-1",
+                "title": "Ground proposals in code",
+                "context": "The repository already contains an Architect service.",
+                "decision": "Use bounded Git-tracked context.",
+                "consequences": ["Each proposal carries evidence provenance."],
+                "componentIds": ["architect"]
+            }],
+            "firstEpicId": 2,
+            "baseRevision": 2
+        }
+    }""".trimIndent()
+
+    private class FakeGenesisRepositoryContextProvider(
+        private val current: Boolean = true,
+    ) : GenesisRepositoryContextProvider {
+        val observation = GenesisRepositoryObservation(
+            revision = "c".repeat(40),
+            context = CodingRepositoryContext(
+                files = listOf(CodingContextFile(
+                    "backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
+                    "class GenesisIntelligenceService",
+                )),
+                omittedFileCount = 12,
+            ),
+        )
+
+        override fun observe(repositoryPath: String, query: String): GenesisRepositoryObservation = observation
+
+        override fun isCurrent(
+            repositoryPath: String,
+            query: String,
+            observation: GenesisRepositoryObservation,
+        ): Boolean = current
     }
 
     private fun advance(

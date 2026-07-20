@@ -113,6 +113,12 @@ class DesktopNetworkClientTest {
                     },
                     "observations":["Continuity is a product constraint."],
                     "unresolvedQuestions":[],
+                    "repositoryRevision":"${"c".repeat(40)}",
+                    "repositoryEvidence":[{
+                        "path":"frontend/src/desktopMain/kotlin/App.kt",
+                        "contentHash":"${"d".repeat(64)}"
+                    }],
+                    "omittedRepositoryFileCount":7,
                     "model":"phi3:mini"
                 }""".trimIndent(),
                 status = HttpStatusCode.OK,
@@ -129,6 +135,9 @@ class DesktopNetworkClientTest {
 
         assertEquals("EXPERIENCE", proposal.phase)
         assertEquals("Calm", proposal.submission.experience?.emotionalQualities?.single())
+        assertEquals("c".repeat(40), proposal.repositoryRevision)
+        assertEquals("frontend/src/desktopMain/kotlin/App.kt", proposal.repositoryEvidence.single().path)
+        assertEquals(7, proposal.omittedRepositoryFileCount)
         client.close()
     }
 

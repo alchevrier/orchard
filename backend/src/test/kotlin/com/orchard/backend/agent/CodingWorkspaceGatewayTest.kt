@@ -38,6 +38,25 @@ class CodingWorkspaceGatewayTest {
         assertTrue(context.omittedFileCount > 0)
     }
 
+    @Test
+    fun `genesis context stays within proposal aperture`() {
+        val repository = createTempDirectory("orchard-genesis-context-")
+        git(repository, "init")
+        repeat(12) { index ->
+            Files.writeString(
+                repository.resolve("component-$index.kt"),
+                "class Component$index\n" + "x".repeat(4_000),
+            )
+        }
+        git(repository, "add", ".")
+
+        val context = LocalCodingWorkspaceGateway().collectGenesisContext(repository.toString(), "component")
+
+        assertTrue(context.files.size <= 6)
+        assertTrue(context.files.sumOf { it.content.encodeToByteArray().size } <= 24 * 1024)
+        assertTrue(context.omittedFileCount >= 6)
+    }
+
     private fun git(directory: Path, vararg arguments: String) {
         val process = ProcessBuilder(listOf("git", "-C", directory.toString()) + arguments)
             .redirectErrorStream(true)

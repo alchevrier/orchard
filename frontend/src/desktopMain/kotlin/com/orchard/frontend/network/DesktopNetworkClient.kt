@@ -1189,7 +1189,16 @@ data class GenesisProposalResponse(
     val submission: ProjectGenesisSubmissionRequest,
     val observations: List<String> = emptyList(),
     val unresolvedQuestions: List<String> = emptyList(),
+    val repositoryRevision: String? = null,
+    val repositoryEvidence: List<GenesisRepositoryEvidenceResponse> = emptyList(),
+    val omittedRepositoryFileCount: Int = 0,
     val model: String,
+)
+
+@Serializable
+data class GenesisRepositoryEvidenceResponse(
+    val path: String,
+    val contentHash: String,
 )
 
 @Serializable

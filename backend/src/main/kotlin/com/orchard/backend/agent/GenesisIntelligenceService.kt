@@ -40,6 +40,8 @@ enum class GenesisProposalStatus {
     CONTEXT_BUDGET_EXCEEDED,
     RESOURCE_CAPACITY_UNAVAILABLE,
     RESOURCE_TELEMETRY_UNAVAILABLE,
+    REPOSITORY_CONTEXT_UNAVAILABLE,
+    REPOSITORY_CHANGED,
 }
 
 @Serializable
@@ -54,8 +56,42 @@ data class GenesisProposal(
     val submission: ProjectGenesisSubmission,
     val observations: List<String> = emptyList(),
     val unresolvedQuestions: List<String> = emptyList(),
+    val repositoryRevision: String? = null,
+    val repositoryEvidence: List<GenesisRepositoryEvidence> = emptyList(),
+    val omittedRepositoryFileCount: Int = 0,
     val model: String,
 )
+
+@Serializable
+data class GenesisRepositoryEvidence(val path: String, val contentHash: String)
+
+data class GenesisRepositoryObservation(
+    val revision: String,
+    val context: CodingRepositoryContext,
+)
+
+interface GenesisRepositoryContextProvider {
+    fun observe(repositoryPath: String, query: String): GenesisRepositoryObservation
+    fun isCurrent(repositoryPath: String, query: String, observation: GenesisRepositoryObservation): Boolean
+}
+
+class CodingGenesisRepositoryContextProvider(
+    private val workspaceGateway: CodingWorkspaceGateway,
+) : GenesisRepositoryContextProvider {
+    override fun observe(repositoryPath: String, query: String): GenesisRepositoryObservation {
+        val before = requireNotNull(workspaceGateway.currentRevision(repositoryPath)) { "Repository revision is unavailable." }
+        val context = workspaceGateway.collectGenesisContext(repositoryPath, query)
+        val after = workspaceGateway.currentRevision(repositoryPath)
+        require(before == after) { "Repository changed while its context was being collected." }
+        return GenesisRepositoryObservation(before, context)
+    }
+
+    override fun isCurrent(
+        repositoryPath: String,
+        query: String,
+        observation: GenesisRepositoryObservation,
+    ): Boolean = runCatching { observe(repositoryPath, query) == observation }.getOrDefault(false)
+}
 
 data class GenesisProposalResult(
     val status: GenesisProposalStatus,
@@ -73,12 +109,15 @@ internal fun genesisProposalDiagnostic(status: GenesisProposalStatus): String = 
     GenesisProposalStatus.CONTEXT_BUDGET_EXCEEDED -> "The project context exceeds the Architect model's input budget. Shorten the description or select a larger model profile."
     GenesisProposalStatus.RESOURCE_CAPACITY_UNAVAILABLE -> "The Architect cannot run within the current machine resource policy. Retry when capacity is available."
     GenesisProposalStatus.RESOURCE_TELEMETRY_UNAVAILABLE -> "Machine telemetry is unavailable, so Orchard cannot safely admit the Architect model. Restore telemetry and retry."
+    GenesisProposalStatus.REPOSITORY_CONTEXT_UNAVAILABLE -> "The bound repository cannot provide clean, revision-correlated context. Restore a clean available worktree and retry."
+    GenesisProposalStatus.REPOSITORY_CHANGED -> "The repository changed while the Architect was forming this proposal. Review the current code and retry."
 }
 
 class GenesisIntelligenceService(
     private val workspace: WorkspaceStore,
     private val modelProvider: ModelProvider,
     private val resourceController: MachineResourceController = MachineResourceController.unrestricted(),
+    private val repositoryContextProvider: GenesisRepositoryContextProvider? = null,
     private val json: Json = Json { encodeDefaults = true },
     private val systemPrompt: String = loadPrompt(),
 ) {
@@ -98,7 +137,8 @@ class GenesisIntelligenceService(
         if (request.prompt.isBlank() || request.prompt.encodeToByteArray().size > MAX_PROMPT_BYTES) {
             return GenesisProposalResult(GenesisProposalStatus.INVALID_OUTPUT)
         }
-        val genesis = workspace.snapshot(0).projectGenesis.singleOrNull { it.projectId == projectId }
+        val snapshot = workspace.snapshot(0)
+        val genesis = snapshot.projectGenesis.singleOrNull { it.projectId == projectId }
             ?: return GenesisProposalResult(GenesisProposalStatus.PROJECT_NOT_FOUND)
         if (genesis.phase in setOf(GENESIS_ADMISSION, GENESIS_READY)) {
             return GenesisProposalResult(GenesisProposalStatus.PHASE_NOT_PROPOSABLE)
@@ -112,12 +152,33 @@ class GenesisIntelligenceService(
                 diagnostic = "Create and approve the first working outcome before forming an architecture proposal.",
             )
         }
+        val repository = snapshot.repositories[projectId]
+        val repositoryQuery = listOfNotNull(
+            request.prompt.trim(),
+            genesis.revision?.productIntent,
+            availableFirstEpics.firstOrNull()?.title,
+        ).joinToString("\n")
+        val contextProvider = repositoryContextProvider
+        val repositoryObservation = if (repository != null && contextProvider != null) {
+            if (!repository.available || repository.dirty) {
+                return GenesisProposalResult(GenesisProposalStatus.REPOSITORY_CONTEXT_UNAVAILABLE)
+            }
+            runCatching { contextProvider.observe(repository.path, repositoryQuery) }.getOrElse {
+                return GenesisProposalResult(GenesisProposalStatus.REPOSITORY_CONTEXT_UNAVAILABLE)
+            }.takeIf { it.context.files.isNotEmpty() } ?: return GenesisProposalResult(
+                GenesisProposalStatus.REPOSITORY_CONTEXT_UNAVAILABLE,
+                diagnostic = "The bound repository did not yield any readable Git-tracked code context.",
+            )
+        } else null
         val envelope = GenesisProposalEnvelope(
             current = genesis,
             userMessage = request.prompt.trim(),
             requiredSubmissionShape = requiredShape(genesis.phase),
             requiredOutputExample = requiredOutputExample(genesis, availableFirstEpics.firstOrNull()?.epicId),
             availableFirstEpics = availableFirstEpics,
+            repositoryContext = repositoryObservation?.let {
+                GenesisRepositoryContext(it.revision, it.context.files, it.context.omittedFileCount)
+            },
         )
         val envelopeJson = json.encodeToString(envelope)
         val prompt = "$systemPrompt\n\nAuthoritative genesis envelope:\n$envelopeJson"
@@ -166,6 +227,26 @@ class GenesisIntelligenceService(
                 diagnostic = "The Architect returned fields outside the ${genesis.phase.lowercase()} phase. Revise the description and retry.",
             )
         }
+        val evidencePaths = repositoryObservation?.context?.files.orEmpty().map { it.path }
+        val uncorrelatedPaths = if (genesis.phase == GENESIS_ARCHITECTURE && evidencePaths.isNotEmpty()) {
+            pinned.components.orEmpty().flatMap { it.repositoryPaths }.distinct().filterNot { path ->
+                repositoryPathCorrelates(path, evidencePaths)
+            }
+        } else emptyList()
+        if (uncorrelatedPaths.isNotEmpty() || (evidencePaths.isNotEmpty() && pinned.components.orEmpty().any { it.repositoryPaths.isEmpty() })) {
+            return GenesisProposalResult(
+                GenesisProposalStatus.INVALID_OUTPUT,
+                diagnostic = "The Architect proposed component paths that are not present in the supplied repository evidence. " +
+                    "Refine the description or identify the existing implementation path.",
+            )
+        }
+        if (repository != null && repositoryObservation != null && contextProvider?.isCurrent(
+                repository.path,
+                repositoryQuery,
+                repositoryObservation,
+            ) != true) {
+            return GenesisProposalResult(GenesisProposalStatus.REPOSITORY_CHANGED)
+        }
         return GenesisProposalResult(
             GenesisProposalStatus.CREATED,
             GenesisProposal(
@@ -176,6 +257,11 @@ class GenesisIntelligenceService(
                 submission = pinned,
                 observations = output.observations.take(MAX_LIST_ENTRIES),
                 unresolvedQuestions = output.unresolvedQuestions.take(MAX_LIST_ENTRIES),
+                repositoryRevision = repositoryObservation?.revision,
+                repositoryEvidence = repositoryObservation?.context?.files.orEmpty().map {
+                    GenesisRepositoryEvidence(it.path, it.contentHash)
+                },
+                omittedRepositoryFileCount = repositoryObservation?.context?.omittedFileCount ?: 0,
                 model = modelProvider.bindingProfile().model,
             ),
         )
@@ -195,6 +281,12 @@ class GenesisIntelligenceService(
             submission.experience == null && submission.components == null && submission.decisions == null &&
             submission.firstEpicId == null && submission.blueprint != null
         else -> false
+    }
+
+    private fun repositoryPathCorrelates(path: String, evidencePaths: List<String>): Boolean {
+        val normalized = path.trim().trimEnd('/')
+        if (normalized.isEmpty() || normalized.startsWith('/') || normalized.split('/').any { it == ".." }) return false
+        return evidencePaths.any { evidencePath -> evidencePath == normalized || evidencePath.startsWith("$normalized/") }
     }
 
     private fun decodeProposalOutput(text: String): ProposalDecodeResult {
@@ -380,6 +472,14 @@ private data class GenesisProposalEnvelope(
     val requiredSubmissionShape: String,
     val requiredOutputExample: JsonElement,
     val availableFirstEpics: List<GenesisEpicOption>,
+    val repositoryContext: GenesisRepositoryContext? = null,
+)
+
+@Serializable
+private data class GenesisRepositoryContext(
+    val revision: String,
+    val files: List<CodingContextFile>,
+    val omittedFileCount: Int,
 )
 
 @Serializable

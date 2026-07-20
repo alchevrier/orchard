@@ -7,6 +7,7 @@ import com.orchard.backend.agent.ProposalGenerationStatus
 import com.orchard.backend.agent.CircuitIntelligenceService
 import com.orchard.backend.agent.CircuitGenerationStatus
 import com.orchard.backend.agent.CodingWorkerService
+import com.orchard.backend.agent.CodingGenesisRepositoryContextProvider
 import com.orchard.backend.agent.GenesisIntelligenceService
 import com.orchard.backend.agent.GenesisProposalRequest
 import com.orchard.backend.agent.GenesisProposalStatus
@@ -177,7 +178,13 @@ fun main() {
         modelProfileSettingsStore,
         resourceController,
     )
-    val genesisIntelligence = GenesisIntelligenceService(workspace, modelProviderRegistry, resourceController)
+    val codingWorkspaceGateway = LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR))
+    val genesisIntelligence = GenesisIntelligenceService(
+        workspace,
+        modelProviderRegistry,
+        resourceController,
+        CodingGenesisRepositoryContextProvider(codingWorkspaceGateway),
+    )
     val companyControl = CompanyControlService(
         workspace,
         modelProviders,
@@ -185,7 +192,6 @@ fun main() {
         repositoryBindings,
     )
     val companyCircuit = CompanyCircuitService(workspace, companyControl, OrchardPaths.LOCAL_REPOSITORIES_DIR)
-    val codingWorkspaceGateway = LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR))
     val repositoryAnalysis = RepositoryAnalysisService(
         workspace,
         modelProviders,
@@ -1290,7 +1296,9 @@ private fun genesisProposalStatus(status: GenesisProposalStatus): HttpStatusCode
     GenesisProposalStatus.BUSY -> HttpStatusCode.Conflict
     GenesisProposalStatus.MODEL_UNAVAILABLE,
     GenesisProposalStatus.RESOURCE_CAPACITY_UNAVAILABLE,
-    GenesisProposalStatus.RESOURCE_TELEMETRY_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+    GenesisProposalStatus.RESOURCE_TELEMETRY_UNAVAILABLE,
+    GenesisProposalStatus.REPOSITORY_CONTEXT_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+    GenesisProposalStatus.REPOSITORY_CHANGED -> HttpStatusCode.Conflict
 }
 
 @Serializable

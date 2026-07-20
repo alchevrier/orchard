@@ -324,6 +324,9 @@ private fun ProposalStep(
     var showManualExperience by remember(state.genesis.revision?.hash) { mutableStateOf(false) }
     val candidate = proposal?.takeIf { it.phase == state.genesis.phase }
     val unresolvedQuestions = candidate?.unresolvedQuestions.orEmpty().filter(String::isNotBlank)
+    var refinementAnswers by remember(state.genesis.revision?.hash, unresolvedQuestions) {
+        mutableStateOf(unresolvedQuestions.associateWith { "" })
+    }
     val needsRefinement = proposalNeedsRefinement(unresolvedQuestions, feedback)
     val heading = proposalStepHeading(step, candidate != null, firstOutcome.isNotEmpty(), needsRefinement)
     Text(heading, color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
@@ -399,7 +402,15 @@ private fun ProposalStep(
                 Text(feedback, Modifier.padding(top = 5.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
             }
             unresolvedQuestions.forEach { question ->
-                Text("- $question", Modifier.padding(top = 5.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
+                OutlinedTextField(
+                    value = refinementAnswers[question].orEmpty(),
+                    onValueChange = { answer -> refinementAnswers = refinementAnswers + (question to answer) },
+                    modifier = Modifier.fillMaxWidth().padding(top = 9.dp),
+                    enabled = !isSubmitting,
+                    minLines = 2,
+                    maxLines = 5,
+                    label = { Text(question) },
+                )
             }
         }
     }
@@ -410,7 +421,7 @@ private fun ProposalStep(
         enabled = !isSubmitting,
         minLines = 3,
         maxLines = 8,
-        label = { Text(if (needsRefinement) "Description and answers" else proposalPromptLabel(step)) },
+        label = { Text(if (needsRefinement) "Original description" else proposalPromptLabel(step)) },
     )
     Text(
         "The Architect forms a draft from this description. Nothing is recorded until you apply it.",
@@ -423,12 +434,39 @@ private fun ProposalStep(
         label = proposalActionLabel(candidate != null, needsRefinement),
         loadingLabel = "Forming and validating proposal...",
         isSubmitting = isSubmitting,
-        enabled = prompt.isNotBlank(),
-        onClick = { onGenerate(prompt.trim()) },
+        enabled = prompt.isNotBlank() && unresolvedQuestions.all { refinementAnswers[it].orEmpty().isNotBlank() },
+        onClick = { onGenerate(proposalRefinementPrompt(prompt, unresolvedQuestions, refinementAnswers)) },
     )
     candidate?.let {
         Column(Modifier.fillMaxWidth().padding(top = 14.dp).background(SetupRaised, RoundedCornerShape(6.dp)).padding(12.dp)) {
             Text(if (needsRefinement) "DRAFT" else "CANDIDATE", color = SetupBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+            it.repositoryRevision?.let { revision ->
+                Text(
+                    "GROUNDED IN CODE  ${revision.take(12)}",
+                    Modifier.padding(top = 9.dp),
+                    color = SetupGreen,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                )
+                it.repositoryEvidence.forEach { evidence ->
+                    Text(
+                        "${evidence.path}  ${evidence.contentHash.take(8)}",
+                        Modifier.padding(top = 4.dp),
+                        color = SetupMuted,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                    )
+                }
+                if (it.omittedRepositoryFileCount > 0) {
+                    Text(
+                        "${it.omittedRepositoryFileCount} additional tracked files were outside this bounded context.",
+                        Modifier.padding(top = 4.dp),
+                        color = SetupMuted,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                    )
+                }
+            }
             proposalLines(it).forEach { line ->
                 Text(line, Modifier.padding(top = 6.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
             }
@@ -447,6 +485,24 @@ private fun ProposalStep(
 
 internal fun proposalNeedsRefinement(unresolvedQuestions: List<String>, feedback: String?): Boolean =
     unresolvedQuestions.any(String::isNotBlank) || !feedback.isNullOrBlank()
+
+internal fun proposalRefinementPrompt(
+    originalPrompt: String,
+    unresolvedQuestions: List<String>,
+    answers: Map<String, String>,
+): String = buildString {
+    append(originalPrompt.trim())
+    val answered = unresolvedQuestions.mapNotNull { question ->
+        answers[question]?.trim()?.takeIf(String::isNotEmpty)?.let { answer -> question to answer }
+    }
+    if (answered.isNotEmpty()) {
+        append("\n\nAnswers to the Architect's questions:")
+        answered.forEach { (question, answer) ->
+            append("\nQuestion: ").append(question.trim())
+            append("\nAnswer: ").append(answer)
+        }
+    }
+}
 
 internal fun proposalActionLabel(hasProposal: Boolean, needsRefinement: Boolean): String = when {
     needsRefinement -> "Refine proposal"

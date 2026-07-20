@@ -175,6 +175,27 @@ class DurableConversationWorkspaceTest {
         )
     }
 
+    @Test
+    fun `proposal refinement preserves brief and correlates each answer to its question`() {
+        val first = "Which transport is authoritative?"
+        val second = "How is state stored?"
+
+        assertEquals(
+            """Deliver the order book.
+
+Answers to the Architect's questions:
+Question: Which transport is authoritative?
+Answer: The existing UDP gateway.
+Question: How is state stored?
+Answer: Array-backed off-heap shards.""",
+            proposalRefinementPrompt(
+                "Deliver the order book.",
+                listOf(first, second),
+                mapOf(first to "The existing UDP gateway.", second to "Array-backed off-heap shards."),
+            ),
+        )
+    }
+
     private fun command(
         capabilityId: String,
         execution: ConversationCommandExecutionResponse,
