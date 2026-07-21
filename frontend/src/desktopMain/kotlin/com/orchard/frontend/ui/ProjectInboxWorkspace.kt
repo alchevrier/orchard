@@ -61,10 +61,10 @@ import com.orchard.frontend.network.ProjectGenesisViewResponse
 import com.orchard.frontend.network.ProjectReportFilterDataResponse
 import com.orchard.frontend.network.ProjectReportInboxResponse
 import com.orchard.frontend.network.ReportItemInputRequest
+import com.orchard.frontend.network.ReportItemResponse
 import com.orchard.frontend.network.ReportRevisionProjectionResponse
 import com.orchard.frontend.network.ReportScopeRequest
 import com.orchard.frontend.network.ReportThreadLinkResponse
-import com.orchard.frontend.network.SubmitConversationMessageRequest
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -167,7 +167,11 @@ internal fun ProjectInboxWorkspace(
         }
     }
 
-    fun openThread(report: ReportRevisionProjectionResponse, prompt: String? = null) {
+    fun openThread(
+        report: ReportRevisionProjectionResponse,
+        prompt: String? = null,
+        advisory: Boolean = false,
+    ) {
         if (isMutating) return
         isMutating = true
         error = null
@@ -178,15 +182,15 @@ internal fun ProjectInboxWorkspace(
                 }
                 val link = networkClient.resolveProjectThread(projectId, "REPORT", report.report.reportId)
                 if (!prompt.isNullOrBlank()) {
-                    val projection = networkClient.getConversation(link.conversationId)
-                    networkClient.submitConversationMessage(
-                        link.conversationId,
-                        SubmitConversationMessageRequest(
-                            clientMessageId = "desktop:${UUID.randomUUID()}",
-                            expectedSequence = projection.messages.size + 1L,
-                            content = prompt,
-                        ),
+                    val response = networkClient.submitConversationMessageAtCurrentSequence(
+                        conversationId = link.conversationId,
+                        clientMessageId = "desktop:${UUID.randomUUID()}",
+                        content = prompt,
+                        intent = if (advisory) "ADVISORY" else "STANDARD",
                     )
+                    check(response.status in setOf("RECORDED", "ALREADY_RECORDED", "ADMISSION_REQUIRED", "REJECTED")) {
+                        response.diagnostic.ifBlank { "The canonical thread did not record the requested message." }
+                    }
                 }
                 openResolvedThread(link, onOpenThread)
             }.onFailure { error = it.message ?: "The canonical report thread could not be opened." }
@@ -266,6 +270,9 @@ internal fun ProjectInboxWorkspace(
                         outcomeTitle = outcomeTitle,
                         onOutcomeTitleChange = { outcomeTitle = it },
                         onOpenThread = { openThread(selected) },
+                        onPlanRemediation = { item ->
+                            openThread(selected, requireNotNull(item.remediation).prompt, advisory = true)
+                        },
                         onPromptForOutcome = { openThread(selected, requireNotNull(outcomeAction).prompt) },
                         onCreateOutcome = {
                             if (confirmedIntent.isNotBlank() && outcomeTitle.isNotBlank()) mutate {
@@ -451,6 +458,7 @@ private fun ReportDetail(
     outcomeTitle: String,
     onOutcomeTitleChange: (String) -> Unit,
     onOpenThread: () -> Unit,
+    onPlanRemediation: (ReportItemResponse) -> Unit,
     onPromptForOutcome: () -> Unit,
     onCreateOutcome: () -> Unit,
     onAdmitDirection: () -> Unit,
@@ -516,9 +524,37 @@ private fun ReportDetail(
                     Text(item.state.replace('_', ' '), color = if (item.actionRequired) InboxAmber else InboxGreen, fontWeight = FontWeight.Bold, fontSize = 9.sp)
                 }
                 Text(item.summary, Modifier.padding(top = 5.dp), color = InboxMuted, fontSize = 11.sp)
+                item.diagnosis?.let { diagnosis ->
+                    Text(
+                        diagnosis.category.replace('_', ' '),
+                        Modifier.padding(top = 9.dp),
+                        color = InboxAmber,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                    )
+                    Text(diagnosis.impact, Modifier.padding(top = 3.dp), color = InboxInk, fontSize = 11.sp)
+                    diagnosis.suggestedEvidence.forEach { suggestion ->
+                        Row(Modifier.padding(top = 5.dp), verticalAlignment = Alignment.Top) {
+                            Icon(Icons.Default.Check, null, Modifier.size(13.dp), tint = InboxGreen)
+                            Spacer(Modifier.width(6.dp))
+                            Text(suggestion, Modifier.weight(1f), color = InboxMuted, fontSize = 10.sp)
+                        }
+                    }
+                }
                 item.evidence.forEach { evidence ->
                     Text("${evidence.type}  ${evidence.identity}${evidence.revision.takeIf(String::isNotBlank)?.let { "@$it" }.orEmpty()}", Modifier.padding(top = 7.dp), color = InboxBlue, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
                     if (evidence.description.isNotBlank()) Text(evidence.description, Modifier.padding(top = 2.dp), color = InboxMuted, fontSize = 10.sp)
+                }
+                item.remediation?.let { remediation ->
+                    TextButton(
+                        onClick = { onPlanRemediation(item) },
+                        enabled = !isMutating,
+                        modifier = Modifier.padding(top = 5.dp),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Chat, null, Modifier.size(15.dp), tint = InboxGreen)
+                        Spacer(Modifier.width(6.dp))
+                        Text(remediation.label, color = InboxGreen, fontSize = 10.sp)
+                    }
                 }
             }
             Divider(color = InboxLine)

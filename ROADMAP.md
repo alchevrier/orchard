@@ -376,6 +376,7 @@ Deliverables:
 
 - Complete content-addressed import of every Git-tracked artifact with explicit coverage and a durable project graph projection. **Implemented foundation.**
 - Correlation of repository modules, declarations, imports, tests, ADR path references, build dependencies, and current Orchard project/work/design/workflow/evidence authority. **Implemented deterministic foundation.**
+- Typed diagnoses for partial, conflicting, and missing repository evidence, with revision-pinned governed remediation prompts for architecture, decisions, tests and test methodology, and delivery evidence. **Implemented baseline workflow.**
 - Language-server or parser-backed symbols, definitions, references, modules, tests, and configuration relationships.
 - Content-addressed evidence nodes tied to exact repository revisions.
 - Deterministic fallback for unsupported languages.

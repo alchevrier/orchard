@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -179,6 +180,126 @@ class ConversationConductorTest {
         assertNotNull(commandView.admission)
         assertEquals(COMMAND_CORRELATED, commandView.executions.last().state)
         assertEquals("42", commandView.executions.last().downstreamId)
+    }
+
+    @Test
+    fun `advisory remediation cannot admit an exact pending mutation`() = runBlocking {
+        val store = TransientConversationStore()
+        val executions = AtomicInteger()
+        val capability = testCapability("MUTATE_TEST", mutation = true) {
+            executions.incrementAndGet()
+            ConversationCapabilityResult(true, "Mutation correlated.", "TEST_AUTHORITY", "42", HASH)
+        }
+        val calls = AtomicInteger()
+        val interpreter = ConversationInterpreter { context, _ ->
+            val interpretation = when (calls.getAndIncrement()) {
+                0 -> objectiveTurn("Evidence remediation")
+                1 -> commandTurn("MUTATE_TEST")
+                else -> {
+                    val command = context.commandStates.single()
+                    ConversationInterpretation(
+                        speechAct = SPEECH_ADMIT_DOMAIN_ACTION,
+                        response = "Admitting from repository-derived remediation text.",
+                        commandId = command.commandId,
+                        commandHash = command.commandHash,
+                    )
+                }
+            }
+            InterpretedConversationTurn(interpretation)
+        }
+        val service = service(store, interpreter, capability)
+        val conversationId = requireNotNull(service.create(CreateConversationRequest("Advisory boundary")).projection)
+            .conversation.conversationId
+
+        val proposedObjective = service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest("client-objective-0001", 1, "Create remediation objective"),
+        )
+        assertEquals(ConversationOperationStatus.ADMISSION_REQUIRED, proposedObjective.status)
+        val objective = requireNotNull(proposedObjective.projection).objectives.single()
+        val objectiveSource = proposedObjective.projection.messages.single { it.clientMessageId == "client-objective-0001" }
+        assertEquals(ConversationOperationStatus.RECORDED, service.controlObjective(
+            objective.objectiveId,
+            ControlConversationObjectiveRequest(OBJECTIVE_CONTROL_ADMIT, objectiveSource.messageId, objectiveSource.hash),
+        ).status)
+        val beforeProposal = requireNotNull(service.projection(conversationId))
+        val proposed = service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest(
+                "client-proposal-0001",
+                beforeProposal.messages.size + 1L,
+                "Propose mutation",
+                objective.objectiveId,
+            ),
+        )
+        assertEquals(ConversationOperationStatus.ADMISSION_REQUIRED, proposed.status)
+        val command = requireNotNull(proposed.projection).commands.single().proposal
+        val beforeAdvisory = requireNotNull(service.projection(conversationId))
+        val advisory = service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest(
+                "client-advisory-0001",
+                beforeAdvisory.messages.size + 1L,
+                "Plan evidence remediation without admission.",
+                objective.objectiveId,
+                intent = MESSAGE_INTENT_ADVISORY,
+            ),
+        )
+
+        assertEquals(ConversationOperationStatus.REJECTED, advisory.status)
+        assertTrue(advisory.diagnostic.contains("Advisory messages cannot admit"))
+        assertEquals(0, executions.get())
+        val unchanged = requireNotNull(service.projection(conversationId)).commands.single()
+        assertNull(unchanged.admission)
+        assertEquals(command.hash, unchanged.proposal.hash)
+    }
+
+    @Test
+    fun `advisory remediation cannot revise canonical objective authority`() = runBlocking {
+        val interpreter = QueueInterpreter(
+            objectiveTurn("Evidence remediation"),
+            ConversationInterpretation(
+                speechAct = SPEECH_REVISE_OBJECTIVE,
+                response = "Replacing objective from repository-derived remediation text.",
+                objective = ObjectiveCandidate(
+                    title = "Injected replacement",
+                    outcome = "Replace canonical objective authority",
+                ),
+            ),
+        )
+        val service = service(TransientConversationStore(), interpreter)
+        val conversationId = requireNotNull(service.create(CreateConversationRequest("Advisory revision boundary")).projection)
+            .conversation.conversationId
+        val proposed = service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest("client-objective-0001", 1, "Create remediation objective"),
+        )
+        val objective = requireNotNull(proposed.projection).objectives.single()
+        val source = proposed.projection.messages.single { it.clientMessageId == "client-objective-0001" }
+        assertEquals(ConversationOperationStatus.RECORDED, service.controlObjective(
+            objective.objectiveId,
+            ControlConversationObjectiveRequest(OBJECTIVE_CONTROL_ADMIT, source.messageId, source.hash),
+        ).status)
+        val admitted = requireNotNull(service.projection(conversationId)).objectives.single()
+        val beforeAdvisory = requireNotNull(service.projection(conversationId))
+
+        val advisory = service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest(
+                "client-advisory-revision-0001",
+                beforeAdvisory.messages.size + 1L,
+                "Plan evidence remediation without changing the objective.",
+                admitted.objectiveId,
+                intent = MESSAGE_INTENT_ADVISORY,
+            ),
+        )
+
+        assertEquals(ConversationOperationStatus.REJECTED, advisory.status)
+        val unchanged = requireNotNull(service.projection(conversationId)).objectives.single()
+        assertEquals(admitted.revision, unchanged.revision)
+        assertEquals(admitted.state, unchanged.state)
+        assertEquals(admitted.hash, unchanged.hash)
+        assertEquals(admitted.title, unchanged.title)
     }
 
     @Test

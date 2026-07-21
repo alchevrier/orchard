@@ -1,7 +1,12 @@
 package com.orchard.backend.report
 
 import com.orchard.backend.analysis.CLAIM_CONTRADICTED
+import com.orchard.backend.analysis.CLAIM_PARTIALLY_SUPPORTED
 import com.orchard.backend.analysis.CLAIM_UNESTABLISHED
+import com.orchard.backend.analysis.BASELINE_STAGE_DECISIONS
+import com.orchard.backend.analysis.BASELINE_STAGE_DELIVERY
+import com.orchard.backend.analysis.BASELINE_STAGE_STRUCTURE
+import com.orchard.backend.analysis.BASELINE_STAGE_VERIFICATION
 import com.orchard.backend.analysis.REPOSITORY_BASELINE_STAGES
 import com.orchard.backend.analysis.RepositoryBaselineAnalysis
 import com.orchard.backend.analysis.RepositoryObjectiveAssessment
@@ -222,6 +227,9 @@ class ProjectReportService(
         requireProject(projectId)
         require(request.clientRequestId.isNotBlank() && request.actor.isNotBlank()) { "Report request identity is invalid" }
         require(request.title.isNotBlank() && request.items.isNotEmpty()) { "Report content is empty" }
+        require(request.items.all { it.diagnosis == null && it.remediation == null }) {
+            "Generated diagnosis and remediation metadata cannot be supplied by a user report"
+        }
         validateScope(projectId, request.scope)
         val sourceIdentity = "${request.actor.trim()}:${request.clientRequestId.trim()}"
         val sourceHash = stagedPlanHash(serviceJson.encodeToString(request))
@@ -350,6 +358,9 @@ class ProjectReportService(
             )
             val findings = baseline.sections.flatMap { section ->
                 section.findings.map { finding ->
+                    val diagnosis = finding.takeIf {
+                        it.status in setOf(CLAIM_PARTIALLY_SUPPORTED, CLAIM_CONTRADICTED, CLAIM_UNESTABLISHED)
+                    }?.let { baselineGapDiagnosis(section.stage, it.statement) }
                     ReportItemInput(
                         itemKey = finding.claimId,
                         kind = "REPOSITORY_${section.stage}_FINDING",
@@ -372,6 +383,15 @@ class ProjectReportService(
                                 baseline.repositoryRevision,
                                 evidence.contentHash,
                                 evidence.observation,
+                            )
+                        },
+                        diagnosis = diagnosis,
+                        remediation = diagnosis?.let {
+                            baselineGapRemediation(
+                                section.stage,
+                                finding.claimId,
+                                baseline.repositoryRevision,
+                                it,
                             )
                         },
                     )
@@ -438,6 +458,74 @@ class ProjectReportService(
                 )
             },
             createdAt = assessment.assessedAt,
+        )
+    }
+
+    private fun baselineGapDiagnosis(stage: String, statement: String): ReportGapDiagnosis = when (stage) {
+        BASELINE_STAGE_STRUCTURE -> ReportGapDiagnosis(
+            category = "ARCHITECTURE_EVIDENCE",
+            missing = statement,
+            impact = "Outcome planning cannot reliably identify affected implementation boundaries until this is established.",
+            suggestedEvidence = listOf(
+                "Map affected modules and components to exact repository paths.",
+                "Record dependency, API, persistence, or runtime boundary evidence.",
+            ),
+        )
+        BASELINE_STAGE_DECISIONS -> ReportGapDiagnosis(
+            category = "DECISION_EVIDENCE",
+            missing = statement,
+            impact = "Delivery may violate or duplicate an architectural decision until this is established.",
+            suggestedEvidence = listOf(
+                "Confirm or author an ADR with status, constraints, and consequences.",
+                "Map the decision to affected components and repository paths.",
+            ),
+        )
+        BASELINE_STAGE_VERIFICATION -> ReportGapDiagnosis(
+            category = "TEST_EVIDENCE",
+            missing = statement,
+            impact = "Orchard cannot compile a defensible acceptance gate for this area until its verification method is established.",
+            suggestedEvidence = listOf(
+                "Identify the appropriate test level and test methodology.",
+                "Add or locate executable tests, fixtures, and representative data.",
+                "Record deterministic verification commands and the evidence they must produce.",
+            ),
+        )
+        BASELINE_STAGE_DELIVERY -> ReportGapDiagnosis(
+            category = "DELIVERY_EVIDENCE",
+            missing = statement,
+            impact = "Orchard cannot demonstrate safe, repeatable delivery for this area until operational evidence is established.",
+            suggestedEvidence = listOf(
+                "Identify CI, runtime, deployment, and observability verification.",
+                "Record rollback, recovery, and production-safety evidence.",
+            ),
+        )
+        else -> error("Unknown repository baseline stage $stage")
+    }
+
+    private fun baselineGapRemediation(
+        stage: String,
+        claimId: String,
+        repositoryRevision: String,
+        diagnosis: ReportGapDiagnosis,
+    ): ReportRemediationAction {
+        val label = when (stage) {
+            BASELINE_STAGE_STRUCTURE -> "Plan architecture evidence"
+            BASELINE_STAGE_DECISIONS -> "Plan decision evidence"
+            BASELINE_STAGE_VERIFICATION -> "Plan test and evidence work"
+            BASELINE_STAGE_DELIVERY -> "Plan delivery evidence"
+            else -> error("Unknown repository baseline stage $stage")
+        }
+        return ReportRemediationAction(
+            kind = "PLAN_GOVERNED_REMEDIATION",
+            label = label,
+            prompt = buildString {
+                append("Diagnose and plan governed remediation for repository baseline gap ")
+                append(claimId).append(" at revision ").append(repositoryRevision).append(". ")
+                append("Category: ").append(diagnosis.category).append(". Missing: ").append(diagnosis.missing).append(". ")
+                append("Identify the evidence to gather, appropriate tests and test methodology, acceptance criteria, ")
+                append("deterministic verification commands, scope, non-goals, and unresolved user decisions. ")
+                append("Use existing repository intelligence and do not mutate repository or project authority until the user admits exact work.")
+            },
         )
     }
 

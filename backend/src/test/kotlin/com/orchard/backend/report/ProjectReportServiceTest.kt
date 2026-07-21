@@ -1,6 +1,7 @@
 package com.orchard.backend.report
 
 import com.orchard.backend.analysis.CLAIM_SUPPORTED
+import com.orchard.backend.analysis.CLAIM_UNESTABLISHED
 import com.orchard.backend.analysis.REPOSITORY_BASELINE_STAGES
 import com.orchard.backend.analysis.RepositoryCapabilityClaim
 import com.orchard.backend.analysis.RepositoryBaselineAnalysis
@@ -140,6 +141,26 @@ class ProjectReportServiceTest {
         assertEquals(fixture.assessment!!.hash, assessed.revision.sourceHash)
         assertEquals("repository-shape", assessed.items.single().itemKey)
         assertEquals(2, fixture.service.inbox(1).reports.size)
+    }
+
+    @Test
+    fun `baseline verification gap diagnoses missing test evidence and offers governed remediation`() {
+        val fixture = fixture()
+        fixture.baseline = baseline(complete = true, includeVerificationGap = true)
+
+        val report = fixture.service.inbox(1).reports.single {
+            it.revision.sourceType == "REPOSITORY_BASELINE_ANALYSIS"
+        }
+        val gap = report.items.single { it.itemKey == "verification-secondary" }
+
+        assertEquals(CLAIM_UNESTABLISHED, gap.state)
+        assertFalse(gap.actionRequired)
+        assertEquals("TEST_EVIDENCE", gap.diagnosis?.category)
+        assertTrue(gap.diagnosis?.suggestedEvidence.orEmpty().any { "test methodology" in it })
+        assertEquals("PLAN_GOVERNED_REMEDIATION", gap.remediation?.kind)
+        assertEquals("Plan test and evidence work", gap.remediation?.label)
+        assertTrue(gap.remediation?.prompt.orEmpty().contains("verification-secondary at revision $REVISION"))
+        assertTrue(gap.remediation?.prompt.orEmpty().contains("do not mutate repository or project authority"))
     }
 
     @Test
@@ -285,26 +306,29 @@ class ProjectReportServiceTest {
         outputHash = "d".repeat(64),
     )
 
-    private fun baseline(complete: Boolean): RepositoryBaselineAnalysis {
+    private fun baseline(
+        complete: Boolean,
+        includeVerificationGap: Boolean = false,
+    ): RepositoryBaselineAnalysis {
         val stages = if (complete) REPOSITORY_BASELINE_STAGES else REPOSITORY_BASELINE_STAGES.take(1)
         val sections = stages.map { stage ->
             RepositoryBaselineSection(
                 stage = stage,
                 summary = "$stage repository evidence was analyzed.",
-                findings = listOf(
+                findings = listOf("primary", "secondary").map { suffix ->
+                    val gap = includeVerificationGap && stage == "VERIFICATION" && suffix == "secondary"
                     RepositoryCapabilityClaim(
-                        "${stage.lowercase()}-primary",
-                        "$stage has a primary established finding.",
-                        CLAIM_SUPPORTED,
-                        support = listOf(RepositoryClaimEvidence("build.gradle.kts", "b".repeat(64), "The build establishes this finding.")),
-                    ),
-                    RepositoryCapabilityClaim(
-                        "${stage.lowercase()}-secondary",
-                        "$stage has a secondary established finding.",
-                        CLAIM_SUPPORTED,
-                        support = listOf(RepositoryClaimEvidence("settings.gradle.kts", "c".repeat(64), "The settings establish this finding.")),
-                    ),
-                ),
+                        "${stage.lowercase()}-$suffix",
+                        if (gap) "The repository does not establish an integration-test methodology."
+                        else "$stage has a $suffix established finding.",
+                        if (gap) CLAIM_UNESTABLISHED else CLAIM_SUPPORTED,
+                        support = if (gap) emptyList() else listOf(RepositoryClaimEvidence(
+                            if (suffix == "primary") "build.gradle.kts" else "settings.gradle.kts",
+                            if (suffix == "primary") "b".repeat(64) else "c".repeat(64),
+                            "The repository establishes this finding.",
+                        )),
+                    )
+                },
                 model = "test-model",
                 promptHash = "d".repeat(64),
                 outputHash = "e".repeat(64),

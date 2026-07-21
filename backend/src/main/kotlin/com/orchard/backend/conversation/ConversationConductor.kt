@@ -37,6 +37,19 @@ const val SPEECH_SET_DEPENDENCIES = "SET_DEPENDENCIES"
 const val SPEECH_REQUEST_STATUS = "REQUEST_STATUS"
 const val SPEECH_CLARIFY = "CLARIFY"
 
+const val MESSAGE_INTENT_STANDARD = "STANDARD"
+const val MESSAGE_INTENT_ADVISORY = "ADVISORY"
+
+private val ADVISORY_FORBIDDEN_SPEECH_ACTS = setOf(
+    SPEECH_ADMIT_DOMAIN_ACTION,
+    SPEECH_REVISE_OBJECTIVE,
+    SPEECH_PAUSE_OBJECTIVE,
+    SPEECH_RESUME_OBJECTIVE,
+    SPEECH_CANCEL_OBJECTIVE,
+    SPEECH_SET_PRIORITY,
+    SPEECH_SET_DEPENDENCIES,
+)
+
 const val OBJECTIVE_CONTROL_ADMIT = "ADMIT"
 const val OBJECTIVE_CONTROL_PAUSE = "PAUSE"
 const val OBJECTIVE_CONTROL_RESUME = "RESUME"
@@ -55,6 +68,7 @@ data class SubmitConversationMessageRequest(
     val content: String,
     val objectiveId: Long? = null,
     val actor: String = "HUMAN",
+    val intent: String = MESSAGE_INTENT_STANDARD,
 )
 
 @Serializable
@@ -456,7 +470,7 @@ class ConversationConductorService(
                 "Conversation turn interpreted with ${turn.promptTokens} input units, ${turn.completionTokens} output units, and resource decision ${turn.resourceDecision}.",
                 "MODEL_BINDING", fingerprint, fingerprint, turn.modelProvenance)
         }
-        return applyInterpretation(userMessage, objective, turn.interpretation)
+        return applyInterpretation(userMessage, objective, turn.interpretation, request.intent)
     }
 
     suspend fun admitCommand(commandId: Long, request: AdmitConversationCommandRequest): ConversationOperationResult {
@@ -747,7 +761,10 @@ class ConversationConductorService(
             if (request.expectedSequence != sequence) return@synchronized ConversationOperationResult(
                 ConversationOperationStatus.STALE_SEQUENCE, project(events, conversationId), "Expected message sequence $sequence.",
             )
-            if (request.content.isBlank() || request.actor.isBlank()) {
+            if (
+                request.content.isBlank() || request.actor.isBlank() ||
+                request.intent !in setOf(MESSAGE_INTENT_STANDARD, MESSAGE_INTENT_ADVISORY)
+            ) {
                 return@synchronized ConversationOperationResult(ConversationOperationStatus.INVALID_REQUEST, project(events, conversationId))
             }
             if (request.objectiveId != null && latestObjectives(events, conversationId).none { it.objectiveId == request.objectiveId }) {
@@ -775,7 +792,22 @@ class ConversationConductorService(
         source: ConversationMessage,
         selectedObjective: ConversationObjectiveRevision?,
         interpretation: ConversationInterpretation,
-    ): ConversationOperationResult = when (interpretation.speechAct) {
+        messageIntent: String,
+    ): ConversationOperationResult {
+        if (messageIntent == MESSAGE_INTENT_ADVISORY && interpretation.speechAct in ADVISORY_FORBIDDEN_SPEECH_ACTS) {
+            appendAssistant(
+                source.conversationId,
+                source,
+                selectedObjective?.objectiveId,
+                "This advisory request can diagnose and propose work, but it cannot admit commands or control objective authority.",
+            )
+            return ConversationOperationResult(
+                ConversationOperationStatus.REJECTED,
+                projection(source.conversationId),
+                "Advisory messages cannot admit commands or control objectives.",
+            )
+        }
+        return when (interpretation.speechAct) {
         SPEECH_DISCUSS, SPEECH_CLARIFY -> {
             appendAssistant(source.conversationId, source, selectedObjective?.objectiveId, interpretation.response)
             ConversationOperationResult(ConversationOperationStatus.RECORDED, projection(source.conversationId))
@@ -806,6 +838,7 @@ class ConversationConductorService(
             appendAssistant(source.conversationId, source, selectedObjective?.objectiveId, "That speech act is outside Orchard's closed vocabulary.")
             ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(source.conversationId))
         }
+    }
     }
 
     private fun proposeObjective(source: ConversationMessage, interpretation: ConversationInterpretation): ConversationOperationResult =

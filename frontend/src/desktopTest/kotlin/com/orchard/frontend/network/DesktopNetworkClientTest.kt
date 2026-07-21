@@ -20,6 +20,44 @@ import kotlin.test.assertTrue
 
 class DesktopNetworkClientTest {
     @Test
+    fun retriesAdvisoryConversationMessageAfterStaleSequence() = runBlocking {
+        var requestCount = 0
+        val engine = MockEngine { request ->
+            requestCount += 1
+            val body = request.body.toByteArray().decodeToString()
+            val content = when (requestCount) {
+                1 -> conversationProjectionJson(messageCount = 1)
+                2 -> {
+                    assertTrue(body.contains("\"expectedSequence\":2"))
+                    assertTrue(body.contains("\"intent\":\"ADVISORY\""))
+                    """{"status":"STALE_SEQUENCE","projection":${conversationProjectionJson(messageCount = 2)}}"""
+                }
+                3 -> {
+                    assertTrue(body.contains("\"clientMessageId\":\"remediation-1\""))
+                    assertTrue(body.contains("\"expectedSequence\":3"))
+                    """{"status":"RECORDED","projection":${conversationProjectionJson(messageCount = 4)}}"""
+                }
+                else -> error("Unexpected request ${request.url}")
+            }
+            respond(
+                content = content,
+                status = if (requestCount == 2) HttpStatusCode.Conflict else HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val response = DesktopNetworkClient(httpClient).use { client ->
+            client.submitConversationMessageAtCurrentSequence(7, "remediation-1", "Plan evidence.", "ADVISORY")
+        }
+
+        assertEquals("RECORDED", response.status)
+        assertEquals(3, requestCount)
+    }
+
+    @Test
     fun decodesProjectInboxWhenBackendDefaultFieldsAreOmitted() {
         val inbox = Json.decodeFromString(
             ProjectReportInboxResponse.serializer(),
@@ -40,6 +78,13 @@ class DesktopNetworkClientTest {
         assertEquals("OPEN", report.items.single().state)
         assertEquals(false, report.unread)
         assertTrue(report.items.single().evidence.isEmpty())
+    }
+
+    private fun conversationProjectionJson(messageCount: Int): String {
+        val messages = (1..messageCount).joinToString(",") { sequence ->
+            """{"messageId":$sequence,"conversationId":7,"sequence":$sequence,"clientMessageId":"message-$sequence","role":"USER","content":"message","actor":"HUMAN","createdAt":"2026-07-22T00:00:00Z","hash":"hash-$sequence"}"""
+        }
+        return """{"conversation":{"conversationId":7,"title":"Gap remediation","actor":"HUMAN","createdAt":"2026-07-22T00:00:00Z","hash":"conversation-hash"},"messages":[$messages],"lastEventId":$messageCount}"""
     }
 
     @Test

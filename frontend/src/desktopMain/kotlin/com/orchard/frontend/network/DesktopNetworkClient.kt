@@ -44,6 +44,29 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
         setBody(request)
     }.body()
 
+    suspend fun submitConversationMessageAtCurrentSequence(
+        conversationId: Long,
+        clientMessageId: String,
+        content: String,
+        intent: String = "STANDARD",
+    ): ConversationApiResponse {
+        var projection = getConversation(conversationId)
+        repeat(2) { attempt ->
+            val response = submitConversationMessage(
+                conversationId,
+                SubmitConversationMessageRequest(
+                    clientMessageId = clientMessageId,
+                    expectedSequence = projection.messages.size + 1L,
+                    content = content,
+                    intent = intent,
+                ),
+            )
+            if (response.status != "STALE_SEQUENCE" || attempt == 1) return response
+            projection = response.projection ?: getConversation(conversationId)
+        }
+        error("Conversation submission retry did not return a result")
+    }
+
     suspend fun admitConversationCommand(commandId: Long, commandHash: String): ConversationApiResponse =
         client.post("http://127.0.0.1:8085/api/conversation-commands/$commandId/admission") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
@@ -412,6 +435,7 @@ private data class ArchitectChatRequest(val prompt: String)
     val content: String,
     val objectiveId: Long? = null,
     val actor: String = "HUMAN",
+    val intent: String = "STANDARD",
 )
 @Serializable data class AdmitConversationCommandRequest(val commandHash: String, val actor: String = "HUMAN")
 @Serializable data class RejectConversationCommandRequest(val commandHash: String, val actor: String = "HUMAN")
@@ -1328,6 +1352,21 @@ data class ReportEvidenceReferenceResponse(
 )
 
 @Serializable
+data class ReportGapDiagnosisResponse(
+    val category: String,
+    val missing: String,
+    val impact: String,
+    val suggestedEvidence: List<String> = emptyList(),
+)
+
+@Serializable
+data class ReportRemediationActionResponse(
+    val kind: String,
+    val label: String,
+    val prompt: String,
+)
+
+@Serializable
 data class ReportItemInputRequest(
     val itemKey: String,
     val kind: String,
@@ -1399,6 +1438,8 @@ data class ReportItemResponse(
     val summary: String = "",
     val actionRequired: Boolean = false,
     val evidence: List<ReportEvidenceReferenceResponse> = emptyList(),
+    val diagnosis: ReportGapDiagnosisResponse? = null,
+    val remediation: ReportRemediationActionResponse? = null,
 )
 
 @Serializable

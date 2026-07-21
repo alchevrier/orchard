@@ -6,8 +6,54 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class ProjectReportStoreTest {
+    @Test
+    fun `ledger replays legacy item shape with diagnosed successors`() {
+        val directory = createTempDirectory("orchard-project-report-diagnosis-")
+        val store = FileProjectReportStore(directory)
+        publish(store, "pending", "a".repeat(64))
+        val path = directory.resolve("project-reports.jsonl")
+        assertFalse(Files.readString(path).contains("\"diagnosis\""))
+
+        store.publish(
+            projectId = 1,
+            reportKey = "repository-baseline",
+            scope = ReportScope(REPORT_SCOPE_PROJECT, "1"),
+            title = "Repository baseline",
+            sourceType = "REPOSITORY_BASELINE",
+            sourceIdentity = "project:1",
+            sourceRevision = "assessed",
+            sourceHash = "b".repeat(64),
+            state = "OPEN",
+            items = listOf(ReportItemInput(
+                "verification-gap",
+                "REPOSITORY_VERIFICATION_FINDING",
+                "UNESTABLISHED",
+                "Integration test methodology is not established.",
+                "Verification evidence is incomplete.",
+                diagnosis = ReportGapDiagnosis(
+                    "TEST_EVIDENCE",
+                    "Integration test methodology",
+                    "Acceptance gates cannot be compiled.",
+                    listOf("Record the test methodology."),
+                ),
+                remediation = ReportRemediationAction(
+                    "PLAN_GOVERNED_REMEDIATION",
+                    "Plan test and evidence work",
+                    "Plan governed evidence work.",
+                ),
+            )),
+        )
+
+        assertTrue(Files.readString(path).contains("\"diagnosis\""))
+        val restored = FileProjectReportStore(directory).events()
+        assertEquals(2, restored.size)
+        assertEquals("TEST_EVIDENCE", restored.last().items.single().diagnosis?.category)
+    }
+
     @Test
     fun `file ledger restores idempotent publications and immutable successors`() {
         val directory = createTempDirectory("orchard-project-reports-")

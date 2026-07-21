@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package com.orchard.backend.report
 
 import com.orchard.backend.workspace.loadRecoverableJsonl
@@ -9,6 +11,7 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -68,6 +71,21 @@ data class ReportEvidenceReference(
 )
 
 @Serializable
+data class ReportGapDiagnosis(
+    val category: String,
+    val missing: String,
+    val impact: String,
+    val suggestedEvidence: List<String>,
+)
+
+@Serializable
+data class ReportRemediationAction(
+    val kind: String,
+    val label: String,
+    val prompt: String,
+)
+
+@Serializable
 data class ReportItem(
     val reportId: Long,
     val reportRevision: Int,
@@ -78,6 +96,10 @@ data class ReportItem(
     val summary: String,
     val actionRequired: Boolean = false,
     val evidence: List<ReportEvidenceReference> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val diagnosis: ReportGapDiagnosis? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val remediation: ReportRemediationAction? = null,
 )
 
 @Serializable
@@ -120,6 +142,10 @@ data class ReportItemInput(
     val summary: String,
     val actionRequired: Boolean = false,
     val evidence: List<ReportEvidenceReference> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val diagnosis: ReportGapDiagnosis? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val remediation: ReportRemediationAction? = null,
 )
 
 @Serializable
@@ -372,7 +398,19 @@ private fun publishInto(
     }
     val revisionNumber = (revisions.maxOfOrNull { it.revision } ?: 0) + 1
     val items = itemInputs.map {
-        ReportItem(report.reportId, revisionNumber, it.itemKey, it.kind, it.state, it.title.trim(), it.summary.trim(), it.actionRequired, it.evidence)
+        ReportItem(
+            report.reportId,
+            revisionNumber,
+            it.itemKey,
+            it.kind,
+            it.state,
+            it.title.trim(),
+            it.summary.trim(),
+            it.actionRequired,
+            it.evidence,
+            it.diagnosis,
+            it.remediation,
+        )
     }
     val unsigned = ReportRevision(
         report.reportId, revisionNumber, sourceType, sourceIdentity, sourceRevision, sourceHash,
