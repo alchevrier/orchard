@@ -376,8 +376,25 @@ class ProjectReportService(
         val binding = repositoryBindings.views(setOf(projectId))[projectId] ?: return
         val repository = repositoryBindings.resolveHead(projectId)
         val genesisRevision = workspace.snapshot(0).projectGenesis.singleOrNull { it.projectId == projectId }?.revision?.revision ?: 0
-        val summary = diagnostic.ifBlank { "Repository baseline compilation is delayed with status $status." }
-        val sourceHash = stagedPlanHash("$projectId\n${repository?.commitHash}\n$genesisRevision\n$status\n$summary")
+        val recordedAt = Instant.parse(now())
+        val retryingForCapacity = status in setOf("BUSY", "RESOURCE_CAPACITY_UNAVAILABLE")
+        val reportState = if (retryingForCapacity) REPORT_STATE_PENDING else REPORT_STATE_BLOCKED
+        val title = if (status == "RESOURCE_CAPACITY_UNAVAILABLE") {
+            "Retry when capacity is available"
+        } else if (status == "BUSY") {
+            "Repository baseline is waiting"
+        } else {
+            "Repository baseline is delayed"
+        }
+        val summary = if (retryingForCapacity) {
+            "Orchard will retry the repository baseline automatically when Architect capacity is available. No action is needed."
+        } else {
+            diagnostic.ifBlank { "Repository baseline compilation is delayed with status $status." }
+        }
+        val retryWindow = recordedAt.epochSecond / baselineRetrySeconds(status)
+        val sourceHash = stagedPlanHash(
+            "$projectId\n${repository?.commitHash}\n$genesisRevision\n$status\n$summary\n$retryWindow"
+        )
         store.publish(
             projectId = projectId,
             reportKey = "repository-baseline",
@@ -389,17 +406,17 @@ class ProjectReportService(
             sourceHash = sourceHash,
             repositoryRevision = repository?.commitHash.orEmpty(),
             genesisRevision = genesisRevision,
-            state = REPORT_STATE_BLOCKED,
+            state = reportState,
             items = listOf(ReportItemInput(
                 itemKey = "baseline-$status",
                 kind = "DIAGNOSTIC",
-                state = REPORT_STATE_BLOCKED,
-                title = "Repository baseline is delayed",
+                state = reportState,
+                title = title,
                 summary = summary,
                 actionRequired = actionRequired,
                 evidence = listOf(ReportEvidenceReference("REPOSITORY_BINDING", binding.path)),
             )),
-            createdAt = now(),
+            createdAt = recordedAt.toString(),
         )
     }
 
@@ -458,7 +475,7 @@ class ProjectReportService(
         const val REPORT_STATE_BLOCKED = "BLOCKED"
         const val REPORT_STATE_COMPLETED = "COMPLETED"
         fun baselineRetrySeconds(status: String): Long = when (status) {
-            "BUSY" -> 30
+            "BUSY", "RESOURCE_CAPACITY_UNAVAILABLE" -> 30
             "MODEL_UNAVAILABLE", "INVALID_OUTPUT" -> 900
             else -> 300
         }

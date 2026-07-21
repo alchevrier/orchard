@@ -28,6 +28,7 @@ import com.orchard.backend.workspace.WorkspaceStore
 import com.orchard.backend.workspace.WorkDefinitionStatus
 import com.orchard.backend.workspace.WorkDefinitionSubmission
 import com.orchard.backend.workspace.WorkflowStartStatus
+import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -71,6 +72,42 @@ class ProjectReportServiceTest {
         assertEquals(1, assessmentCalls)
         assertTrue(diagnostic.actionRequired)
         assertEquals("No compatible baseline model is available.", diagnostic.items.single().summary)
+    }
+
+    @Test
+    fun `capacity delay remains pending and retries once per capacity window`() = kotlinx.coroutines.test.runTest {
+        var currentTime = Instant.parse("2026-07-21T00:00:00Z")
+        val fixture = fixture { currentTime.toString() }
+        var assessmentCalls = 0
+        val compiler = RepositoryBaselineCompiler(fixture.service) { _, _ ->
+            assessmentCalls++
+            GenesisProposalResult(GenesisProposalStatus.RESOURCE_CAPACITY_UNAVAILABLE)
+        }
+
+        compiler.tick()
+        compiler.tick()
+
+        val first = fixture.service.inbox(1).reports.single {
+            it.revision.sourceType == "REPOSITORY_BASELINE_DIAGNOSTIC"
+        }
+        assertEquals(1, assessmentCalls)
+        assertEquals("PENDING", first.revision.state)
+        assertEquals("Retry when capacity is available", first.items.single().title)
+        assertEquals(
+            "Orchard will retry the repository baseline automatically when Architect capacity is available. No action is needed.",
+            first.items.single().summary,
+        )
+        assertFalse(first.actionRequired)
+        assertFalse(first.blocked)
+
+        currentTime = currentTime.plusSeconds(31)
+        compiler.tick()
+        compiler.tick()
+
+        assertEquals(2, assessmentCalls)
+        assertEquals(2, fixture.service.inbox(1).reports.count {
+            it.revision.sourceType == "REPOSITORY_BASELINE_DIAGNOSTIC"
+        })
     }
 
     @Test
@@ -175,7 +212,7 @@ class ProjectReportServiceTest {
         assertEquals(1, fixture.conductor.list().size)
     }
 
-    private fun fixture(): Fixture {
+    private fun fixture(now: () -> String = { "2026-07-21T00:00:00Z" }): Fixture {
         val workspace = WorkspaceStore()
         createProjectAndEpic(workspace, "First")
         createProjectAndEpic(workspace, "Second")
@@ -192,7 +229,7 @@ class ProjectReportServiceTest {
             store,
             latestAssessment = { fixture.assessment },
             conversationConductor = conductor,
-            now = { "2026-07-21T00:00:00Z" },
+            now = now,
         )
         return fixture
     }
