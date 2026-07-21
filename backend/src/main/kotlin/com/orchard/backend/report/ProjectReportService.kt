@@ -337,7 +337,16 @@ class ProjectReportService(
                 title = if (baseline.complete) "Repository baseline complete" else
                     "${completedStage.stage.lowercase().replaceFirstChar(Char::uppercase)} analysis complete",
                 summary = "${baseline.sections.size} of ${REPOSITORY_BASELINE_STAGES.size} repository analysis stages complete. " +
-                    completedStage.summary,
+                    "${baseline.graphCoverage.contentAddressedFileCount} of ${baseline.graphCoverage.trackedFileCount} tracked files " +
+                    "are content-addressed in the centralized intelligence graph. ${completedStage.summary}",
+                evidence = listOf(ReportEvidenceReference(
+                    type = "REPOSITORY_INTELLIGENCE_GRAPH",
+                    identity = baseline.graphHash,
+                    revision = baseline.repositoryRevision,
+                    hash = baseline.graphHash,
+                    description = "Revision-pinned graph with ${baseline.graphCoverage.nodeCount} nodes and " +
+                        "${baseline.graphCoverage.edgeCount} correlation edges.",
+                )),
             )
             val findings = baseline.sections.flatMap { section ->
                 section.findings.map { finding ->

@@ -14,6 +14,7 @@ import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.stagedPlanHash
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -27,6 +28,42 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class RepositoryBaselineAnalysisServiceTest {
+    @Test
+    fun `version one baseline history remains replayable but unpinned`() {
+        val state = createTempDirectory("orchard-baseline-v1-")
+        val json = Json { encodeDefaults = true }
+        val section = RepositoryBaselineSection(
+            BASELINE_STAGE_STRUCTURE,
+            "Legacy structure summary.",
+            listOf("primary", "secondary").map { suffix ->
+                RepositoryCapabilityClaim("structure-$suffix", "Legacy $suffix finding.", CLAIM_UNESTABLISHED)
+            },
+            model = "legacy-model",
+            promptHash = "a".repeat(64),
+            outputHash = "b".repeat(64),
+        )
+        val unsigned = LegacyBaseline(
+            1,
+            1,
+            1,
+            "c".repeat(40),
+            listOf(section),
+            complete = false,
+            analyzedAt = "2026-01-01T00:00:00Z",
+            hash = "",
+        )
+        val legacy = unsigned.copy(hash = stagedPlanHash(json.encodeToString(unsigned)))
+        val payload = json.encodeToString(legacy)
+        val line = json.encodeToString(LegacyEnvelope(value = legacy, checksum = stagedPlanHash(payload))) + "\n"
+        Files.writeString(state.resolve("repository-baseline-analyses.jsonl"), line)
+
+        val loaded = FileRepositoryBaselineAnalysisStore(state).load().single()
+
+        assertEquals("", loaded.graphHash)
+        assertEquals(0, loaded.graphCoverage.trackedFileCount)
+        assertEquals(listOf(section), loaded.sections)
+    }
+
     @Test
     fun `baseline advances one durable stage per tick across restart`() = runTest {
         val fixture = fixture()
@@ -61,23 +98,67 @@ class RepositoryBaselineAnalysisServiceTest {
         assertTrue(FileRepositoryBaselineAnalysisStore(fixture.state).load().isEmpty())
     }
 
+    @Test
+    fun `baseline completes when graph establishes no ADR or test artifacts`() = runTest {
+        val fixture = fixture(includeAdrAndTest = false)
+        val service = service(fixture, InventoryAwareModel(fixture.contentByPath))
+
+        repeat(3) {
+            assertEquals(RepositoryBaselineTickStatus.STAGE_COMPLETED, service.tick(1).status)
+        }
+        assertEquals(RepositoryBaselineTickStatus.COMPLETE, service.tick(1).status)
+
+        val baseline = requireNotNull(service.latest(1))
+        assertTrue(baseline.sections.single { it.stage == BASELINE_STAGE_DECISIONS }.findings.all {
+            it.status == CLAIM_UNESTABLISHED
+        })
+        assertTrue(baseline.sections.single { it.stage == BASELINE_STAGE_VERIFICATION }.findings.all {
+            it.status == CLAIM_UNESTABLISHED
+        })
+    }
+
+    @Test
+    fun `empty committed repository completes with unestablished findings`() = runTest {
+        val fixture = fixture(includeRepositoryFiles = false)
+        val service = service(fixture, CompleteAbsenceModel())
+
+        repeat(3) {
+            assertEquals(RepositoryBaselineTickStatus.STAGE_COMPLETED, service.tick(1).status)
+        }
+        assertEquals(RepositoryBaselineTickStatus.COMPLETE, service.tick(1).status)
+
+        val baseline = requireNotNull(service.latest(1))
+        assertEquals(0, baseline.graphCoverage.trackedFileCount)
+        assertTrue(baseline.sections.flatMap { it.findings }.all { it.status == CLAIM_UNESTABLISHED })
+    }
+
     private fun service(fixture: Fixture, model: ModelProvider) = RepositoryBaselineAnalysisService(
         workspace = fixture.workspace,
         modelProviders = listOf(model),
         store = FileRepositoryBaselineAnalysisStore(fixture.state),
         workspaceGateway = LocalCodingWorkspaceGateway(),
+        intelligenceImporter = RepositoryIntelligenceImporter(
+            fixture.workspace,
+            FileRepositoryIntelligenceGraphStore(fixture.state),
+        ),
     )
 
-    private fun fixture(): Fixture {
+    private fun fixture(
+        includeAdrAndTest: Boolean = true,
+        includeRepositoryFiles: Boolean = true,
+    ): Fixture {
         val state = createTempDirectory("orchard-baseline-state-")
         val repository = createTempDirectory("orchard-baseline-repository-")
-        val contentByPath = linkedMapOf(
-            "build.gradle.kts" to "plugins { kotlin(\"jvm\") }\n",
-            "src/main/kotlin/App.kt" to "class AppService { fun start() = Unit }\n",
-            "docs/adrs/001-runtime.md" to "# Runtime decision\nStatus: Accepted\nUse a local JVM service.\n",
-            "src/test/kotlin/AppTest.kt" to "class AppTest { fun serviceStarts() = Unit }\n",
-            "run.sh" to "#!/bin/sh\n./gradlew test\n",
-        )
+        val contentByPath = linkedMapOf<String, String>()
+        if (includeRepositoryFiles) {
+            contentByPath["build.gradle.kts"] = "plugins { kotlin(\"jvm\") }\n"
+            contentByPath["src/main/kotlin/App.kt"] = "class AppService { fun start() = Unit }\n"
+            contentByPath["run.sh"] = "#!/bin/sh\n./gradlew test\n"
+        }
+        if (includeRepositoryFiles && includeAdrAndTest) {
+            contentByPath["docs/adrs/001-runtime.md"] = "# Runtime decision\nStatus: Accepted\nUse a local JVM service.\n"
+            contentByPath["src/test/kotlin/AppTest.kt"] = "class AppTest { fun serviceStarts() = Unit }\n"
+        }
         contentByPath.forEach { (relative, content) ->
             repository.resolve(relative).also { file ->
                 Files.createDirectories(file.parent)
@@ -86,7 +167,12 @@ class RepositoryBaselineAnalysisServiceTest {
         }
         git(repository, "init")
         git(repository, "add", ".")
-        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        git(
+            repository,
+            "-c", "user.name=Orchard Test",
+            "-c", "user.email=orchard@example.test",
+            "commit", "--allow-empty", "-m", "Initial",
+        )
         val bindings = FileRepositoryBindingStore(state)
         val workspace = WorkspaceStore(repositoryBindings = bindings)
         workspace.beginBatch()
@@ -185,10 +271,119 @@ class RepositoryBaselineAnalysisServiceTest {
         }
     }
 
+    private class InventoryAwareModel(
+        private val contentByPath: Map<String, String>,
+    ) : ModelProvider {
+        override suspend fun triage(prompt: String): String = error("unused")
+
+        override suspend fun plan(
+            prompt: String,
+            actionType: Int,
+            entityType: Int,
+            workspace: WorkspaceStore,
+        ): String = error("unused")
+
+        override fun bindingProfile() = ModelBindingProfile(
+            bindingId = "inventory-aware-model",
+            provider = "test",
+            model = "inventory-aware-model",
+            contextWindowTokens = 96_000,
+            capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+
+        override suspend fun executeRepositoryAnalysis(
+            prompt: String,
+            maxOutputTokens: Int,
+            contextWindowTokens: Int,
+        ): ModelGeneration {
+            val stage = requireNotNull(Regex("\\\"stage\\\":\\\"([A-Z]+)\\\"").find(prompt)).groupValues[1]
+            val absent = stage in setOf(BASELINE_STAGE_DECISIONS, BASELINE_STAGE_VERIFICATION)
+            val evidencePath = if (stage == BASELINE_STAGE_DELIVERY) "run.sh" else "build.gradle.kts"
+            val evidence = RepositoryClaimEvidence(
+                evidencePath,
+                sha256Content(requireNotNull(contentByPath[evidencePath])),
+                "The cited bytes establish the available ${stage.lowercase()} surface.",
+            )
+            val output = StageOutput(
+                summary = if (absent) "$stage artifacts are not established by the complete graph inventory."
+                else "$stage evidence is established.",
+                findings = listOf("primary", "secondary").map { suffix ->
+                    RepositoryCapabilityClaim(
+                        "${stage.lowercase()}-$suffix",
+                        if (absent) "$stage $suffix evidence is unestablished."
+                        else "$stage $suffix evidence is established.",
+                        if (absent) CLAIM_UNESTABLISHED else CLAIM_SUPPORTED,
+                        support = if (absent) emptyList() else listOf(evidence),
+                    )
+                },
+            )
+            val text = Json.encodeToString(output)
+            return ModelGeneration(text, estimateModelTokens(prompt), estimateModelTokens(text))
+        }
+    }
+
+    private class CompleteAbsenceModel : ModelProvider {
+        override suspend fun triage(prompt: String): String = error("unused")
+
+        override suspend fun plan(
+            prompt: String,
+            actionType: Int,
+            entityType: Int,
+            workspace: WorkspaceStore,
+        ): String = error("unused")
+
+        override fun bindingProfile() = ModelBindingProfile(
+            bindingId = "complete-absence-model",
+            provider = "test",
+            model = "complete-absence-model",
+            contextWindowTokens = 96_000,
+            capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+
+        override suspend fun executeRepositoryAnalysis(
+            prompt: String,
+            maxOutputTokens: Int,
+            contextWindowTokens: Int,
+        ): ModelGeneration {
+            val stage = requireNotNull(Regex("\\\"stage\\\":\\\"([A-Z]+)\\\"").find(prompt)).groupValues[1]
+            val output = StageOutput(
+                summary = "$stage evidence is unestablished by the empty repository graph.",
+                findings = listOf("primary", "secondary").map { suffix ->
+                    RepositoryCapabilityClaim(
+                        "${stage.lowercase()}-$suffix",
+                        "$stage $suffix evidence is unestablished.",
+                        CLAIM_UNESTABLISHED,
+                    )
+                },
+            )
+            val text = Json.encodeToString(output)
+            return ModelGeneration(text, estimateModelTokens(prompt), estimateModelTokens(text))
+        }
+    }
+
     @Serializable
     private data class StageOutput(
         val summary: String,
         val findings: List<RepositoryCapabilityClaim>,
         val unresolvedQuestions: List<String> = emptyList(),
+    )
+
+    @Serializable
+    private data class LegacyBaseline(
+        val analysisId: Long,
+        val projectId: Int,
+        val genesisRevision: Int,
+        val repositoryRevision: String,
+        val sections: List<RepositoryBaselineSection>,
+        val complete: Boolean,
+        val analyzedAt: String,
+        val hash: String,
+    )
+
+    @Serializable
+    private data class LegacyEnvelope(
+        val version: Int = 1,
+        val value: LegacyBaseline,
+        val checksum: String,
     )
 }

@@ -367,13 +367,15 @@ Candidate scope:
 
 ### Milestone 12.0: Symbol-Aware Repository Evidence Graph
 
-- State: `PLANNED`
+- State: `IN_PROGRESS`
 - Depends on: `11.1`
 
 Goal: replace bounded lexical file selection as the primary navigation mechanism with source-aware, revision-pinned evidence relationships.
 
 Deliverables:
 
+- Complete content-addressed import of every Git-tracked artifact with explicit coverage and a durable project graph projection. **Implemented foundation.**
+- Correlation of repository modules, declarations, imports, tests, ADR path references, build dependencies, and current Orchard project/work/design/workflow/evidence authority. **Implemented deterministic foundation.**
 - Language-server or parser-backed symbols, definitions, references, modules, tests, and configuration relationships.
 - Content-addressed evidence nodes tied to exact repository revisions.
 - Deterministic fallback for unsupported languages.

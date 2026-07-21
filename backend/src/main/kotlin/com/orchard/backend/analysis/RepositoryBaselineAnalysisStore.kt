@@ -11,6 +11,8 @@ import java.time.Instant
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 const val BASELINE_STAGE_STRUCTURE = "STRUCTURE"
 const val BASELINE_STAGE_DECISIONS = "DECISIONS"
@@ -42,6 +44,8 @@ data class RepositoryBaselineAnalysis(
     val projectId: Int,
     val genesisRevision: Int,
     val repositoryRevision: String,
+    val graphHash: String,
+    val graphCoverage: RepositoryIntelligenceCoverage,
     val sections: List<RepositoryBaselineSection>,
     val complete: Boolean,
     val analyzedAt: String = Instant.now().toString(),
@@ -83,16 +87,31 @@ class FileRepositoryBaselineAnalysisStore(private val directory: Path) : Reposit
 
     private fun loadUnlocked(): List<RepositoryBaselineAnalysis> = mutableListOf<RepositoryBaselineAnalysis>().also { analyses ->
         loadRecoverableJsonl(path, "repository-baseline-analyses") { line, recordNumber ->
-            val envelope = json.decodeFromString<RepositoryBaselineAnalysisEnvelope>(line)
-            require(envelope.version == FORMAT_VERSION) {
-                "Unsupported repository baseline analysis format ${envelope.version}"
+            val version = json.parseToJsonElement(line).jsonObject["version"]?.jsonPrimitive?.content?.toIntOrNull()
+            val analysis = when (version) {
+                1 -> {
+                    val envelope = json.decodeFromString<LegacyRepositoryBaselineAnalysisEnvelope>(line)
+                    require(envelope.checksum == stagedPlanHash(json.encodeToString(envelope.value))) {
+                        "Checksum mismatch in repository baseline analysis $recordNumber"
+                    }
+                    require(envelope.value.hash == legacyRepositoryBaselineAnalysisHash(envelope.value)) {
+                        "Repository baseline analysis hash is invalid"
+                    }
+                    envelope.value.asUnpinnedHistory()
+                }
+                FORMAT_VERSION -> {
+                    val envelope = json.decodeFromString<RepositoryBaselineAnalysisEnvelope>(line)
+                    require(envelope.checksum == stagedPlanHash(json.encodeToString(envelope.value))) {
+                        "Checksum mismatch in repository baseline analysis $recordNumber"
+                    }
+                    validateRepositoryBaselineAnalysis(envelope.value, analyses)
+                    envelope.value
+                }
+                else -> error("Unsupported repository baseline analysis format $version")
             }
-            require(envelope.checksum == stagedPlanHash(json.encodeToString(envelope.value))) {
-                "Checksum mismatch in repository baseline analysis $recordNumber"
-            }
-            validateRepositoryBaselineAnalysis(envelope.value, analyses)
-            analyses += envelope.value
-            envelope.value
+            require(analysis.analysisId == analyses.size + 1L) { "Repository baseline analysis ID is not monotonic" }
+            analyses += analysis
+            analysis
         }
     }
 
@@ -123,7 +142,7 @@ class FileRepositoryBaselineAnalysisStore(private val directory: Path) : Reposit
     }
 
     private companion object {
-        const val FORMAT_VERSION = 1
+        const val FORMAT_VERSION = 2
     }
 }
 
@@ -132,6 +151,8 @@ fun newRepositoryBaselineAnalysis(
     projectId: Int,
     genesisRevision: Int,
     repositoryRevision: String,
+    graphHash: String,
+    graphCoverage: RepositoryIntelligenceCoverage,
     sections: List<RepositoryBaselineSection>,
 ): RepositoryBaselineAnalysis {
     val unsigned = RepositoryBaselineAnalysis(
@@ -139,6 +160,8 @@ fun newRepositoryBaselineAnalysis(
         projectId = projectId,
         genesisRevision = genesisRevision,
         repositoryRevision = repositoryRevision,
+        graphHash = graphHash,
+        graphCoverage = graphCoverage,
         sections = sections,
         complete = sections.map { it.stage } == REPOSITORY_BASELINE_STAGES,
         hash = "",
@@ -157,6 +180,11 @@ private fun validateRepositoryBaselineAnalysis(
     require(analysis.analysisId == previous.size + 1L) { "Repository baseline analysis ID is not monotonic" }
     require(analysis.projectId > 0 && analysis.genesisRevision >= 0) { "Repository baseline analysis identity is invalid" }
     require(analysis.repositoryRevision.matches(GIT_REVISION)) { "Repository baseline revision is invalid" }
+    require(analysis.graphHash.matches(SHA256)) { "Repository baseline graph hash is invalid" }
+    require(
+        analysis.graphCoverage.trackedFileCount >= 0 &&
+            analysis.graphCoverage.contentAddressedFileCount == analysis.graphCoverage.trackedFileCount
+    ) { "Repository baseline graph coverage is incomplete" }
     val stages = analysis.sections.map { it.stage }
     require(stages.isNotEmpty() && stages == REPOSITORY_BASELINE_STAGES.take(stages.size)) {
         "Repository baseline stages are not a valid ordered prefix"
@@ -187,7 +215,8 @@ private fun validateRepositoryBaselineAnalysis(
     val predecessor = previous.lastOrNull {
         it.projectId == analysis.projectId &&
             it.repositoryRevision == analysis.repositoryRevision &&
-            it.genesisRevision == analysis.genesisRevision
+            it.genesisRevision == analysis.genesisRevision &&
+            it.graphHash == analysis.graphHash
     }
     require(predecessor == null || (
         analysis.sections.size == predecessor.sections.size + 1 &&
@@ -198,9 +227,45 @@ private fun validateRepositoryBaselineAnalysis(
 
 @Serializable
 private data class RepositoryBaselineAnalysisEnvelope(
-    val version: Int = 1,
+    val version: Int = 2,
     val value: RepositoryBaselineAnalysis,
     val checksum: String,
+)
+
+@Serializable
+private data class LegacyRepositoryBaselineAnalysis(
+    val analysisId: Long,
+    val projectId: Int,
+    val genesisRevision: Int,
+    val repositoryRevision: String,
+    val sections: List<RepositoryBaselineSection>,
+    val complete: Boolean,
+    val analyzedAt: String,
+    val hash: String,
+)
+
+@Serializable
+private data class LegacyRepositoryBaselineAnalysisEnvelope(
+    val version: Int = 1,
+    val value: LegacyRepositoryBaselineAnalysis,
+    val checksum: String,
+)
+
+private fun legacyRepositoryBaselineAnalysisHash(analysis: LegacyRepositoryBaselineAnalysis): String = stagedPlanHash(
+    baselineAnalysisJson.encodeToString(analysis.copy(hash = ""))
+)
+
+private fun LegacyRepositoryBaselineAnalysis.asUnpinnedHistory() = RepositoryBaselineAnalysis(
+    analysisId,
+    projectId,
+    genesisRevision,
+    repositoryRevision,
+    graphHash = "",
+    graphCoverage = RepositoryIntelligenceCoverage(0, 0, 0, 0, 0, 0),
+    sections,
+    complete,
+    analyzedAt,
+    hash,
 )
 
 private val baselineAnalysisJson = Json { encodeDefaults = true }

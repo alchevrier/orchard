@@ -59,6 +59,8 @@ interface CodingWorkspaceGateway {
     fun collectContext(workspacePath: String, query: String): CodingRepositoryContext
     fun collectAnalysisContext(workspacePath: String, query: String): CodingRepositoryContext = collectContext(workspacePath, query)
     fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext = collectContext(workspacePath, query)
+    fun collectIntelligenceContext(workspacePath: String, repositoryRevision: String, paths: List<String>): CodingRepositoryContext =
+        collectAnalysisContext(workspacePath, paths.joinToString(" "))
     fun currentRevision(workspacePath: String): String? = null
     fun applyAndCommit(workspacePath: String, proposal: CodingPatchProposal, executionId: Long): CodingCandidate
     fun resolveToolchainPolicy(workspacePath: String): ResolvedToolchainPolicy?
@@ -87,6 +89,52 @@ class LocalCodingWorkspaceGateway(
             MAX_GENESIS_CONTEXT_BYTES,
             includePath = ::isGenesisImplementationPath,
         )
+
+    override fun collectIntelligenceContext(
+        workspacePath: String,
+        repositoryRevision: String,
+        paths: List<String>,
+    ): CodingRepositoryContext {
+        val root = validatedRoot(workspacePath)
+        requireGitWorkspace(root)
+        require(repositoryRevision.matches(GIT_HASH)) { "Repository intelligence revision is invalid" }
+        val selected = mutableListOf<CodingContextFile>()
+        var bytesUsed = 0
+        paths.distinct().forEach { relative ->
+            runCatching { validatedRelative(root, relative, mustExist = false) }.getOrNull() ?: return@forEach
+            val bytes = runCatching { readGitBlob(root, repositoryRevision, relative) }.getOrNull() ?: return@forEach
+            if (bytes.any { it == 0.toByte() }) return@forEach
+            if (selected.size < MAX_ANALYSIS_CONTEXT_FILES && bytesUsed + bytes.size <= MAX_ANALYSIS_CONTEXT_BYTES) {
+                val content = bytes.toString(Charsets.UTF_8)
+                selected += CodingContextFile(relative, content)
+                bytesUsed += bytes.size
+            }
+        }
+        return CodingRepositoryContext(selected, (paths.distinct().size - selected.size).coerceAtLeast(0))
+    }
+
+    private fun readGitBlob(root: Path, revision: String, relative: String): ByteArray? {
+        val outputPath = Files.createTempFile("orchard-intelligence-context-", ".blob")
+        val errorPath = Files.createTempFile("orchard-intelligence-context-", ".log")
+        try {
+            val process = ProcessBuilder("git", "-C", root.toString(), "show", "$revision:$relative")
+                .redirectOutput(outputPath.toFile())
+                .redirectError(errorPath.toFile())
+                .start()
+            if (!process.waitFor(CONTEXT_COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                throw IllegalStateException("Git repository context read timed out")
+            }
+            require(process.exitValue() == 0) {
+                "Git repository context read failed: ${Files.readString(errorPath).take(512)}"
+            }
+            if (Files.size(outputPath) > MAX_CONTEXT_FILE_BYTES) return null
+            return Files.readAllBytes(outputPath)
+        } finally {
+            Files.deleteIfExists(outputPath)
+            Files.deleteIfExists(errorPath)
+        }
+    }
 
     override fun currentRevision(workspacePath: String): String? {
         val root = validatedRoot(workspacePath)
@@ -431,7 +479,7 @@ class LocalCodingWorkspaceGateway(
         const val CONTEXT_COMMAND_TIMEOUT_SECONDS = 10L
         const val GIT_COMMAND_TIMEOUT_SECONDS = 30L
         const val VERIFICATION_TIMEOUT_SECONDS = 300L
-        val GIT_HASH = Regex("[0-9a-fA-F]{40}")
+        val GIT_HASH = Regex("[0-9a-fA-F]{40,64}")
         val SHELL_META = setOf('|', '&', ';', '>', '<', '`', '\n', '\r')
         val ADMITTED_COMMAND_META = SHELL_META + setOf('\'', '"', '\\')
         val FORBIDDEN_ROOTS = setOf(".git", ".orchard")

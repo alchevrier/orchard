@@ -17,10 +17,12 @@ import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
 import com.orchard.backend.analysis.FileRepositoryBaselineAnalysisStore
+import com.orchard.backend.analysis.FileRepositoryIntelligenceGraphStore
 import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.analysis.RepositoryBaselineAnalysisService
+import com.orchard.backend.analysis.RepositoryIntelligenceImporter
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.company.CompanyAuditService
@@ -187,6 +189,10 @@ fun main() {
     )
     val codingWorkspaceGateway = LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR))
     val repositoryObjectiveAssessmentStore = FileRepositoryObjectiveAssessmentStore(OrchardPaths.WORKSPACE_DIR)
+    val repositoryIntelligenceImporter = RepositoryIntelligenceImporter(
+        workspace,
+        FileRepositoryIntelligenceGraphStore(OrchardPaths.WORKSPACE_DIR),
+    )
     val genesisIntelligence = GenesisIntelligenceService(
         workspace,
         modelProviderRegistry,
@@ -200,6 +206,7 @@ fun main() {
         FileRepositoryBaselineAnalysisStore(OrchardPaths.WORKSPACE_DIR),
         codingWorkspaceGateway,
         resourceController,
+        repositoryIntelligenceImporter,
     )
     val companyControl = CompanyControlService(
         workspace,
@@ -395,6 +402,7 @@ fun main() {
             standardsPolicy,
             conversationConductor,
             projectReports,
+            repositoryIntelligenceImporter,
         )
     }
     Runtime.getRuntime().addShutdownHook(Thread {
@@ -426,6 +434,7 @@ fun Application.workspaceApi(
     standardsPolicy: StandardsPolicyService? = null,
     conversationConductor: ConversationConductorService? = null,
     projectReports: ProjectReportService? = null,
+    repositoryIntelligenceImporter: RepositoryIntelligenceImporter? = null,
 ) {
     configureJson()
     routing {
@@ -447,6 +456,23 @@ fun Application.workspaceApi(
             val assessment = genesisIntelligence.latestRepositoryAssessment(projectId)
             if (assessment == null) call.respond(HttpStatusCode.NotFound)
             else call.respond(assessment)
+        }
+        get("/api/projects/{projectId}/repository-intelligence") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@get
+            }
+            if (repositoryIntelligenceImporter == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val graph = runCatching { repositoryIntelligenceImporter.current(projectId) }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            if (graph == null) call.respond(HttpStatusCode.NotFound)
+            else call.respond(graph)
         }
         get("/api/company/state") {
             if (companyControl == null) {

@@ -315,6 +315,15 @@ class ProjectReportServiceTest {
             projectId = 1,
             genesisRevision = 1,
             repositoryRevision = REVISION,
+            graphHash = "f".repeat(64),
+            graphCoverage = com.orchard.backend.analysis.RepositoryIntelligenceCoverage(
+                trackedFileCount = 12,
+                contentAddressedFileCount = 12,
+                analyzedTextFileCount = 12,
+                opaqueFileCount = 0,
+                nodeCount = 24,
+                edgeCount = 32,
+            ),
             sections = sections,
         )
     }
