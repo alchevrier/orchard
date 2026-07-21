@@ -2,6 +2,8 @@ package com.orchard.backend.report
 
 import com.orchard.backend.analysis.CLAIM_CONTRADICTED
 import com.orchard.backend.analysis.CLAIM_UNESTABLISHED
+import com.orchard.backend.analysis.REPOSITORY_BASELINE_STAGES
+import com.orchard.backend.analysis.RepositoryBaselineAnalysis
 import com.orchard.backend.analysis.RepositoryObjectiveAssessment
 import com.orchard.backend.conversation.ConversationConductorService
 import com.orchard.backend.conversation.ConversationOperationStatus
@@ -85,6 +87,7 @@ class ProjectReportService(
     private val latestAssessment: (Int) -> RepositoryObjectiveAssessment? = { null },
     private val conversationConductor: ConversationConductorService? = null,
     private val now: () -> String = { Instant.now().toString() },
+    private val latestBaselineAnalysis: ((Int) -> RepositoryBaselineAnalysis?)? = null,
 ) {
     private val nextBaselineAttemptAt = mutableMapOf<Int, Instant>()
 
@@ -93,7 +96,10 @@ class ProjectReportService(
         val projectIds = workspace.entities().filter { it.type == ENTITY_PROJECT }.mapTo(sortedSetOf()) { it.id }
         val eligible = repositoryBindings.views(projectIds).values.filter { it.available && !it.dirty }.mapTo(sortedSetOf()) { it.projectId }
         eligible.forEach(::synchronizeRepositoryBaseline)
-        return eligible.filter { latestAssessment(it) == null }
+        return eligible.filter { projectId ->
+            latestBaselineAnalysis?.invoke(projectId)?.complete != true &&
+                (latestBaselineAnalysis != null || latestAssessment(projectId) == null)
+        }
     }
 
     @Synchronized
@@ -319,6 +325,75 @@ class ProjectReportService(
             )),
             createdAt = now(),
         )
+        val baseline = latestBaselineAnalysis?.invoke(projectId)
+            ?.takeIf { it.repositoryRevision == repository?.commitHash }
+        if (baseline != null) {
+            val reportState = if (baseline.complete) REPORT_STATE_OPEN else REPORT_STATE_PENDING
+            val completedStage = baseline.sections.last()
+            val progress = ReportItemInput(
+                itemKey = "baseline-progress",
+                kind = "BASELINE_PROGRESS",
+                state = reportState,
+                title = if (baseline.complete) "Repository baseline complete" else
+                    "${completedStage.stage.lowercase().replaceFirstChar(Char::uppercase)} analysis complete",
+                summary = "${baseline.sections.size} of ${REPOSITORY_BASELINE_STAGES.size} repository analysis stages complete. " +
+                    completedStage.summary,
+            )
+            val findings = baseline.sections.flatMap { section ->
+                section.findings.map { finding ->
+                    ReportItemInput(
+                        itemKey = finding.claimId,
+                        kind = "REPOSITORY_${section.stage}_FINDING",
+                        state = finding.status,
+                        title = finding.statement,
+                        summary = section.summary,
+                        actionRequired = finding.status == CLAIM_CONTRADICTED,
+                        evidence = finding.support.map { evidence ->
+                            ReportEvidenceReference(
+                                "REPOSITORY_SUPPORT",
+                                evidence.path,
+                                baseline.repositoryRevision,
+                                evidence.contentHash,
+                                evidence.observation,
+                            )
+                        } + finding.defeaters.map { evidence ->
+                            ReportEvidenceReference(
+                                "REPOSITORY_DEFEATER",
+                                evidence.path,
+                                baseline.repositoryRevision,
+                                evidence.contentHash,
+                                evidence.observation,
+                            )
+                        },
+                    )
+                } + section.unresolvedQuestions.mapIndexed { index, question ->
+                    ReportItemInput(
+                        itemKey = "${section.stage.lowercase()}-question-${index + 1}",
+                        kind = "UNRESOLVED_QUESTION",
+                        state = REPORT_STATE_OPEN,
+                        title = question,
+                        summary = "Repository evidence could not resolve this question during ${section.stage.lowercase()} analysis.",
+                        actionRequired = true,
+                    )
+                }
+            }
+            store.publish(
+                projectId = projectId,
+                reportKey = reportKey,
+                scope = ReportScope(REPORT_SCOPE_PROJECT, projectId.toString()),
+                title = "Repository baseline",
+                sourceType = "REPOSITORY_BASELINE_ANALYSIS",
+                sourceIdentity = baseline.analysisId.toString(),
+                sourceRevision = baseline.hash,
+                sourceHash = baseline.hash,
+                repositoryRevision = baseline.repositoryRevision,
+                genesisRevision = baseline.genesisRevision,
+                state = reportState,
+                items = listOf(progress) + findings,
+                createdAt = baseline.analyzedAt,
+            )
+            return
+        }
         val assessment = latestAssessment(projectId)?.takeIf { it.repositoryRevision == repository?.commitHash } ?: return
         store.publish(
             projectId = projectId,

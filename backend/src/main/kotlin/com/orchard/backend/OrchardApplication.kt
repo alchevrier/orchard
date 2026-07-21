@@ -16,9 +16,11 @@ import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
+import com.orchard.backend.analysis.FileRepositoryBaselineAnalysisStore
 import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
+import com.orchard.backend.analysis.RepositoryBaselineAnalysisService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.company.CompanyAuditService
@@ -184,12 +186,20 @@ fun main() {
         resourceController,
     )
     val codingWorkspaceGateway = LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR))
+    val repositoryObjectiveAssessmentStore = FileRepositoryObjectiveAssessmentStore(OrchardPaths.WORKSPACE_DIR)
     val genesisIntelligence = GenesisIntelligenceService(
         workspace,
         modelProviderRegistry,
         resourceController,
         CodingGenesisRepositoryContextProvider(codingWorkspaceGateway),
-        FileRepositoryObjectiveAssessmentStore(OrchardPaths.WORKSPACE_DIR),
+        repositoryObjectiveAssessmentStore,
+    )
+    val repositoryBaselineAnalysis = RepositoryBaselineAnalysisService(
+        workspace,
+        modelProviders,
+        FileRepositoryBaselineAnalysisStore(OrchardPaths.WORKSPACE_DIR),
+        codingWorkspaceGateway,
+        resourceController,
     )
     val companyControl = CompanyControlService(
         workspace,
@@ -277,8 +287,9 @@ fun main() {
         FileProjectReportStore(OrchardPaths.WORKSPACE_DIR),
         genesisIntelligence::latestRepositoryAssessment,
         conversationConductor,
+        latestBaselineAnalysis = repositoryBaselineAnalysis::latest,
     )
-    val baselineCompiler = RepositoryBaselineCompiler(projectReports, genesisIntelligence)
+    val baselineCompiler = RepositoryBaselineCompiler(projectReports, repositoryBaselineAnalysis)
     val baselineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     baselineScope.launch {
         while (isActive) {

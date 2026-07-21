@@ -47,9 +47,11 @@ Architecture, repository shape, sizing, and verification remain governed design 
 
 Ask the Conductor to onboard either an absolute local folder or an HTTP(S) Git URL. Orchard materializes one exact `ONBOARD_REPOSITORY` proposal showing the source, project title, and whether it will create a project or bind an existing project. Review and admit that exact command before filesystem or workspace authority changes.
 
-After the admitted command correlates successfully, Orchard opens that project's Inbox immediately. The multi-step setup card is not an onboarding gate. A pending repository baseline appears while Orchard forms a revision-pinned assessment, then an enriched immutable report revision appears when that evidence is available.
+After the admitted command correlates successfully, Orchard opens that project's Inbox immediately. The multi-step setup card is not an onboarding gate. A pending repository baseline appears while Orchard analyzes the bound revision asynchronously. Orchard publishes progressive immutable revisions for repository structure and architecture, recorded decisions and ADRs, tests and verification, and delivery and runtime evidence. Each revision is cumulative, so useful findings appear before the full baseline completes.
 
-Model, resource, repository-context, or schema failures appear as durable baseline diagnostic revisions instead of leaving the report silently pending. Orchard applies status-specific retry cooldowns and retries immediately when the bound repository or Genesis revision changes. Transient capacity pressure is not labeled as user action required.
+Baseline stages use separately ranked broad repository context rather than the narrow Genesis proposal aperture. Findings require exact citations from the pinned stage context, and Orchard resumes at the next incomplete stage after restart. The completed report correlates architecture, decisions, verification surfaces, operational evidence, material risks, unresolved questions, and evidence-backed first-outcome opportunities without mutating Genesis authority.
+
+Model, resource, repository-context, or schema failures appear as durable baseline diagnostic revisions instead of leaving the report silently pending. Orchard applies status-specific retry cooldowns, continues from the last durable completed stage, and retries immediately when the bound repository or Genesis revision changes. Transient capacity pressure is not labeled as user action required.
 
 Examples:
 

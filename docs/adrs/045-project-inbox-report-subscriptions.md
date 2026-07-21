@@ -48,9 +48,9 @@ Thread identity is stable across restart. Reports may link several items to one 
 
 ### Repository-first onboarding
 
-After an admitted repository-onboarding command succeeds, the desktop opens the project workspace immediately. Orchard publishes an initial baseline report in a pending state, then enriches it from the revision-pinned repository objective assessment when available.
+After an admitted repository-onboarding command succeeds, the desktop opens the project workspace immediately. Orchard publishes an initial baseline report in a pending state, then enriches the same report progressively from a revision-pinned asynchronous analysis. The durable analysis advances through ordered structure and architecture, decisions and ADRs, verification and tests, and delivery and runtime stages. Each stage appends a cumulative immutable snapshot and survives process restart.
 
-The baseline distinguishes supported, partially supported, contradicted, unestablished, and stale claims. It may infer the repository's apparent current intent, design, implementation, techniques, tests, reports, and evidence. It cannot invent future human intent. The user confirms or corrects the current understanding and defines the first desired outcome from the project inbox or board.
+The baseline distinguishes supported, partially supported, contradicted, unestablished, and stale claims. Each stage uses independently ranked broad repository context and requires multiple exact evidence citations; a generic single-file presence observation is not a sufficient baseline. It may infer the repository's apparent current intent, design, implementation, techniques, tests, reports, and evidence. It cannot invent future human intent. The user confirms or corrects the current understanding and defines the first desired outcome from the project inbox or board.
 
 Before Admission, that confirmation creates one revision-checked first epic and a deferred-design Admission revision. The user explicitly admits the confirmed intent and outcome before the project becomes Ready. Repository baseline assessment remains phase-independent and cannot mutate Genesis authority.
 

@@ -1,11 +1,14 @@
 package com.orchard.backend.report
 
 import com.orchard.backend.analysis.CLAIM_SUPPORTED
+import com.orchard.backend.analysis.REPOSITORY_BASELINE_STAGES
 import com.orchard.backend.analysis.RepositoryCapabilityClaim
+import com.orchard.backend.analysis.RepositoryBaselineAnalysis
+import com.orchard.backend.analysis.RepositoryBaselineSection
+import com.orchard.backend.analysis.RepositoryBaselineTickResult
+import com.orchard.backend.analysis.RepositoryBaselineTickStatus
 import com.orchard.backend.analysis.RepositoryClaimEvidence
 import com.orchard.backend.analysis.newRepositoryObjectiveAssessment
-import com.orchard.backend.agent.GenesisProposalResult
-import com.orchard.backend.agent.GenesisProposalStatus
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.conversation.ConversationCapabilityRegistry
 import com.orchard.backend.conversation.ConversationConductorService
@@ -40,29 +43,39 @@ class ProjectReportServiceTest {
     fun `baseline compiler enriches once and becomes idle for the assessed revision`() = kotlinx.coroutines.test.runTest {
         val fixture = fixture()
         var assessmentCalls = 0
-        val compiler = RepositoryBaselineCompiler(fixture.service) { projectId, _ ->
+        val compiler = RepositoryBaselineCompiler(fixture.service) { projectId ->
             assertEquals(1, projectId)
             assessmentCalls++
-            fixture.assessment = assessment()
-            GenesisProposalResult(GenesisProposalStatus.CREATED)
+            fixture.baseline = baseline(complete = true)
+            RepositoryBaselineTickResult(RepositoryBaselineTickStatus.COMPLETE, projectId, analysis = fixture.baseline)
         }
 
         val first = compiler.tick()
         val second = compiler.tick()
 
-        assertEquals(listOf(GenesisProposalStatus.CREATED), first.map { it.status })
+        assertEquals(listOf(RepositoryBaselineTickStatus.COMPLETE), first.map { it.status })
         assertTrue(second.isEmpty())
         assertEquals(1, assessmentCalls)
         assertEquals(2, fixture.service.inbox(1).reports.size)
+        val completed = fixture.service.inbox(1).reports.single {
+            it.revision.sourceType == "REPOSITORY_BASELINE_ANALYSIS"
+        }
+        assertEquals("OPEN", completed.revision.state)
+        assertEquals(9, completed.items.size)
+        assertEquals("Repository baseline complete", completed.items.first().title)
     }
 
     @Test
     fun `baseline compiler publishes a durable actionable model diagnostic`() = kotlinx.coroutines.test.runTest {
         val fixture = fixture()
         var assessmentCalls = 0
-        val compiler = RepositoryBaselineCompiler(fixture.service) { _, _ ->
+        val compiler = RepositoryBaselineCompiler(fixture.service) { projectId ->
             assessmentCalls++
-            GenesisProposalResult(GenesisProposalStatus.MODEL_UNAVAILABLE, diagnostic = "No compatible baseline model is available.")
+            RepositoryBaselineTickResult(
+                RepositoryBaselineTickStatus.NO_COMPATIBLE_MODEL,
+                projectId,
+                diagnostic = "No compatible baseline model is available.",
+            )
         }
 
         compiler.tick()
@@ -79,9 +92,9 @@ class ProjectReportServiceTest {
         var currentTime = Instant.parse("2026-07-21T00:00:00Z")
         val fixture = fixture { currentTime.toString() }
         var assessmentCalls = 0
-        val compiler = RepositoryBaselineCompiler(fixture.service) { _, _ ->
+        val compiler = RepositoryBaselineCompiler(fixture.service) { projectId ->
             assessmentCalls++
-            GenesisProposalResult(GenesisProposalStatus.RESOURCE_CAPACITY_UNAVAILABLE)
+            RepositoryBaselineTickResult(RepositoryBaselineTickStatus.RESOURCE_BLOCKED, projectId)
         }
 
         compiler.tick()
@@ -230,6 +243,7 @@ class ProjectReportServiceTest {
             latestAssessment = { fixture.assessment },
             conversationConductor = conductor,
             now = now,
+            latestBaselineAnalysis = { fixture.baseline },
         )
         return fixture
     }
@@ -271,12 +285,47 @@ class ProjectReportServiceTest {
         outputHash = "d".repeat(64),
     )
 
+    private fun baseline(complete: Boolean): RepositoryBaselineAnalysis {
+        val stages = if (complete) REPOSITORY_BASELINE_STAGES else REPOSITORY_BASELINE_STAGES.take(1)
+        val sections = stages.map { stage ->
+            RepositoryBaselineSection(
+                stage = stage,
+                summary = "$stage repository evidence was analyzed.",
+                findings = listOf(
+                    RepositoryCapabilityClaim(
+                        "${stage.lowercase()}-primary",
+                        "$stage has a primary established finding.",
+                        CLAIM_SUPPORTED,
+                        support = listOf(RepositoryClaimEvidence("build.gradle.kts", "b".repeat(64), "The build establishes this finding.")),
+                    ),
+                    RepositoryCapabilityClaim(
+                        "${stage.lowercase()}-secondary",
+                        "$stage has a secondary established finding.",
+                        CLAIM_SUPPORTED,
+                        support = listOf(RepositoryClaimEvidence("settings.gradle.kts", "c".repeat(64), "The settings establish this finding.")),
+                    ),
+                ),
+                model = "test-model",
+                promptHash = "d".repeat(64),
+                outputHash = "e".repeat(64),
+            )
+        }
+        return com.orchard.backend.analysis.newRepositoryBaselineAnalysis(
+            analysisId = sections.size.toLong(),
+            projectId = 1,
+            genesisRevision = 1,
+            repositoryRevision = REVISION,
+            sections = sections,
+        )
+    }
+
     private class Fixture(
         val workspace: WorkspaceStore,
         val store: ProjectReportStore,
         val conductor: ConversationConductorService,
     ) {
         var assessment: com.orchard.backend.analysis.RepositoryObjectiveAssessment? = null
+        var baseline: RepositoryBaselineAnalysis? = null
         lateinit var service: ProjectReportService
     }
 
