@@ -105,7 +105,7 @@ class ProjectReportServiceTest {
         compiler.tick()
 
         assertEquals(2, assessmentCalls)
-        assertEquals(2, fixture.service.inbox(1).reports.count {
+        assertEquals(1, fixture.service.inbox(1).reports.count {
             it.revision.sourceType == "REPOSITORY_BASELINE_DIAGNOSTIC"
         })
     }

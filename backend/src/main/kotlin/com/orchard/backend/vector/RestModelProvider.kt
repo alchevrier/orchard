@@ -25,6 +25,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
+import java.net.HttpURLConnection
+import java.net.URI
 import java.time.Duration
 
 @Serializable
@@ -56,12 +58,17 @@ class CatalogModelProvider(
     private val providerDiagnosticsEnabled: Boolean = System.getenv("ORCHARD_PROVIDER_DIAGNOSTICS") == "1",
     private val diagnosticSink: (String) -> Unit = ::println,
     private val nanoTime: () -> Long = System::nanoTime,
+    private val ollamaResidentProbe: (String, String) -> Boolean = ::probeOllamaModelResident,
 ) : ModelProvider {
     private val client = if (engine == null) HttpClient(CIO) { configure() } else HttpClient(engine) { configure() }
     private val triagePrompt = loadPrompt("architect_phase0_triage.md")
     private val planningPrompt = loadPrompt("architect_phase2_planning.md")
     @Volatile
     private var ollamaResidentUntilNanos = 0L
+    @Volatile
+    private var ollamaProbeUntilNanos = 0L
+    @Volatile
+    private var ollamaProbeResident = false
 
     init {
         validateModelProviderCatalog(
@@ -288,8 +295,14 @@ class CatalogModelProvider(
 
     private fun ollamaModelRecentlyLoaded(): Boolean {
         val residentUntil = ollamaResidentUntilNanos
-        return endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE &&
-            residentUntil != 0L && residentUntil - nanoTime() > 0
+        if (endpoint.protocol != PROVIDER_PROTOCOL_OLLAMA_NATIVE) return false
+        val now = nanoTime()
+        if (residentUntil != 0L && residentUntil - now > 0) return true
+        if (ollamaProbeUntilNanos - now > 0) return ollamaProbeResident
+        val resident = ollamaResidentProbe(endpoint.baseUrl, binding.model)
+        ollamaProbeResident = resident
+        ollamaProbeUntilNanos = now + OLLAMA_RESIDENCY_PROBE_WINDOW_NANOS
+        return resident
     }
 
     private fun loadPrompt(name: String): String = requireNotNull(
@@ -304,8 +317,25 @@ class CatalogModelProvider(
         const val MAX_DISCOVERY_BYTES = 512 * 1024
         const val KV_CACHE_BYTES_PER_TOKEN = 393_216L
         val OLLAMA_RESIDENCY_WINDOW_NANOS = Duration.ofMinutes(4).toNanos()
+        val OLLAMA_RESIDENCY_PROBE_WINDOW_NANOS = Duration.ofSeconds(5).toNanos()
     }
 }
+
+private fun probeOllamaModelResident(baseUrl: String, model: String): Boolean = runCatching {
+    val connection = URI.create(baseUrl.trimEnd('/') + "/api/ps").toURL().openConnection() as HttpURLConnection
+    connection.requestMethod = "GET"
+    connection.connectTimeout = OLLAMA_RESIDENCY_PROBE_TIMEOUT_MILLIS
+    connection.readTimeout = OLLAMA_RESIDENCY_PROBE_TIMEOUT_MILLIS
+    try {
+        if (connection.responseCode !in 200..299) return@runCatching false
+        val response = residencyJson.decodeFromString<OllamaModelsResponse>(
+            connection.inputStream.bufferedReader().use { it.readText() }
+        )
+        response.models.any { it.name == model || it.name.substringBefore('@') == model }
+    } finally {
+        connection.disconnect()
+    }
+}.getOrDefault(false)
 
 class ModelProviderRegistry(
     private val store: ModelProviderCatalogStore,
@@ -451,6 +481,9 @@ private data class OllamaModelsResponse(val models: List<OllamaModel>)
 
 @Serializable
 private data class OllamaModel(val name: String)
+
+private val residencyJson = Json { ignoreUnknownKeys = true }
+private const val OLLAMA_RESIDENCY_PROBE_TIMEOUT_MILLIS = 500
 
 @Serializable
 private data class OpenAiChatRequest(

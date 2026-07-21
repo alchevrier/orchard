@@ -58,6 +58,7 @@ class ModelProviderCatalogTest {
             binding,
             engine = engine,
             nanoTime = { now },
+            ollamaResidentProbe = { _, _ -> false },
         )
         val profile = DefaultModelExecutionProfiles.boundedDefinitionReasoning
         val coldDemand = provider.resourceDemand(profile, 100)
@@ -70,6 +71,27 @@ class ModelProviderCatalogTest {
 
         assertEquals(binding.residentMemoryBytes, coldDemand.memoryBytes - residentDemand.memoryBytes)
         assertEquals(coldDemand, expiredDemand)
+    }
+
+    @Test
+    fun `resident Ollama model is not charged again after provider restart`() {
+        val catalog = defaultLocalModelProviderCatalog()
+        val binding = catalog.bindings.single()
+        var probes = 0
+        val provider = CatalogModelProvider(
+            catalog.endpoints.single(),
+            binding,
+            ollamaResidentProbe = { _, model -> probes++; model == binding.model },
+        )
+        val profile = DefaultModelExecutionProfiles.boundedDefinitionReasoning
+
+        val first = provider.resourceDemand(profile, 100)
+        val cached = provider.resourceDemand(profile, 100)
+        provider.close()
+
+        assertEquals((100 + profile.outputBudgetTokens).toLong() * 393_216L, first.memoryBytes)
+        assertEquals(first, cached)
+        assertEquals(1, probes)
     }
 
     @Test

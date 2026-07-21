@@ -16,7 +16,6 @@ import com.orchard.backend.workspace.RepositoryBindingStore
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceStore
 import com.orchard.backend.workspace.stagedPlanHash
-import java.time.Duration
 import java.time.Instant
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -87,6 +86,8 @@ class ProjectReportService(
     private val conversationConductor: ConversationConductorService? = null,
     private val now: () -> String = { Instant.now().toString() },
 ) {
+    private val nextBaselineAttemptAt = mutableMapOf<Int, Instant>()
+
     @Synchronized
     fun synchronizeRepositoryBaselines(): List<Int> {
         val projectIds = workspace.entities().filter { it.type == ENTITY_PROJECT }.mapTo(sortedSetOf()) { it.id }
@@ -391,9 +392,8 @@ class ProjectReportService(
         } else {
             diagnostic.ifBlank { "Repository baseline compilation is delayed with status $status." }
         }
-        val retryWindow = recordedAt.epochSecond / baselineRetrySeconds(status)
         val sourceHash = stagedPlanHash(
-            "$projectId\n${repository?.commitHash}\n$genesisRevision\n$status\n$summary\n$retryWindow"
+            "$projectId\n${repository?.commitHash}\n$genesisRevision\n$status\n$summary"
         )
         store.publish(
             projectId = projectId,
@@ -418,6 +418,7 @@ class ProjectReportService(
             )),
             createdAt = recordedAt.toString(),
         )
+        nextBaselineAttemptAt[projectId] = recordedAt.plusSeconds(baselineRetrySeconds(status))
     }
 
     @Synchronized
@@ -430,12 +431,17 @@ class ProjectReportService(
             .maxByOrNull { it.revision } ?: return true
         val repositoryRevision = repositoryBindings.resolveHead(projectId)?.commitHash.orEmpty()
         val genesisRevision = workspace.snapshot(0).projectGenesis.singleOrNull { it.projectId == projectId }?.revision?.revision ?: 0
-        if (diagnostic.repositoryRevision != repositoryRevision || diagnostic.genesisRevision != genesisRevision) return true
+        if (diagnostic.repositoryRevision != repositoryRevision || diagnostic.genesisRevision != genesisRevision) {
+            nextBaselineAttemptAt.remove(projectId)
+            return true
+        }
         val status = events.singleOrNull {
             it.revision?.reportId == report.reportId && it.revision.revision == diagnostic.revision
         }?.items?.singleOrNull()?.itemKey?.removePrefix("baseline-").orEmpty()
-        val elapsed = Duration.between(Instant.parse(diagnostic.createdAt), Instant.parse(now())).seconds
-        return elapsed >= baselineRetrySeconds(status)
+        val currentTime = Instant.parse(now())
+        val retryAt = nextBaselineAttemptAt[projectId]
+            ?: Instant.parse(diagnostic.createdAt).plusSeconds(baselineRetrySeconds(status))
+        return !currentTime.isBefore(retryAt)
     }
 
     private fun requireProject(projectId: Int): WorkspaceEntity = workspace.entities().singleOrNull {
