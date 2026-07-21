@@ -1,10 +1,19 @@
-# Durable Conversations
+# Project Conversations
 
-The Conductor is Orchard's primary desktop workspace for discussing and directing several governed engineering objectives in one durable chronology. Conversation records are control-plane evidence; workspace, workflow, repository, audit, standards, and promotion records remain the owning authorities.
+Orchard organizes desktop work around a project Inbox, a Project board, and durable canonical conversations. Conversation records are control-plane evidence; workspace, workflow, repository, report, audit, standards, and promotion records remain the owning authorities.
+
+## Inbox and Project
+
+The project workspace has two primary surfaces:
+
+- **Inbox** follows meaningful report revisions, decisions, failures, evidence, and outcomes for one project. Use unread, action-required, subscribed, blocked, and completed filters to narrow the list. Selecting a revision shows its details and exact evidence references.
+- **Project** is the Jira-like whole-project view of epics, stories, tasks, bugs, workflow state, and delivery controls. Use it to understand and organize the complete body of work.
+
+The two surfaces are projections over the same project and ticket authority. Inbox reports do not copy or edit ticket state, and the Project board does not create separate chat state.
 
 ## Start and Restore a Conversation
 
-Open the Conductor from the desktop mode selector. Orchard restores conversations from `~/.orchard/projects/workspace/conversations.jsonl`; creating a conversation when none exists does not create or mutate product authority.
+Open a report or ticket thread from Inbox or Project. Orchard restores the exact conversation from `~/.orchard/projects/workspace/conversations.jsonl`; creating a conversation when none exists does not create or mutate product authority. A project-context conversation header returns directly to that project's Inbox or Project board.
 
 Select an objective before sending a message when more than one objective could match. Orchard rejects ambiguous implicit routing instead of guessing. The desktop refreshes from a monotonic event cursor and restores messages, objective revisions, admissions, command results, and projected workflow activity after restart.
 
@@ -24,15 +33,23 @@ Model interpretation can propose a typed command but cannot admit it. The author
 
 Read-only status and repository inspection commands do not require admission. Every capability declares its owning service, admission rule, projected result type, allowed objective states, and idempotency strategy.
 
-## Project Setup
+## First Project Outcome
 
-An empty Orchard authority root can be initialized without leaving the Conductor. Admit typed work-item creation for the project hierarchy, bind an existing local Git repository when needed, inspect the current genesis phase, advance each revision-pinned genesis submission, and admit the final unchanged genesis revision. Genesis and workflow records persist the exact source command reference so restart recovery cannot adopt a merely similar project phase or older workflow run.
+The repository baseline may infer current intent from revision-pinned evidence, but it cannot invent the future outcome a person wants. Inbox therefore offers the smallest action supported by current Genesis authority:
 
-For an existing repository, bind its canonical local path before admitting an `EXISTING_LOCAL` genesis. For a greenfield project, the company circuit creates its governed local repository from the admitted blueprint.
+- Before `ADMISSION`, confirm the current product intent and record the first desired outcome directly. Orchard creates one epic and one revision-checked `ADMISSION` state; it does not require architecture fields to be invented first.
+- At `ADMISSION`, explicitly admit that confirmed intent and first outcome. The project then becomes `READY` while architecture, blueprint, implementation, and verification remain governed work.
+- During later incompatible phases, use the baseline's canonical thread to inspect the exact authority and propose the applicable transition.
+
+Architecture, repository shape, sizing, and verification remain governed design and delivery decisions. The Inbox does not fabricate those authorities to accelerate onboarding.
 
 ## Repository Onboarding
 
 Ask the Conductor to onboard either an absolute local folder or an HTTP(S) Git URL. Orchard materializes one exact `ONBOARD_REPOSITORY` proposal showing the source, project title, and whether it will create a project or bind an existing project. Review and admit that exact command before filesystem or workspace authority changes.
+
+After the admitted command correlates successfully, Orchard opens that project's Inbox immediately. The multi-step setup card is not an onboarding gate. A pending repository baseline appears while Orchard forms a revision-pinned assessment, then an enriched immutable report revision appears when that evidence is available.
+
+Model, resource, repository-context, or schema failures appear as durable baseline diagnostic revisions instead of leaving the report silently pending. Orchard applies status-specific retry cooldowns and retries immediately when the bound repository or Genesis revision changes. Transient capacity pressure is not labeled as user action required.
 
 Examples:
 
@@ -47,6 +64,25 @@ Clone and onboard https://github.com/example/payments.git as Payments.
 Local paths may point anywhere inside an existing Git repository; Orchard binds the canonical repository root. URL onboarding accepts credential-free HTTP(S) URLs and clones into `~/.orchard/projects/repositories/`. It disables interactive credential prompts, submodule recursion, and Git LFS smudging. It does not run repository scripts, builds, package managers, hooks, or setup commands.
 
 Credentials must not appear in URLs or conversation text. Private remote endpoints use an environment credential reference during model onboarding; repository credential delegation is not part of this slice. Model download and runtime installation also remain explicit local setup operations.
+
+## Reports and Subscriptions
+
+Each report has a stable scope over a project, ticket or outcome, capability label, or repository area. A report revision is immutable and records its source identity, source revision, state, content hash, and evidence references. Marking a revision read changes only the user's read projection.
+
+Subscribe from the report details using one of these modes:
+
+- `IMPORTANT` follows significant changes.
+- `MILESTONES` follows milestone transitions.
+- `ACTION_REQUIRED` follows changes that need a decision or intervention.
+- `ALL` follows every meaningful published revision.
+
+Pause or resume a subscription without changing the report, ticket, repository, or evidence authority. User-created reports can choose a supported scope and an initial subscription mode when created.
+
+## Canonical Threads
+
+Every report and workspace ticket resolves through the project thread API to one durable canonical conversation. Reopening the same report or ticket, including after restart, opens the same conversation ID. Inbox and Project pass that exact ID into the durable conversation workspace instead of embedding another chat interface.
+
+Replies can discuss evidence or propose typed conductor commands. A report item and its thread link cannot mutate domain state directly; any mutation still requires the owning capability, exact command proposal, and applicable admission.
 
 ## Model Routing
 

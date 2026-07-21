@@ -73,7 +73,12 @@ class CompanyCircuitService(
                 projectId,
                 "Bind the existing local repository before starting the company circuit.",
             )
-            val materialized = runCatching { materialize(projectId, requireNotNull(genesis.blueprint)) }.getOrElse {
+            val blueprint = genesis.blueprint ?: return failure(
+                CompanyCircuitStatus.REPOSITORY_REQUIRED,
+                projectId,
+                "Choose the repository toolchain when starting delivery.",
+            )
+            val materialized = runCatching { materialize(projectId, blueprint) }.getOrElse {
                 return failure(CompanyCircuitStatus.BLUEPRINT_UNSUPPORTED, projectId, it.message.orEmpty())
             }
             if (workspace.bindRepository(projectId, materialized.toString()).status != RepositoryBindStatus.BOUND) {
@@ -113,7 +118,7 @@ class CompanyCircuitService(
                 content = genesis.experience.productPromise,
             )
         ) ?: return authorityFailure(projectId, "The first implementation task could not be created.")
-        val verification = preferredVerification(requireNotNull(genesis.blueprint))
+        val verification = preferredVerification(genesis.blueprint, repository?.path)
         val definition = workspace.snapshot(MESSAGE_READY).workDefinitions.singleOrNull { it.workItemId == task.id }
         if (definition == null) {
             val result = workspace.submitWorkDefinition(
@@ -262,17 +267,31 @@ class CompanyCircuitService(
 
     private fun entities(): List<WorkspaceEntity> = List(workspace.entityCount, workspace::entityAt)
 
-    private fun preferredVerification(blueprint: RepositoryBlueprint): String = blueprint.verificationCommands
+    private fun preferredVerification(blueprint: RepositoryBlueprint?, repositoryPath: String?): String = blueprint
+        ?.verificationCommands
+        .orEmpty()
         .firstOrNull { it.isNotBlank() }
-        ?: when (blueprint.toolchain.trim().lowercase()) {
+        ?: when (blueprint?.toolchain?.trim()?.lowercase()) {
             "gradle", "kotlin", "java" -> "./gradlew test --no-daemon"
             "maven" -> "./mvnw test"
             "cargo", "rust" -> "cargo test"
             "meson" -> "meson test -C build"
             "cmake" -> "ctest --test-dir build"
             "node", "npm", "typescript", "javascript" -> "npm test"
-            else -> throw IllegalArgumentException("The admitted blueprint toolchain is not supported locally.")
+            else -> detectVerification(repositoryPath)
         }
+
+    private fun detectVerification(repositoryPath: String?): String {
+        val root = repositoryPath?.let(Path::of)
+            ?: throw IllegalArgumentException("Repository verification must be selected before delivery starts.")
+        return when {
+            Files.isRegularFile(root.resolve("gradlew")) -> "./gradlew test --no-daemon"
+            Files.isRegularFile(root.resolve("mvnw")) -> "./mvnw test"
+            Files.isRegularFile(root.resolve("Cargo.toml")) -> "cargo test"
+            Files.isRegularFile(root.resolve("package.json")) -> "npm test"
+            else -> throw IllegalArgumentException("Repository verification could not be detected; select it before delivery starts.")
+        }
+    }
 
     private fun materialize(projectId: Int, blueprint: RepositoryBlueprint): Path {
         val toolchain = blueprint.toolchain.trim().lowercase()

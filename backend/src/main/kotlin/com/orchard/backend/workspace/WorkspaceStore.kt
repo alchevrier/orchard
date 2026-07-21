@@ -67,6 +67,7 @@ enum class ProjectGenesisFirstOutcomeStatus {
     WRONG_PHASE,
     STALE_REVISION,
     ALREADY_EXISTS,
+    INVALID_INTENT,
     INVALID_TITLE,
     WORKSPACE_REJECTED,
     STORAGE_UNAVAILABLE,
@@ -309,6 +310,7 @@ class WorkspaceStore(
         title: String,
         baseRevision: Int,
         baseHash: String?,
+        confirmedProductIntent: String? = null,
     ): ProjectGenesisFirstOutcomeResult {
         fun result(status: ProjectGenesisFirstOutcomeStatus, outcomeId: Int? = null) =
             ProjectGenesisFirstOutcomeResult(status, outcomeId, snapshot(MESSAGE_READY))
@@ -321,14 +323,27 @@ class WorkspaceStore(
             return result(ProjectGenesisFirstOutcomeStatus.PROJECT_NOT_FOUND)
         }
         val genesis = currentProjectGenesis(projectId)
-        if (genesis?.phase != GENESIS_ARCHITECTURE) {
+        if (genesis?.phase !in setOf(null, GENESIS_CLASSIFICATION, GENESIS_EXPERIENCE, GENESIS_ARCHITECTURE)) {
             return result(ProjectGenesisFirstOutcomeStatus.WRONG_PHASE)
         }
-        if (genesis.revision != baseRevision || genesis.hash != baseHash) {
+        if ((genesis?.revision ?: 0) != baseRevision || genesis?.hash != baseHash) {
             return result(ProjectGenesisFirstOutcomeStatus.STALE_REVISION)
         }
-        entities.singleOrNull { it.type == ENTITY_EPIC && it.parentId == projectId }?.let {
-            return result(ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS, it.id)
+        val productIntent = confirmedProductIntent?.trim()?.takeIf(String::isNotEmpty) ?: genesis?.productIntent.orEmpty()
+        if (productIntent.isEmpty() || productIntent.length > MAX_PLAN_TEXT) {
+            return result(ProjectGenesisFirstOutcomeStatus.INVALID_INTENT)
+        }
+        val classification = genesis?.classification ?: if (repositoryBindings.views(setOf(projectId))[projectId] != null) {
+            PROJECT_EXISTING_LOCAL
+        } else {
+            return result(ProjectGenesisFirstOutcomeStatus.WRONG_PHASE)
+        }
+        entities.singleOrNull { it.type == ENTITY_EPIC && it.parentId == projectId }?.let { existing ->
+            return if (recordOutcomeForAdmission(projectId, genesis, classification, productIntent, existing.id)) {
+                result(ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS, existing.id)
+            } else {
+                result(ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE, existing.id)
+            }
         }
 
         beginBatch()
@@ -348,12 +363,35 @@ class WorkspaceStore(
             } else {
                 val outcomeId = lastCreatedId
                 commitBatch()
-                result(ProjectGenesisFirstOutcomeStatus.CREATED, outcomeId)
+                if (recordOutcomeForAdmission(projectId, genesis, classification, productIntent, outcomeId)) {
+                    result(ProjectGenesisFirstOutcomeStatus.CREATED, outcomeId)
+                } else {
+                    result(ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE, outcomeId)
+                }
             }
         } catch (_: Exception) {
             if (batchActive) rollbackBatch()
             result(ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE)
         }
+    }
+
+    private fun recordOutcomeForAdmission(
+        projectId: Int,
+        current: ProjectGenesisRevision?,
+        classification: String,
+        productIntent: String,
+        outcomeId: Int,
+    ): Boolean {
+        val revision = newProjectGenesisRevision(
+            projectId = projectId,
+            phase = GENESIS_ADMISSION,
+            classification = classification,
+            productIntent = productIntent,
+            experience = current?.experience ?: ExperienceContract(),
+            firstEpicId = outcomeId,
+            previous = current,
+        )
+        return appendProjectGenesisRevision(revision)
     }
 
     @Synchronized
@@ -423,7 +461,7 @@ class WorkspaceStore(
         if (current.classification == PROJECT_ORGANIZATION_GOVERNED) {
             return projectGenesisFailure(ProjectGenesisStatus.ORGANIZATION_POLICY_REQUIRED)
         }
-        if (current.phase != GENESIS_ADMISSION || current.blueprint == null || current.firstEpicId == null) {
+        if (current.phase !in setOf(GENESIS_ADMISSION, GENESIS_BLUEPRINT) || current.firstEpicId == null) {
             return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
         }
         if (committedEntity(current.firstEpicId, ENTITY_EPIC)?.parentId != project.id) {
@@ -2377,9 +2415,8 @@ class WorkspaceStore(
             nextQuestion = when (phase) {
                 GENESIS_CLASSIFICATION -> "Is this a new local product, existing local work, or organization-governed work?"
                 GENESIS_EXPERIENCE -> "Who is this for, and what should the primary journey feel like?"
-                GENESIS_ARCHITECTURE -> "What should people be able to accomplish first, and which technical decisions make that possible?"
-                GENESIS_BLUEPRINT -> "Which repository shape and verification commands realize the admitted design?"
-                GENESIS_ADMISSION -> "Review the complete product genesis and admit it as implementation authority."
+                GENESIS_ARCHITECTURE -> "What should people be able to accomplish first?"
+                GENESIS_BLUEPRINT, GENESIS_ADMISSION -> "Review the intended experience and first outcome, then admit them as project authority."
                 else -> "The product genesis is admitted. Implementation may proceed under this authority."
             },
             permittedAction = when (phase) {

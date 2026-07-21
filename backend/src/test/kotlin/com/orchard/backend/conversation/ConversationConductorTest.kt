@@ -419,6 +419,26 @@ class ConversationConductorTest {
     }
 
     @Test
+    fun `canonical conversation title is included in bounded context`() = runBlocking {
+        val store = TransientConversationStore()
+        val contexts = mutableListOf<ConversationContextManifest>()
+        val service = service(store, ConversationInterpreter { context, _ ->
+            contexts += context
+            InterpretedConversationTurn(ConversationInterpretation(SPEECH_DISCUSS, "Scoped reply."))
+        })
+        val title = "Project 42 ticket 7: Build the inbox"
+        val conversationId = requireNotNull(service.create(CreateConversationRequest(title)).projection)
+            .conversation.conversationId
+
+        assertEquals(ConversationOperationStatus.RECORDED, service.submitMessage(
+            conversationId,
+            SubmitConversationMessageRequest("canonical-title-0001", 1, "What is blocking this ticket?"),
+        ).status)
+
+        assertEquals(title, contexts.single().conversationTitle)
+    }
+
+    @Test
     fun `explicit standalone onboarding isolates stale conversation history`() = runBlocking {
         val store = TransientConversationStore()
         val contexts = mutableListOf<ConversationContextManifest>()

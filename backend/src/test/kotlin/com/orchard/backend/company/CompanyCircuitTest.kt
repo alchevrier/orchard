@@ -7,10 +7,13 @@ import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
 import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
+import com.orchard.backend.analysis.compactRepositoryContextToBudget
 import com.orchard.backend.analysis.TransientRepositoryExecutionPlanStore
 import com.orchard.backend.analysis.RepositoryEvidenceCitation
 import com.orchard.backend.agent.CODING_FILE_WRITE
 import com.orchard.backend.agent.CodingFileOperation
+import com.orchard.backend.agent.CodingContextFile
+import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CodingPatchProposal
 import com.orchard.backend.agent.CodingWorkerService
 import com.orchard.backend.agent.CodingWorkerTickStatus
@@ -21,6 +24,7 @@ import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.ArchitectureComponent
 import com.orchard.backend.workspace.ArchitectureDecision
@@ -58,6 +62,25 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class CompanyCircuitTest {
+    @Test
+    fun `repository analysis retains the largest ranked evidence prefix within budget`() {
+        val context = CodingRepositoryContext(
+            files = (1..6).map { index -> CodingContextFile("src/$index.kt", "x".repeat(400)) },
+            omittedFileCount = 3,
+        )
+        val twoFileBudget = estimateModelTokens(Json.encodeToString(context.copy(
+            files = context.files.take(2),
+            omittedFileCount = 7,
+        )))
+
+        val compacted = requireNotNull(compactRepositoryContextToBudget(context, twoFileBudget) { candidate ->
+            Json.encodeToString(candidate)
+        })
+
+        assertEquals(listOf("src/1.kt", "src/2.kt"), compacted.files.map { it.path })
+        assertEquals(7, compacted.omittedFileCount)
+    }
+
     @Test
     fun `company repairs failed work and audit violations before local promotion`() = runTest {
         val state = createTempDirectory("orchard-company-acceptance-state-")

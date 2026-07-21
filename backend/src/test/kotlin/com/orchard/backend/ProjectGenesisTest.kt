@@ -42,6 +42,7 @@ import com.orchard.backend.agent.GenesisProposalRequest
 import com.orchard.backend.agent.GenesisProposalStatus
 import com.orchard.backend.agent.GenesisRepositoryContextProvider
 import com.orchard.backend.agent.GenesisRepositoryObservation
+import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
 import io.ktor.client.request.header
@@ -318,24 +319,270 @@ class ProjectGenesisTest {
             GENESIS_EXPERIENCE,
         )
         advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
-        val model = FakeGenesisModel(validArchitectureOutput())
         val contextProvider = FakeGenesisRepositoryContextProvider()
+        val model = FakeGenesisModel(validArchitectureOutput(contextProvider.contentHash))
 
         val result = GenesisIntelligenceService(
             workspace,
             model,
             repositoryContextProvider = contextProvider,
-        ).propose(1, GenesisProposalRequest("Use the existing Architect service."))
+        ).propose(
+            1,
+            GenesisProposalRequest(
+                "Use the existing Architect service. Ask explicit questions wherever the implementation cannot be established from repository evidence.",
+            ),
+        )
 
         assertEquals(GenesisProposalStatus.CREATED, result.status)
         assertTrue(model.lastPrompt.contains("\"repositoryContext\""))
         assertTrue(model.lastPrompt.contains("GenesisIntelligenceService"))
         assertTrue(model.lastPrompt.contains(contextProvider.observation.revision))
+        assertTrue(model.lastPrompt.contains("Do not ask the user to locate code"))
+        assertTrue(model.lastPrompt.contains("Do not use unresolvedQuestions for capacity, sizing, tuning"))
+        assertTrue(!model.lastPrompt.contains("Ask explicit questions wherever the implementation cannot be established"))
         assertEquals(contextProvider.observation.revision, result.proposal?.repositoryRevision)
         assertEquals(
             contextProvider.observation.context.files.single().contentHash,
             result.proposal?.repositoryEvidence?.single()?.contentHash,
         )
+        assertEquals("SUPPORTED", result.proposal?.repositoryAssessment?.claims?.single()?.status)
+        assertEquals("Use the existing Architect service.", result.proposal?.repositoryAssessment?.objective)
+    }
+
+    @Test
+    fun oversizedRepositoryContextIsCompactedToArchitectBudget() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val files = (1..4).map { index ->
+            CodingContextFile(
+                "backend/src/main/kotlin/com/orchard/backend/agent/GenesisContext$index.kt",
+                "class GenesisContext$index\n" + "implementation detail $index ".repeat(120),
+            )
+        }
+        val observation = GenesisRepositoryObservation(
+            revision = "c".repeat(40),
+            context = CodingRepositoryContext(files, omittedFileCount = 7),
+        )
+        val contextProvider = object : GenesisRepositoryContextProvider {
+            override fun observe(repositoryPath: String, query: String): GenesisRepositoryObservation = observation
+            override fun currentRevision(repositoryPath: String): String = observation.revision
+            override fun isCurrent(
+                repositoryPath: String,
+                query: String,
+                observation: GenesisRepositoryObservation,
+            ): Boolean = true
+        }
+        val model = FakeGenesisModel(validArchitectureOutput(files.first().contentHash).replace(
+            "backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
+            files.first().path,
+        ))
+
+        val result = GenesisIntelligenceService(
+            workspace,
+            model,
+            repositoryContextProvider = contextProvider,
+        ).propose(1, GenesisProposalRequest("Use the existing Architect implementation."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        val suppliedEvidence = requireNotNull(result.proposal).repositoryEvidence
+        assertTrue(suppliedEvidence.isNotEmpty())
+        assertTrue(suppliedEvidence.size < files.size)
+        assertEquals(files.first().path, suppliedEvidence.first().path)
+        assertTrue(!model.lastPrompt.contains(files.last().path))
+        assertTrue(model.lastPrompt.encodeToByteArray().size <= 12_000)
+        assertEquals(7 + files.size - suppliedEvidence.size, result.proposal?.omittedRepositoryFileCount)
+        assertEquals(result.proposal?.omittedRepositoryFileCount, result.proposal?.repositoryAssessment?.omittedRepositoryFileCount)
+    }
+
+    @Test
+    fun unestablishedComponentNullRepositoryPathsAreCanonicalizedToEmpty() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+        val output = validArchitectureOutput(contextProvider.contentHash).replace(
+            "\"repositoryPaths\": [\"backend/src/main/kotlin/com/orchard/backend/agent\"]",
+            "\"repositoryPaths\": null",
+        )
+
+        val result = GenesisIntelligenceService(
+            workspace,
+            FakeGenesisModel(output),
+            repositoryContextProvider = contextProvider,
+        ).propose(1, GenesisProposalRequest("Add a component that is not established yet."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertEquals(emptyList(), result.proposal?.submission?.components?.single()?.repositoryPaths)
+    }
+
+    @Test
+    fun explicitNullClaimCollectionsAreCanonicalizedToEmpty() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+        val output = validArchitectureOutput(contextProvider.contentHash)
+            .replace("\"defeaters\": []", "\"defeaters\": null")
+            .replace("\"repositoryClaims\": [{", "\"observations\": null, \"unresolvedQuestions\": null, \"repositoryClaims\": [{")
+
+        val result = GenesisIntelligenceService(
+            workspace,
+            FakeGenesisModel(output),
+            repositoryContextProvider = contextProvider,
+        ).propose(1, GenesisProposalRequest("Use the existing Architect service."))
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertEquals(emptyList(), result.proposal?.observations)
+        assertEquals(emptyList(), result.proposal?.unresolvedQuestions)
+        assertEquals(emptyList(), result.proposal?.repositoryAssessment?.claims?.single()?.defeaters)
+    }
+
+    @Test
+    fun repositoryClaimWithForgedEvidenceIsRejected() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+
+        val result = GenesisIntelligenceService(
+            workspace,
+            FakeGenesisModel(validArchitectureOutput("f".repeat(64))),
+            repositoryContextProvider = contextProvider,
+        ).propose(1, GenesisProposalRequest("Use the existing Architect service."))
+
+        assertEquals(GenesisProposalStatus.INVALID_OUTPUT, result.status)
+        assertTrue(result.diagnostic.contains("claim evidence"))
+    }
+
+    @Test
+    fun malformedGeneratedClaimIsNotAttributedToUserAnswers() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+        val output = validArchitectureOutput(contextProvider.contentHash).replace(
+            "\"claimId\": \"genesis-proposals\"",
+            "\"claimId\": \"Genesis Proposals\"",
+        )
+
+        val result = GenesisIntelligenceService(
+            workspace,
+            FakeGenesisModel(output),
+            repositoryContextProvider = contextProvider,
+        ).propose(1, GenesisProposalRequest("Use my answers to refine the existing proposal."))
+
+        assertEquals(GenesisProposalStatus.INVALID_OUTPUT, result.status)
+        assertTrue(result.diagnostic.contains("Architect-generated claim 1"))
+        assertTrue(result.diagnostic.contains("not lowercase hyphenated text"))
+        assertTrue(result.diagnostic.contains("not a judgment about your answers"))
+    }
+
+    @Test
+    fun durableRepositoryAssessmentIsReusedByNextRefinement() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val classified = advance(
+            workspace,
+            ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL,
+                productIntent = "A guided local product.",
+                baseRevision = 0,
+            ),
+            GENESIS_EXPERIENCE,
+        )
+        advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+        val directory = createTempDirectory("repository-assessments")
+        try {
+            val firstStore = FileRepositoryObjectiveAssessmentStore(directory)
+            val first = GenesisIntelligenceService(
+                workspace,
+                FakeGenesisModel(validArchitectureOutput(contextProvider.contentHash)),
+                repositoryContextProvider = contextProvider,
+                assessmentStore = firstStore,
+            ).propose(1, GenesisProposalRequest("Use the existing Architect service."))
+            assertEquals(GenesisProposalStatus.CREATED, first.status)
+
+            val secondModel = FakeGenesisModel(validArchitectureOutput(contextProvider.contentHash))
+            val second = GenesisIntelligenceService(
+                workspace,
+                secondModel,
+                repositoryContextProvider = contextProvider,
+                assessmentStore = FileRepositoryObjectiveAssessmentStore(directory),
+            ).propose(1, GenesisProposalRequest("Refine the existing Architect correlation."))
+
+            assertEquals(GenesisProposalStatus.CREATED, second.status)
+            assertTrue(secondModel.lastPrompt.contains("priorRepositoryAssessment"))
+            assertTrue(secondModel.lastPrompt.contains("Use the existing Architect service."))
+            assertEquals(2, FileRepositoryObjectiveAssessmentStore(directory).load().size)
+            assertEquals(2, requireNotNull(
+                GenesisIntelligenceService(
+                    workspace,
+                    secondModel,
+                    repositoryContextProvider = contextProvider,
+                    assessmentStore = FileRepositoryObjectiveAssessmentStore(directory),
+                ).latestRepositoryAssessment(1)
+            ).assessmentId)
+            assertEquals(
+                null,
+                GenesisIntelligenceService(
+                    workspace,
+                    secondModel,
+                    repositoryContextProvider = FakeGenesisRepositoryContextProvider(
+                        reportedRevision = "d".repeat(40),
+                    ),
+                    assessmentStore = FileRepositoryObjectiveAssessmentStore(directory),
+                ).latestRepositoryAssessment(1),
+            )
+        } finally {
+            Files.walk(directory).sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
     }
 
     @Test
@@ -356,7 +603,7 @@ class ProjectGenesisTest {
 
         val result = GenesisIntelligenceService(
             workspace,
-            FakeGenesisModel(validArchitectureOutput()),
+            FakeGenesisModel(validArchitectureOutput(contextProvider.contentHash)),
             repositoryContextProvider = contextProvider,
         ).propose(1, GenesisProposalRequest("Use the existing Architect service."))
 
@@ -390,15 +637,108 @@ class ProjectGenesisTest {
         assertEquals(HttpStatusCode.Created, response.status)
         assertTrue(response.bodyAsText().contains("\"status\":\"CREATED\""))
         assertEquals("Complete the first user journey", workspace.entities().single { it.type == ENTITY_EPIC }.title)
+        val review = workspace.snapshot(MESSAGE_READY).projectGenesis.single()
+        assertEquals(GENESIS_ADMISSION, review.phase)
+        assertEquals(emptyList(), review.revision?.components)
+        assertEquals(null, review.revision?.blueprint)
+        assertEquals(ProjectGenesisStatus.ADMITTED, workspace.admitProjectGenesis(1).status)
+        assertEquals(GENESIS_READY, workspace.snapshot(MESSAGE_READY).projectGenesis.single().phase)
+    }
+
+    @Test
+    fun repositoryFirstIntentAndOutcomeCreateOneAdmissionStateAcrossRestart() = withTempDirectory { directory ->
+        val bindings = boundRepository()
+        val first = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            repositoryBindings = bindings,
+            projectGenesisStore = FileProjectGenesisStore(directory),
+            enforceProjectGenesis = true,
+        )
+        first.beginBatch()
+        assertTrue(first.applyIntent(intent(ENTITY_PROJECT, "Orchard")))
+        first.commitBatch()
+
+        val created = first.createProjectGenesisFirstOutcome(
+            projectId = 1,
+            title = "Deliver a repository-first project inbox",
+            baseRevision = 0,
+            baseHash = null,
+            confirmedProductIntent = "Make repository reality understandable and operable.",
+        )
+        val duplicate = first.createProjectGenesisFirstOutcome(
+            projectId = 1,
+            title = "Ignored duplicate title",
+            baseRevision = 1,
+            baseHash = first.snapshot(MESSAGE_READY).projectGenesis.single().revision?.hash,
+            confirmedProductIntent = "Make repository reality understandable and operable.",
+        )
+
+        assertEquals(ProjectGenesisFirstOutcomeStatus.CREATED, created.status)
+        assertEquals(ProjectGenesisFirstOutcomeStatus.WRONG_PHASE, duplicate.status)
+        assertEquals(1, first.entities().count { it.type == ENTITY_EPIC })
+        assertEquals(GENESIS_ADMISSION, first.snapshot(MESSAGE_READY).projectGenesis.single().phase)
+
+        val recovered = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            repositoryBindings = bindings,
+            projectGenesisStore = FileProjectGenesisStore(directory),
+            enforceProjectGenesis = true,
+        )
+        val genesis = recovered.snapshot(MESSAGE_READY).projectGenesis.single()
+        assertEquals(GENESIS_ADMISSION, genesis.phase)
+        assertEquals("Make repository reality understandable and operable.", genesis.revision?.productIntent)
+        assertEquals(created.outcomeId, genesis.revision?.firstEpicId)
+        assertEquals("Deliver a repository-first project inbox", recovered.entities().single { it.type == ENTITY_EPIC }.title)
+    }
+
+    @Test
+    fun repositoryBaselineAssessmentContinuesAfterOutcomeReachesAdmission() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Orchard")))
+        workspace.commitBatch()
         assertEquals(
-            ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS,
+            ProjectGenesisFirstOutcomeStatus.CREATED,
             workspace.createProjectGenesisFirstOutcome(
-                1,
-                "A competing outcome",
-                2,
-                workspace.snapshot(MESSAGE_READY).projectGenesis.single().revision?.hash,
+                projectId = 1,
+                title = "Deliver a repository-first project inbox",
+                baseRevision = 0,
+                baseHash = null,
+                confirmedProductIntent = "Make repository reality understandable and operable.",
             ).status,
         )
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+        val output = """{
+            "submission":{"baseRevision":1},
+            "repositoryClaims":[{
+                "claimId":"genesis-proposals",
+                "statement":"The repository defines a Genesis proposal service.",
+                "status":"SUPPORTED",
+                "support":[{
+                    "path":"backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
+                    "contentHash":"${contextProvider.contentHash}",
+                    "observation":"The supplied file defines GenesisIntelligenceService."
+                }],
+                "defeaters":[]
+            }]
+        }""".trimIndent()
+        val model = FakeGenesisModel(output)
+        val service = GenesisIntelligenceService(
+            workspace,
+            model,
+            repositoryContextProvider = contextProvider,
+        )
+
+        val result = service.assessRepository(1, GenesisProposalRequest("Compile the current repository baseline."))
+        val assessment = service.latestRepositoryAssessment(1)
+
+        assertEquals(GenesisProposalStatus.CREATED, result.status)
+        assertEquals(GENESIS_ADMISSION, assessment?.phase)
+        assertEquals(1, assessment?.genesisRevision)
+        assertEquals("c".repeat(40), assessment?.repositoryRevision)
+        assertEquals("genesis-proposals", assessment?.claims?.single()?.claimId)
+        assertTrue(model.lastPrompt.contains("When allowedAction is ASSESS_REPOSITORY_BASELINE"))
+        assertTrue(model.lastPrompt.contains("Do not advance Genesis or propose product authority"))
     }
 
     @Test
@@ -525,7 +865,7 @@ class ProjectGenesisTest {
         override fun resolveHead(projectId: Int): RepositoryHead? = null
     }
 
-    private fun validArchitectureOutput() = """{
+    private fun validArchitectureOutput(contentHash: String) = """{
         "submission": {
             "components": [{
                 "componentId": "architect",
@@ -543,24 +883,43 @@ class ProjectGenesisTest {
             }],
             "firstEpicId": 2,
             "baseRevision": 2
-        }
+        },
+        "repositoryClaims": [{
+            "claimId": "genesis-proposals",
+            "statement": "The repository defines a Genesis proposal service.",
+            "status": "SUPPORTED",
+            "support": [{
+                "path": "backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
+                "contentHash": "$contentHash",
+                "observation": "The supplied file defines GenesisIntelligenceService."
+            }],
+            "defeaters": []
+        }]
     }""".trimIndent()
 
     private class FakeGenesisRepositoryContextProvider(
         private val current: Boolean = true,
+        private val reportedRevision: String = "c".repeat(40),
     ) : GenesisRepositoryContextProvider {
+        val contentHash = CodingContextFile(
+            "backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
+            "class GenesisIntelligenceService",
+        ).contentHash
         val observation = GenesisRepositoryObservation(
             revision = "c".repeat(40),
             context = CodingRepositoryContext(
                 files = listOf(CodingContextFile(
                     "backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
                     "class GenesisIntelligenceService",
+                    contentHash,
                 )),
                 omittedFileCount = 12,
             ),
         )
 
         override fun observe(repositoryPath: String, query: String): GenesisRepositoryObservation = observation
+
+        override fun currentRevision(repositoryPath: String): String? = reportedRevision
 
         override fun isCurrent(
             repositoryPath: String,

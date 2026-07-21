@@ -16,6 +16,7 @@ import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
+import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.analysis.RepositoryExecutionPlan
@@ -32,6 +33,10 @@ import com.orchard.backend.conversation.FileConversationStore
 import com.orchard.backend.conversation.ModelConversationInterpreter
 import com.orchard.backend.conversation.conversationRoutes
 import com.orchard.backend.conversation.defaultConversationCapabilities
+import com.orchard.backend.report.FileProjectReportStore
+import com.orchard.backend.report.ProjectReportService
+import com.orchard.backend.report.RepositoryBaselineCompiler
+import com.orchard.backend.report.projectReportRoutes
 import com.orchard.backend.vector.FileModelProviderCatalogStore
 import com.orchard.backend.vector.FileModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProviderCatalog
@@ -184,6 +189,7 @@ fun main() {
         modelProviderRegistry,
         resourceController,
         CodingGenesisRepositoryContextProvider(codingWorkspaceGateway),
+        FileRepositoryObjectiveAssessmentStore(OrchardPaths.WORKSPACE_DIR),
     )
     val companyControl = CompanyControlService(
         workspace,
@@ -265,6 +271,23 @@ fun main() {
             modelProviderRegistry,
         ),
     )
+    val projectReports = ProjectReportService(
+        workspace,
+        repositoryBindings,
+        FileProjectReportStore(OrchardPaths.WORKSPACE_DIR),
+        genesisIntelligence::latestRepositoryAssessment,
+        conversationConductor,
+    )
+    val baselineCompiler = RepositoryBaselineCompiler(projectReports, genesisIntelligence)
+    val baselineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    baselineScope.launch {
+        while (isActive) {
+            delay(BASELINE_INTERVAL_MILLIS)
+            runCatching { baselineCompiler.tick() }.onFailure { error ->
+                BASELINE_LOGGER.log(Level.WARNING, "Repository baseline compilation failed", error)
+            }
+        }
+    }
     val dispatchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     dispatchScope.launch {
         while (isActive) {
@@ -280,6 +303,9 @@ fun main() {
             }
             runCatching { conversationConductor.projectCompanyActivity(companyControl.projectViews()) }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable company activity projection failed", error)
+            }
+            runCatching { projectReports.synchronizeTicketReports() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Durable ticket report projection failed", error)
             }
         }
     }
@@ -357,9 +383,11 @@ fun main() {
             campaignResolutions,
             standardsPolicy,
             conversationConductor,
+            projectReports,
         )
     }
     Runtime.getRuntime().addShutdownHook(Thread {
+        baselineScope.cancel()
         dispatchScope.cancel()
         analysisScope.cancel()
         codingScope.cancel()
@@ -386,12 +414,28 @@ fun Application.workspaceApi(
     campaignResolutions: CampaignResolutionService? = null,
     standardsPolicy: StandardsPolicyService? = null,
     conversationConductor: ConversationConductorService? = null,
+    projectReports: ProjectReportService? = null,
 ) {
     configureJson()
     routing {
         if (conversationConductor != null) conversationRoutes(conversationConductor)
+        if (projectReports != null) projectReportRoutes(projectReports)
         get("/api/workspace") {
             call.respond(workspace.snapshot(MESSAGE_READY))
+        }
+        get("/api/projects/{projectId}/genesis/repository-assessment") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@get
+            }
+            if (genesisIntelligence == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val assessment = genesisIntelligence.latestRepositoryAssessment(projectId)
+            if (assessment == null) call.respond(HttpStatusCode.NotFound)
+            else call.respond(assessment)
         }
         get("/api/company/state") {
             if (companyControl == null) {
@@ -746,10 +790,13 @@ fun Application.workspaceApi(
                 request.title,
                 request.baseRevision,
                 request.baseHash,
+                request.confirmedProductIntent,
             )
             val status = when (result.status) {
                 ProjectGenesisFirstOutcomeStatus.CREATED -> HttpStatusCode.Created
+                ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS -> HttpStatusCode.OK
                 ProjectGenesisFirstOutcomeStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+                ProjectGenesisFirstOutcomeStatus.INVALID_INTENT,
                 ProjectGenesisFirstOutcomeStatus.INVALID_TITLE -> HttpStatusCode.UnprocessableEntity
                 ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
                 else -> HttpStatusCode.Conflict
@@ -1200,11 +1247,13 @@ fun Application.workspaceApi(
 
 private const val MAX_STAGED_PLAN_REQUEST_BYTES = 64 * 1024
 private const val DISPATCH_INTERVAL_MILLIS = 1_000L
+private const val BASELINE_INTERVAL_MILLIS = 5_000L
 private const val ANALYSIS_INTERVAL_MILLIS = 1_000L
 private const val CODING_INTERVAL_MILLIS = 1_000L
 private const val AUDIT_INTERVAL_MILLIS = 1_000L
 private const val CAMPAIGN_INTERVAL_MILLIS = 1_000L
 private val DISPATCH_LOGGER: Logger = Logger.getLogger("com.orchard.backend.dispatch")
+private val BASELINE_LOGGER: Logger = Logger.getLogger("com.orchard.backend.baseline")
 private val ANALYSIS_LOGGER: Logger = Logger.getLogger("com.orchard.backend.analysis")
 private val CODING_LOGGER: Logger = Logger.getLogger("com.orchard.backend.coding")
 private val AUDIT_LOGGER: Logger = Logger.getLogger("com.orchard.backend.audit")
@@ -1297,7 +1346,8 @@ private fun genesisProposalStatus(status: GenesisProposalStatus): HttpStatusCode
     GenesisProposalStatus.MODEL_UNAVAILABLE,
     GenesisProposalStatus.RESOURCE_CAPACITY_UNAVAILABLE,
     GenesisProposalStatus.RESOURCE_TELEMETRY_UNAVAILABLE,
-    GenesisProposalStatus.REPOSITORY_CONTEXT_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+    GenesisProposalStatus.REPOSITORY_CONTEXT_UNAVAILABLE,
+    GenesisProposalStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
     GenesisProposalStatus.REPOSITORY_CHANGED -> HttpStatusCode.Conflict
 }
 
@@ -1316,6 +1366,7 @@ data class ProjectGenesisFirstOutcomeRequest(
     val title: String,
     val baseRevision: Int,
     val baseHash: String? = null,
+    val confirmedProductIntent: String? = null,
 )
 
 @Serializable
@@ -1331,6 +1382,7 @@ private fun projectGenesisFirstOutcomeDiagnostic(status: ProjectGenesisFirstOutc
     ProjectGenesisFirstOutcomeStatus.WRONG_PHASE -> "The project is no longer planning its first working outcome. Refresh to load the current step."
     ProjectGenesisFirstOutcomeStatus.STALE_REVISION -> "Project setup changed before this outcome was created. Refresh and retry."
     ProjectGenesisFirstOutcomeStatus.ALREADY_EXISTS -> "A first working outcome already exists. Refresh to continue."
+    ProjectGenesisFirstOutcomeStatus.INVALID_INTENT -> "Confirm the repository's current product intent before recording the first outcome."
     ProjectGenesisFirstOutcomeStatus.INVALID_TITLE -> "Name the first working outcome in 256 characters or fewer."
     ProjectGenesisFirstOutcomeStatus.WORKSPACE_REJECTED -> "The project hierarchy rejected this first working outcome."
     ProjectGenesisFirstOutcomeStatus.STORAGE_UNAVAILABLE -> "The first working outcome could not be stored. Check Orchard storage and retry."

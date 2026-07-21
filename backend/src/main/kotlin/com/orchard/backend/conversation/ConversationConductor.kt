@@ -169,6 +169,7 @@ data class ConversationContextManifest(
     val commandStates: List<ConversationContextCommand>,
     val summaries: List<ConversationSummaryRevision>,
     val capabilities: List<ConversationCapabilityDescriptor>,
+    val conversationTitle: String = "",
 )
 
 @Serializable
@@ -342,6 +343,7 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
         capabilities: List<ConversationCapabilityDescriptor>,
         sourceMessage: ConversationMessage? = null,
     ): ConversationContextManifest {
+        val conversation = events.mapNotNull { it.conversation }.single { it.conversationId == conversationId }
         val messages = events.mapNotNull { it.message }.filter { it.conversationId == conversationId }
         val objectives = latestObjectives(events, conversationId)
         val commands = events.mapNotNull { it.command }.filter { it.conversationId == conversationId }
@@ -373,6 +375,7 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
                 .groupBy { it.summaryId }
                 .map { (_, revisions) -> revisions.maxBy { it.revision } },
             capabilities = capabilities,
+            conversationTitle = conversation.title,
         )
     }
 }

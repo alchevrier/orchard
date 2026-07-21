@@ -44,6 +44,7 @@ import com.orchard.frontend.network.ExperienceContractRequest
 import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.ProjectGenesisViewResponse
+import com.orchard.frontend.network.RepositoryObjectiveAssessmentResponse
 
 private val SetupSurface = Color(0xFFFFFFFF)
 private val SetupRaised = Color(0xFFFAFAFC)
@@ -64,6 +65,9 @@ internal data class ConductorProjectSetupState(
     val epics: List<Pair<Int, String>>,
 )
 
+internal data class ReadyAction(val label: String, val prompt: String)
+internal data class DeliveryGuidance(val message: String, val actionRequired: Boolean = false)
+
 internal enum class ConductorSetupStep {
     STANDARDS,
     CLASSIFICATION,
@@ -80,7 +84,7 @@ internal fun conductorSetupStep(state: ConductorProjectSetupState): ConductorSet
         "CLASSIFICATION" -> ConductorSetupStep.CLASSIFICATION
         "EXPERIENCE" -> ConductorSetupStep.EXPERIENCE
         "ARCHITECTURE" -> ConductorSetupStep.ARCHITECTURE
-        "BLUEPRINT" -> ConductorSetupStep.BLUEPRINT
+        "BLUEPRINT" -> ConductorSetupStep.ADMISSION
         "ADMISSION" -> ConductorSetupStep.ADMISSION
         else -> ConductorSetupStep.READY
     }
@@ -90,6 +94,7 @@ internal fun conductorSetupStep(state: ConductorProjectSetupState): ConductorSet
 internal fun ConductorProjectSetupCard(
     state: ConductorProjectSetupState,
     proposal: GenesisProposalResponse?,
+    repositoryAssessment: RepositoryObjectiveAssessmentResponse?,
     proposalFeedback: String?,
     isSubmitting: Boolean,
     error: String?,
@@ -99,6 +104,9 @@ internal fun ConductorProjectSetupCard(
     onApplyProposal: () -> Unit,
     onAdmit: () -> Unit,
     onCreateFirstOutcome: (String) -> Unit,
+    onSuggestedAction: (String) -> Unit,
+    deliveryGuidance: DeliveryGuidance?,
+    onStartDelivery: () -> Unit,
 ) {
     val step = conductorSetupStep(state)
     Column(Modifier.fillMaxWidth().widthIn(max = 720.dp)) {
@@ -116,11 +124,11 @@ internal fun ConductorProjectSetupCard(
                     ConductorSetupStep.STANDARDS -> StandardsStep(state, isSubmitting, onAdoptStandards)
                     ConductorSetupStep.CLASSIFICATION -> ClassificationStep(state, isSubmitting, onAdvance)
                     ConductorSetupStep.EXPERIENCE,
-                    ConductorSetupStep.ARCHITECTURE,
                     ConductorSetupStep.BLUEPRINT -> ProposalStep(
                         state,
                         step,
                         proposal,
+                        repositoryAssessment,
                         isSubmitting,
                         proposalFeedback,
                         onAdvance,
@@ -128,8 +136,20 @@ internal fun ConductorProjectSetupCard(
                         onApplyProposal,
                         onCreateFirstOutcome,
                     )
+                    ConductorSetupStep.ARCHITECTURE -> OutcomeStep(
+                        state,
+                        repositoryAssessment,
+                        isSubmitting,
+                        onCreateFirstOutcome,
+                    )
                     ConductorSetupStep.ADMISSION -> AdmissionStep(state, isSubmitting, onAdmit)
-                    ConductorSetupStep.READY -> ReadyStep(state)
+                    ConductorSetupStep.READY -> ReadyStep(
+                        state,
+                        isSubmitting,
+                        deliveryGuidance,
+                        onStartDelivery,
+                        onSuggestedAction,
+                    )
                 }
                 if (!error.isNullOrBlank()) {
                     Text(
@@ -151,8 +171,7 @@ private fun SetupProgress(step: ConductorSetupStep) {
         ConductorSetupStep.STANDARDS to "Standards",
         ConductorSetupStep.CLASSIFICATION to "Context",
         ConductorSetupStep.EXPERIENCE to "Experience",
-        ConductorSetupStep.ARCHITECTURE to "Architecture",
-        ConductorSetupStep.BLUEPRINT to "Repository",
+        ConductorSetupStep.ARCHITECTURE to "Outcome",
         ConductorSetupStep.ADMISSION to "Review",
     )
     val currentIndex = steps.indexOfFirst { it.first == step }.let { if (it == -1) steps.size else it }
@@ -298,10 +317,47 @@ private fun RowScope.SetupChoice(
 }
 
 @Composable
+private fun OutcomeStep(
+    state: ConductorProjectSetupState,
+    repositoryAssessment: RepositoryObjectiveAssessmentResponse?,
+    isSubmitting: Boolean,
+    onRecordOutcome: (String) -> Unit,
+) {
+    val recordedOutcome = state.epics.firstOrNull()?.second.orEmpty()
+    var outcome by remember(state.projectId, recordedOutcome) { mutableStateOf(recordedOutcome) }
+    Text("Set the intended outcome", color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+    Text(
+        "Name the first result Orchard should deliver. Architecture, repository shape, sizing, and verification will be established through governed design when the work needs them.",
+        Modifier.padding(top = 7.dp),
+        color = SetupMuted,
+        fontSize = 12.sp,
+        lineHeight = 18.sp,
+    )
+    OutlinedTextField(
+        value = outcome,
+        onValueChange = { outcome = it },
+        modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+        enabled = !isSubmitting && recordedOutcome.isEmpty(),
+        minLines = 2,
+        maxLines = 5,
+        label = { Text("Intended outcome") },
+    )
+    repositoryAssessment?.let { RepositoryAssessmentSummary(it) }
+    SetupAction(
+        label = if (recordedOutcome.isEmpty()) "Record outcome and review" else "Continue to review",
+        loadingLabel = "Recording outcome...",
+        isSubmitting = isSubmitting,
+        enabled = outcome.isNotBlank(),
+        onClick = { onRecordOutcome(outcome.trim()) },
+    )
+}
+
+@Composable
 private fun ProposalStep(
     state: ConductorProjectSetupState,
     step: ConductorSetupStep,
     proposal: GenesisProposalResponse?,
+    repositoryAssessment: RepositoryObjectiveAssessmentResponse?,
     isSubmitting: Boolean,
     feedback: String?,
     onAdvance: (ProjectGenesisSubmissionRequest) -> Unit,
@@ -310,9 +366,9 @@ private fun ProposalStep(
     onCreateFirstOutcome: (String) -> Unit,
 ) {
     val firstOutcome = state.epics.firstOrNull()?.second.orEmpty()
-    var prompt by remember(state.genesis.phase, state.genesis.revision?.hash, firstOutcome) {
+    var prompt by remember(state.genesis.phase, state.genesis.revision?.hash, firstOutcome, repositoryAssessment?.assessmentId) {
         mutableStateOf(
-            proposalPromptDefault(
+            repositoryAssessment?.objective?.let(::proposalObjectiveForContinuation) ?: proposalPromptDefault(
                 step,
                 state.genesis.revision?.productIntent.orEmpty(),
                 state.genesis.nextQuestion,
@@ -323,7 +379,7 @@ private fun ProposalStep(
     var epicTitle by remember(state.projectId, state.epics) { mutableStateOf("") }
     var showManualExperience by remember(state.genesis.revision?.hash) { mutableStateOf(false) }
     val candidate = proposal?.takeIf { it.phase == state.genesis.phase }
-    val unresolvedQuestions = candidate?.unresolvedQuestions.orEmpty().filter(String::isNotBlank)
+    val unresolvedQuestions = candidateBlockingQuestions(candidate?.unresolvedQuestions)
     var refinementAnswers by remember(state.genesis.revision?.hash, unresolvedQuestions) {
         mutableStateOf(unresolvedQuestions.associateWith { "" })
     }
@@ -332,6 +388,8 @@ private fun ProposalStep(
     Text(heading, color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
     Text(
         when {
+            needsRefinement && candidate != null ->
+                "The Architect recorded optional questions. Answer them to refine the draft, or continue with the provisional proposal."
             needsRefinement -> "Add the missing details below, then ask the Architect to refine the proposal."
             candidate != null -> "The candidate is ready for review. Apply it to record this decision and continue to the next step."
             step == ConductorSetupStep.ARCHITECTURE && firstOutcome.isNotEmpty() ->
@@ -393,27 +451,6 @@ private fun ProposalStep(
             Text(firstOutcome, Modifier.padding(top = 4.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
         }
     }
-    if (needsRefinement) {
-        Column(
-            Modifier.fillMaxWidth().padding(top = 12.dp).background(SetupAmberSoft, RoundedCornerShape(6.dp)).padding(10.dp),
-        ) {
-            Text("DETAILS NEEDED", color = SetupAmber, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-            if (!feedback.isNullOrBlank()) {
-                Text(feedback, Modifier.padding(top = 5.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
-            }
-            unresolvedQuestions.forEach { question ->
-                OutlinedTextField(
-                    value = refinementAnswers[question].orEmpty(),
-                    onValueChange = { answer -> refinementAnswers = refinementAnswers + (question to answer) },
-                    modifier = Modifier.fillMaxWidth().padding(top = 9.dp),
-                    enabled = !isSubmitting,
-                    minLines = 2,
-                    maxLines = 5,
-                    label = { Text(question) },
-                )
-            }
-        }
-    }
     OutlinedTextField(
         value = prompt,
         onValueChange = { prompt = it },
@@ -430,16 +467,133 @@ private fun ProposalStep(
         fontSize = 10.sp,
         lineHeight = 15.sp,
     )
-    SetupAction(
-        label = proposalActionLabel(candidate != null, needsRefinement),
-        loadingLabel = "Forming and validating proposal...",
-        isSubmitting = isSubmitting,
-        enabled = prompt.isNotBlank() && unresolvedQuestions.all { refinementAnswers[it].orEmpty().isNotBlank() },
-        onClick = { onGenerate(proposalRefinementPrompt(prompt, unresolvedQuestions, refinementAnswers)) },
-    )
+    val canGenerate = prompt.isNotBlank() && unresolvedQuestions.all {
+        refinementAnswers[it].orEmpty().isNotBlank()
+    }
+    if (needsRefinement) {
+        Column(
+            Modifier.fillMaxWidth().padding(top = 12.dp).background(SetupAmberSoft, RoundedCornerShape(6.dp)).padding(10.dp),
+        ) {
+            Text(
+                if (candidate != null) "OPTIONAL REFINEMENT" else "DETAILS NEEDED",
+                color = SetupAmber,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            if (candidate != null) {
+                Text(
+                    "These questions are preserved for later design work and do not block moving forward.",
+                    Modifier.padding(top = 5.dp),
+                    color = SetupInk,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                )
+            }
+            if (!feedback.isNullOrBlank()) {
+                Text(feedback, Modifier.padding(top = 5.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
+            }
+            unresolvedQuestions.forEach { question ->
+                Text(
+                    refinementQuestionPrompt(question),
+                    Modifier.padding(top = 10.dp),
+                    color = SetupInk,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                if (!question.trim().endsWith("?")) {
+                    Text(
+                        question.trim(),
+                        Modifier.padding(top = 3.dp),
+                        color = SetupMuted,
+                        fontSize = 10.sp,
+                        lineHeight = 15.sp,
+                    )
+                }
+                OutlinedTextField(
+                    value = refinementAnswers[question].orEmpty(),
+                    onValueChange = { answer -> refinementAnswers = refinementAnswers + (question to answer) },
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    enabled = !isSubmitting,
+                    minLines = 2,
+                    maxLines = 5,
+                    label = { Text("Answer") },
+                )
+            }
+            SetupAction(
+                label = repositoryAssessmentActionLabel(
+                    hasProposal = candidate != null,
+                    hasAssessment = repositoryAssessment != null,
+                    needsRefinement = true,
+                ),
+                loadingLabel = "Submitting answers and validating proposal...",
+                isSubmitting = isSubmitting,
+                enabled = canGenerate,
+                onClick = { onGenerate(proposalRefinementPrompt(prompt, unresolvedQuestions, refinementAnswers)) },
+            )
+            when {
+                isSubmitting -> Text(
+                    "Answers submitted. The Architect is correlating them with repository evidence.",
+                    Modifier.padding(top = 6.dp),
+                    color = SetupBlue,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                )
+                !feedback.isNullOrBlank() -> Text(
+                    feedback,
+                    Modifier.fillMaxWidth().padding(top = 6.dp).background(SetupSurface, RoundedCornerShape(6.dp)).padding(8.dp),
+                    color = SetupAmber,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                )
+                candidate != null -> Text(
+                    "Proposal ready below. Review it before applying.",
+                    Modifier.padding(top = 6.dp),
+                    color = SetupGreen,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                )
+                !canGenerate -> Text(
+                    "Complete every answer field to submit this refinement.",
+                    Modifier.padding(top = 6.dp),
+                    color = SetupMuted,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                )
+            }
+        }
+    } else {
+        if (candidate != null || repositoryAssessment == null) {
+            SetupAction(
+                label = repositoryAssessmentActionLabel(
+                    hasProposal = candidate != null,
+                    hasAssessment = repositoryAssessment != null,
+                    needsRefinement = false,
+                ),
+                loadingLabel = "Forming and validating proposal...",
+                isSubmitting = isSubmitting,
+                enabled = canGenerate,
+                onClick = { onGenerate(proposalRefinementPrompt(prompt, unresolvedQuestions, refinementAnswers)) },
+            )
+        }
+    }
+    if (candidate == null && repositoryAssessment != null) {
+        RepositoryAssessmentSummary(repositoryAssessment)
+        SetupAction(
+            label = repositoryAssessmentActionLabel(
+                hasProposal = false,
+                hasAssessment = true,
+                needsRefinement = false,
+            ),
+            loadingLabel = "Forming provisional proposal...",
+            isSubmitting = isSubmitting,
+            enabled = canGenerate,
+            onClick = { onGenerate(proposalRefinementPrompt(prompt, unresolvedQuestions, refinementAnswers)) },
+        )
+    }
     candidate?.let {
         Column(Modifier.fillMaxWidth().padding(top = 14.dp).background(SetupRaised, RoundedCornerShape(6.dp)).padding(12.dp)) {
-            Text(if (needsRefinement) "DRAFT" else "CANDIDATE", color = SetupBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+            Text(if (needsRefinement) "PROVISIONAL CANDIDATE" else "CANDIDATE", color = SetupBlue, fontWeight = FontWeight.Bold, fontSize = 9.sp)
             it.repositoryRevision?.let { revision ->
                 Text(
                     "GROUNDED IN CODE  ${revision.take(12)}",
@@ -466,25 +620,142 @@ private fun ProposalStep(
                         lineHeight = 14.sp,
                     )
                 }
+                it.repositoryAssessment?.claims.orEmpty().forEach { claim ->
+                    Text(
+                        claim.status.replace('_', ' '),
+                        Modifier.padding(top = 8.dp),
+                        color = when (claim.status) {
+                            "SUPPORTED" -> SetupGreen
+                            "CONTRADICTED" -> SetupAmber
+                            else -> SetupBlue
+                        },
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 9.sp,
+                    )
+                    Text(
+                        claim.statement,
+                        Modifier.padding(top = 3.dp),
+                        color = SetupInk,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                    )
+                    (claim.support + claim.defeaters).distinctBy { evidence -> evidence.path }.forEach { evidence ->
+                        Text(
+                            "${evidence.path}  ${evidence.contentHash.take(8)}",
+                            Modifier.padding(top = 3.dp),
+                            color = SetupMuted,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                        )
+                    }
+                }
+                if (it.repositoryAssessment?.claims.orEmpty().any { claim -> claim.status == "UNESTABLISHED" }) {
+                    Text(
+                        "Unestablished items are not blockers. Apply the provisional proposal and Orchard will correlate them more deeply during design and delivery.",
+                        Modifier.padding(top = 9.dp),
+                        color = SetupBlue,
+                        fontSize = 10.sp,
+                        lineHeight = 15.sp,
+                    )
+                }
             }
             proposalLines(it).forEach { line ->
                 Text(line, Modifier.padding(top = 6.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
             }
-            if (!needsRefinement) {
-                SetupAction(
-                    label = "Apply proposal",
-                    loadingLabel = "Applying proposal...",
-                    isSubmitting = isSubmitting,
-                    enabled = true,
-                    onClick = onApply,
-                )
-            }
+            SetupAction(
+                label = proposalApplyActionLabel(needsRefinement),
+                loadingLabel = "Applying proposal...",
+                isSubmitting = isSubmitting,
+                enabled = true,
+                onClick = onApply,
+            )
         }
     }
 }
 
+internal fun proposalApplyActionLabel(hasOptionalQuestions: Boolean): String =
+    if (hasOptionalQuestions) "Continue with provisional proposal" else "Apply proposal"
+
+internal fun repositoryAssessmentActionLabel(
+    hasProposal: Boolean,
+    hasAssessment: Boolean,
+    needsRefinement: Boolean,
+): String = if (needsRefinement) {
+    "Submit answers and refine proposal"
+} else if (!hasProposal && hasAssessment) {
+    "Next: form proposal"
+} else {
+    proposalActionLabel(hasProposal, needsRefinement)
+}
+
+@Composable
+private fun RepositoryAssessmentSummary(assessment: RepositoryObjectiveAssessmentResponse) {
+    Column(Modifier.fillMaxWidth().padding(top = 14.dp).background(SetupRaised, RoundedCornerShape(6.dp)).padding(12.dp)) {
+        Text(
+            "FAST REPOSITORY SCAN  ${assessment.repositoryRevision.take(12)}",
+            color = SetupGreen,
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp,
+        )
+        Text(
+            "This is a fast, provisional view of the current repository, not a complete implementation map. Orchard will refine and correlate it more deeply during design and delivery.",
+            Modifier.padding(top = 5.dp),
+            color = SetupMuted,
+            fontSize = 10.sp,
+            lineHeight = 15.sp,
+        )
+        assessment.claims.forEach { claim ->
+            Text(
+                claim.status.replace('_', ' '),
+                Modifier.padding(top = 8.dp),
+                color = when (claim.status) {
+                    "SUPPORTED" -> SetupGreen
+                    "CONTRADICTED" -> SetupAmber
+                    else -> SetupBlue
+                },
+                fontWeight = FontWeight.Bold,
+                fontSize = 9.sp,
+            )
+            Text(claim.statement, Modifier.padding(top = 3.dp), color = SetupInk, fontSize = 11.sp, lineHeight = 16.sp)
+        }
+        if (assessment.unresolvedQuestions.any(String::isNotBlank)) {
+            Text(
+                "CORRELATE LATER",
+                Modifier.padding(top = 10.dp),
+                color = SetupBlue,
+                fontWeight = FontWeight.Bold,
+                fontSize = 9.sp,
+            )
+            Text(
+                "The bounded scan could not establish every implementation detail. Continue with a provisional proposal; Orchard will correlate these gaps more deeply during design and delivery.",
+                Modifier.padding(top = 3.dp),
+                color = SetupInk,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+            )
+        }
+    }
+}
+
+internal fun candidateBlockingQuestions(candidateQuestions: List<String>?): List<String> =
+    candidateQuestions.orEmpty().filter(String::isNotBlank)
+
+internal fun proposalObjectiveForContinuation(value: String): String = value
+    .replace(LEGACY_EVIDENCE_QUESTION_DIRECTIVE, " ")
+    .replace(Regex("\\s+"), " ")
+    .trim()
+
 internal fun proposalNeedsRefinement(unresolvedQuestions: List<String>, feedback: String?): Boolean =
     unresolvedQuestions.any(String::isNotBlank) || !feedback.isNullOrBlank()
+
+private val LEGACY_EVIDENCE_QUESTION_DIRECTIVE = Regex(
+    "Ask explicit questions wherever the implementation cannot be established from repository evidence\\.?",
+    RegexOption.IGNORE_CASE,
+)
+
+internal fun refinementQuestionPrompt(unresolved: String): String = unresolved.trim().let { value ->
+    if (value.endsWith("?")) value else "How should Orchard resolve this evidence gap?"
+}
 
 internal fun proposalRefinementPrompt(
     originalPrompt: String,
@@ -655,7 +926,7 @@ private fun AdmissionStep(
     val revision = state.genesis.revision
     Text("Review the project foundation", color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
     Text(
-        "This admits the exact experience, architecture, first epic, and repository plan as implementation authority.",
+        "This admits the intended experience and first outcome as project authority. Architecture, repository shape, and verification remain deferred to governed design and delivery.",
         Modifier.padding(top = 7.dp),
         color = SetupMuted,
         fontSize = 12.sp,
@@ -680,7 +951,13 @@ private fun AdmissionStep(
 }
 
 @Composable
-private fun ReadyStep(state: ConductorProjectSetupState) {
+private fun ReadyStep(
+    state: ConductorProjectSetupState,
+    isSubmitting: Boolean,
+    deliveryGuidance: DeliveryGuidance?,
+    onStartDelivery: () -> Unit,
+    onSuggestedAction: (String) -> Unit,
+) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(34.dp).background(SetupGreenSoft, RoundedCornerShape(17.dp)), contentAlignment = Alignment.Center) {
             Icon(Icons.Default.Check, null, Modifier.size(18.dp), tint = SetupGreen)
@@ -688,10 +965,76 @@ private fun ReadyStep(state: ConductorProjectSetupState) {
         Spacer(Modifier.width(10.dp))
         Column {
             Text("${state.projectTitle} is ready", color = SetupInk, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-            Text("The project foundation is admitted. Continue the conversation with the outcome you want Orchard to deliver.", color = SetupMuted, fontSize = 11.sp)
+            Text(
+                "The intended experience and first outcome are now project authority. Orchard can begin governed delivery, help shape another outcome, or report what is currently active.",
+                color = SetupMuted,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+            )
         }
     }
+    Text(
+        "What would you like Orchard to do next?",
+        Modifier.padding(top = 14.dp),
+        color = SetupInk,
+        fontWeight = FontWeight.Medium,
+        fontSize = 12.sp,
+    )
+    if (deliveryGuidance == null) {
+        SetupAction(
+            label = "Start delivery",
+            loadingLabel = "Starting governed delivery...",
+            isSubmitting = isSubmitting,
+            enabled = true,
+            onClick = onStartDelivery,
+        )
+    } else {
+        Text(
+            if (deliveryGuidance.actionRequired) "Your input is needed" else "Orchard is working",
+            Modifier.padding(top = 12.dp),
+            color = if (deliveryGuidance.actionRequired) SetupAmber else SetupGreen,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 10.sp,
+        )
+        Text(
+            deliveryGuidance.message,
+            Modifier.fillMaxWidth().padding(top = 5.dp)
+                .background(if (deliveryGuidance.actionRequired) SetupAmberSoft else SetupGreenSoft, RoundedCornerShape(6.dp))
+                .padding(10.dp),
+            color = if (deliveryGuidance.actionRequired) SetupAmber else SetupGreen,
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+        )
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(top = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        readyActions(state).forEach { action ->
+            TextButton(onClick = { onSuggestedAction(action.prompt) }) {
+                Text(action.label)
+            }
+        }
+    }
+    Text(
+        "You can also ask in your own words about a feature, repository evidence, project status, or the next outcome.",
+        Modifier.padding(top = 4.dp),
+        color = SetupMuted,
+        fontSize = 10.sp,
+        lineHeight = 15.sp,
+    )
 }
+
+internal fun readyActions(state: ConductorProjectSetupState): List<ReadyAction> = listOf(
+    ReadyAction(
+        "Plan another outcome",
+        "Help me define the next outcome for ${state.projectTitle}.",
+    ),
+    ReadyAction(
+        "Show status",
+        "Report current workspace status for project ${state.projectId}.",
+    ),
+)
 
 @Composable
 private fun SetupAction(

@@ -20,6 +20,129 @@ import kotlin.test.assertTrue
 
 class DesktopNetworkClientTest {
     @Test
+    fun decodesProjectInboxWhenBackendDefaultFieldsAreOmitted() {
+        val inbox = Json.decodeFromString(
+            ProjectReportInboxResponse.serializer(),
+            """{
+                "projectId":4,
+                "reports":[{
+                    "report":{"reportId":7,"projectId":4,"scope":{"type":"PROJECT","targetId":"4"},"title":"Repository baseline"},
+                    "revision":{"reportId":7,"revision":2},
+                    "items":[{"reportId":7,"reportRevision":2,"itemKey":"baseline","title":"Assessment pending"}]
+                }]
+            }""".trimIndent(),
+        )
+
+        val report = inbox.reports.single()
+        assertEquals(0L, inbox.lastEventId)
+        assertEquals(0, inbox.filters.unread)
+        assertEquals("OPEN", report.revision.state)
+        assertEquals("OPEN", report.items.single().state)
+        assertEquals(false, report.unread)
+        assertTrue(report.items.single().evidence.isEmpty())
+    }
+
+    @Test
+    fun requestsProjectReportFiltersMutationsAndCanonicalThread() = runBlocking {
+        var requestCount = 0
+        val engine = MockEngine { request ->
+            requestCount += 1
+            val path = request.url.encodedPath
+            val body = request.body.toByteArray().decodeToString()
+            val content = when {
+                request.method == HttpMethod.Get -> {
+                    assertEquals("/api/projects/4/reports", path)
+                    assertEquals(setOf("action-required", "unread"), request.url.parameters.getAll("filter")?.toSet())
+                    assertEquals("OPERATOR", request.url.parameters["actor"])
+                    """{"projectId":4}"""
+                }
+                path.endsWith("/reports") -> {
+                    assertEquals(HttpMethod.Post, request.method)
+                    assertTrue(body.contains("\"clientRequestId\":\"request-1\""))
+                    assertTrue(body.contains("\"type\":\"CAPABILITY\""))
+                    """{
+                        "report":{"reportId":7,"projectId":4,"scope":{"type":"CAPABILITY","targetId":"checkout"},"title":"Checkout"},
+                        "revision":{"reportId":7,"revision":1}
+                    }""".trimIndent()
+                }
+                path.endsWith("/subscriptions") -> {
+                    assertTrue(body.contains("\"mode\":\"ALL\""))
+                    assertTrue(body.contains("\"actor\":\"OPERATOR\""))
+                    """{"subscriptionId":1,"reportId":7,"revision":1}"""
+                }
+                path.endsWith("/subscriptions/pause") -> {
+                    assertTrue(body.contains("OPERATOR"))
+                    """{"subscriptionId":2,"reportId":7,"revision":2,"state":"PAUSED"}"""
+                }
+                path.endsWith("/subscriptions/resume") -> {
+                    assertTrue(body.contains("OPERATOR"))
+                    """{"subscriptionId":3,"reportId":7,"revision":3}"""
+                }
+                path.endsWith("/read") -> {
+                    assertEquals(HttpMethod.Put, request.method)
+                    assertTrue(path.endsWith("/reports/7/revisions/2/read"))
+                    """{"reportId":7,"reportRevision":2}"""
+                }
+                path.endsWith("/threads") -> {
+                    assertTrue(body.contains("\"targetType\":\"TICKET\""))
+                    assertTrue(body.contains("\"targetId\":19"))
+                    """{"threadLinkId":1,"projectId":4,"targetType":"TICKET","targetId":19,"conversationId":31}"""
+                }
+                else -> error("Unexpected report request $path")
+            }
+            respond(
+                content = content,
+                status = if (path.endsWith("/reports") && request.method == HttpMethod.Post) HttpStatusCode.Created else HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val httpClient = HttpClient(engine) {
+            expectSuccess = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }
+        val client = DesktopNetworkClient(httpClient)
+
+        client.getProjectReports(4, setOf("unread", "action-required"), "OPERATOR")
+        client.createProjectReport(
+            4,
+            CreateProjectReportRequest(
+                "request-1",
+                ReportScopeRequest("CAPABILITY", "checkout"),
+                "Checkout",
+                listOf(ReportItemInputRequest("summary", "NOTE", "OPEN", "Checkout", "Follow checkout.")),
+            ),
+        )
+        client.subscribeToProjectReport(4, 7, "ALL", "OPERATOR")
+        client.pauseProjectReportSubscription(4, 7, "OPERATOR")
+        client.resumeProjectReportSubscription(4, 7, "OPERATOR")
+        client.markProjectReportRead(4, 7, 2, "OPERATOR")
+        val thread = client.resolveProjectThread(4, "TICKET", 19, "OPERATOR")
+
+        assertEquals(31L, thread.conversationId)
+        assertEquals(7, requestCount)
+        client.close()
+    }
+
+    @Test
+    fun decodesStagedPlanWhenDefaultAcceptedByIsOmitted() {
+        val plan = Json.decodeFromString(
+            StagedDeliveryPlanResponse.serializer(),
+            """{
+                "planId":1,
+                "revision":1,
+                "scopeId":2,
+                "scopeType":2,
+                "title":"First product experience",
+                "stages":[],
+                "acceptedAt":"2026-07-20T16:21:39Z",
+                "hash":"abc"
+            }""".trimIndent(),
+        )
+
+        assertEquals("HUMAN", plan.acceptedBy)
+    }
+
+    @Test
     fun requestsWorkItemPolicyThroughModuleAncestry() = runBlocking {
         val engine = MockEngine { request ->
             assertEquals(HttpMethod.Get, request.method)
@@ -179,6 +302,7 @@ class DesktopNetworkClientTest {
             assertTrue(body.contains("\"title\":\"Complete the first user journey\""))
             assertTrue(body.contains("\"baseRevision\":2"))
             assertTrue(body.contains("\"baseHash\":\"${"a".repeat(64)}\""))
+            assertTrue(body.contains("\"confirmedProductIntent\":\"Make repository reality understandable.\""))
             respond(
                 content = """{"status":"CREATED","outcomeId":9,"diagnostic":"First working outcome created."}""",
                 status = HttpStatusCode.Created,
@@ -196,6 +320,7 @@ class DesktopNetworkClientTest {
             "Complete the first user journey",
             2,
             "a".repeat(64),
+            "Make repository reality understandable.",
         )
 
         assertEquals("CREATED", result.status)

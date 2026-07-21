@@ -150,19 +150,24 @@ class RepositoryAnalysisService(
         val provider = assignment?.let { companyControl?.provider(it) }
             ?: runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL, run.runId)
-        val envelope = RepositoryAnalysisEnvelope(
+        fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryAnalysisEnvelope(
             profile.id,
             baseRevision,
             run,
-            context,
+            candidate,
             DISPOSITIONS,
             OUTPUT_SCHEMA,
         )
+        val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens) { candidate ->
+            "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
+        } ?: return RepositoryAnalysisTickResult(
+            RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
+            run.runId,
+            diagnostic = "The minimum repository evidence envelope exceeds the analysis model input budget.",
+        )
+        val envelope = envelopeFor(boundedContext)
         val envelopeJson = json.encodeToString(envelope)
         val prompt = "$systemPrompt\n\nAuthoritative repository analysis envelope:\n$envelopeJson"
-        if (estimateModelTokens(prompt) > profile.inputBudgetTokens) {
-            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED, run.runId)
-        }
         val binding = provider.bindingProfile()
         val admission = resourceController.tryAcquire(provider.resourceDemand(profile))
         val lease = admission.lease ?: return RepositoryAnalysisTickResult(
@@ -193,7 +198,7 @@ class RepositoryAnalysisService(
             run.runId,
             diagnostic = "The analysis model did not return valid strict JSON.",
         )
-        val invalid = validateOutput(run, context, output)
+        val invalid = validateOutput(run, boundedContext, output)
         if (invalid != null) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, run.runId, diagnostic = invalid)
         if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
             return RepositoryAnalysisTickResult(
@@ -316,4 +321,29 @@ class RepositoryAnalysisService(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
         ).bufferedReader().use { it.readText() }
     }
+}
+
+internal fun compactRepositoryContextToBudget(
+    context: CodingRepositoryContext,
+    inputBudgetTokens: Int,
+    promptFor: (CodingRepositoryContext) -> String,
+): CodingRepositoryContext? {
+    if (context.files.isEmpty()) return null
+    var lower = 1
+    var upper = context.files.size
+    var best: CodingRepositoryContext? = null
+    while (lower <= upper) {
+        val retained = (lower + upper) / 2
+        val candidate = context.copy(
+            files = context.files.take(retained),
+            omittedFileCount = context.omittedFileCount + context.files.size - retained,
+        )
+        if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
+            best = candidate
+            lower = retained + 1
+        } else {
+            upper = retained - 1
+        }
+    }
+    return best
 }

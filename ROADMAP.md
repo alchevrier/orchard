@@ -5,9 +5,9 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `4` |
+| Version | `5` |
 | Status | `ACTIVE` |
-| Updated | `2026-07-19` |
+| Updated | `2026-07-21` |
 | Delivered baseline | Milestone 10.1 |
 | Next milestone | `10.2` Durable Multi-Objective Conversational Conductor |
 | Canonical path | `ROADMAP.md` |
@@ -40,7 +40,9 @@ Use these stable states:
 
 Orchard is a local-first autonomous software company that can understand a repository, turn intent and policy into bounded delivery work, execute through evidence-producing controls, verify promoted outcomes, learn from failure, and preserve enough authority and provenance to explain every decision later.
 
-The product moat is not the number of agents. It is the closed institutional loop:
+The target product presents that company through three immediately useful surfaces: repository-first onboarding, an inbox-style interface for following and driving individual tickets, and a Jira-like project view for understanding the whole body of work. Architecture maps, UML and workflow projections, documentation and ADR conversations, correlation graphs, and generalized self-healing amplify these core surfaces after they are usable.
+
+The product moat is not the number of agents or generated artifacts. It is the closed institutional loop:
 
 ```text
 Intent and policy
@@ -52,6 +54,29 @@ Intent and policy
   -> follow-up evidence
   -> closure, remediation, or governed escalation
 ```
+
+### Immediate Product Priority
+
+Orchard must first make the existing company understandable and operable without requiring the user to reconstruct state across setup forms, chat, logs, and isolated authority panels.
+
+The priority order is:
+
+1. **Repository-first onboarding**
+  - Connect or clone the repository and open the project workspace immediately.
+  - Derive a revision-pinned baseline of the repository's apparent intent, design, implementation, techniques, tests, reports, and evidence in the background.
+  - Deliver the baseline progressively through report items instead of blocking entry behind a multi-step setup wizard.
+  - Let the user confirm or correct inferred current intent and define the first desired outcome from the project workspace. Repository evidence cannot invent future human intent.
+2. **Inbox-style project operation**
+  - Make reports and ticket updates arrive as concise, threaded messages while Orchard works.
+  - Give every report item and ticket one canonical conversation through which the user can question, correct, prioritize, pause, approve, or request follow-up work.
+  - Let users subscribe to meaningful changes for a ticket, outcome, capability, repository area, or later map selection without exposing a noisy internal event stream.
+  - Bind every update to exact authority, repository revision, evidence, and downstream work so a reply has governed consequences rather than becoming detached chat history.
+3. **Jira-like project overview**
+  - Keep the project board as the portfolio-level view of outcomes, epics, stories, tasks, bugs, dependencies, state, and blocked decisions.
+  - Make the board and inbox complementary projections of the same durable ticket authority. The board organizes all work; the inbox is where individual work is followed and driven.
+  - Preserve direct navigation between the project overview and the canonical thread for any ticket or report item.
+
+Later visual and autonomous capabilities must reuse this shared authority rather than create parallel truth. Maps explain how work and evidence connect; documents and ADRs explain why; self-healing repairs discrepancies without silently changing human intent.
 
 ## Non-Negotiable Invariants
 
@@ -108,19 +133,21 @@ Non-goals:
 
 - State: `IN_PROGRESS`
 - Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`
-- Governing ADRs: ADR 010, ADR 011, ADR 038 through ADR 044; ADR 044 must be accepted before completion.
+- Governing ADRs: ADR 010, ADR 011, ADR 038 through ADR 045; ADR 044 and ADR 045 must be accepted before completion.
 
-Goal: make one durable conversation the primary control surface for several concurrent engineering objectives, from discussion and investigation through admitted planning, coding, verification, independent audit, acceptance, and local promotion.
+Goal: deliver the first complete Orchard operating experience: repository-first entry into a project, an inbox-style interface for following and driving ticket work, and a Jira-like project overview, all backed by the durable multi-objective conductor from discussion through local promotion.
 
-Why now: Orchard already owns the individual company authorities, but its Architect chat is request-local, globally serialized, create-only, and disconnected from downstream lifecycle records. The shortest path to replacing the current coding-agent workflow is to conduct those existing authorities conversationally rather than add another isolated governance layer.
+Why now: Orchard already owns the individual company authorities and much of the durable conductor, but the user still encounters setup ceremony, conversational state, project state, and delivery evidence as separate experiences. The shortest path to immediate value is to enter the project from repository evidence, communicate meaningful progress through report and ticket threads, and retain the board as the whole-project control surface.
 
 Product contract:
 
 - One chronological conversation may contain several explicitly identified objective lanes.
-- The operator can discuss, investigate, propose, admit, start, pause, resume, reprioritize, redirect, cancel, and inspect work without leaving the conversation.
+- The operator can discuss, investigate, propose, admit, start, pause, resume, reprioritize, redirect, cancel, and inspect work from the inbox thread attached to the relevant ticket or report item.
+- The project board shows all outcomes and tickets, while the inbox exposes subscribed changes, decisions, evidence, and conversations for individual work. Both project the same durable authority.
+- Repository onboarding opens the project immediately and compiles its baseline asynchronously. Only future intent and genuine authority choices require user input.
 - Conversation records prove what was said and correlated; existing domain records remain authoritative for product, work, code, evidence, audit, policy, and promotion.
 - Model interpretation remains candidate data. Read-only discussion and inspection may run directly, while mutation requires an exact valid user admission.
-- The user experiences one long-lived chat, but every model call receives a bounded reconstruction rather than an unbounded transcript.
+- The user experiences durable report and ticket threads, but every model call receives a bounded reconstruction rather than an unbounded transcript.
 - Independent objectives may progress concurrently under resource and repository policy; commands within one objective remain ordered.
 
 Delivery slices:
@@ -147,14 +174,21 @@ Delivery slices:
   - Destination-repository serialization and ancestry revalidation for promotion even when upstream worktrees execute concurrently.
   - Safe pause, resume, redirect, and cancellation semantics that preserve completed evidence and revalidate stale repository or policy authority.
   - Monotonic activity projection from asynchronous workers into the originating objective and conversation.
-5. **Conversational desktop**
-  - One restored chronological transcript with an objective rail, focus switching, state, dependencies, priority, pending admissions, diagnostics, and correlated evidence.
-  - Inline review and admission of exact proposed actions plus links into existing detailed authority projections.
+5. **Project inbox, ticket threads, and board**
+  - An inbox-style desktop projection with unread, action-required, subscribed, blocked, and completed report updates while Orchard works asynchronously.
+  - One canonical thread per ticket or report item, with state, dependencies, priority, pending admissions, diagnostics, and correlated evidence.
+  - User-created report scopes over a ticket, outcome, capability, or repository area, with subscriptions to meaningful revision-bound changes and configurable completion or continuation behavior.
+  - A Jira-like project board for outcomes, epics, stories, tasks, bugs, dependencies, workflow state, and blocked authority, with direct navigation to each canonical thread.
+  - Inline questioning, correction, control, review, and admission of exact proposed actions plus links into detailed authority and evidence projections.
+  - Report updates are durable deltas over authoritative state, not rewritten summaries or a duplicate source of ticket truth.
   - Cursor-based refresh is sufficient initially; transport streaming is not required for correctness.
-6. **Repository and model onboarding gate**
+6. **Repository-first onboarding and model gate**
   - Accept either an absolute local Git folder or a credential-free HTTP(S) Git URL through one admitted `ONBOARD_REPOSITORY` command.
   - Clone URLs only into deterministic Orchard-managed storage with prompts, submodules, and LFS smudging disabled; never execute repository code during onboarding.
   - Create or select the project, bind the canonical repository, preserve exact command identity, and recover retries without duplicate projects or clones.
+  - Open the project workspace after binding rather than requiring architecture, repository shape, sizing, or verification authority during onboarding.
+  - Compile a revision-pinned baseline report of inferred current intent, design, code, techniques, tests, existing reports, and evidence as background work, with explicit supported, contradicted, unestablished, and stale findings.
+  - Ask the user to confirm or correct inferred current intent and define the first desired outcome from the project workspace; defer unresolved implementation details into governed design and delivery.
   - Inspect installed model endpoints and bindings, register environment-referenced local or remote providers, and assign compatible bindings independently to conversation, definition, design synthesis, repository analysis, coding, and audit profiles.
   - Treat model installation or download as explicit machine setup; onboarding registers and verifies models but does not run package managers or `ollama pull`.
 7. **Orchard-on-Orchard replacement proof**
@@ -178,6 +212,9 @@ Exit evidence:
 - One conversation can plan one objective, execute another, observe an audit, and resolve a blocked objective without context leakage.
 - Backend and desktop restart restore exact chronology, objective state, admissions, and correlated activity.
 - Local-folder and URL onboarding produce one canonical bound project after retry or restart, reject credential-bearing URLs, and execute no repository-owned code.
+- A newly bound project opens without a multi-step design wizard, produces a revision-pinned baseline report asynchronously, and lets the user define the first desired outcome from the project workspace.
+- A user can create a report scope, subscribe to it, receive a meaningful evidence-backed delta, reply from its canonical thread, and observe the admitted consequence on the same ticket and project board after restart.
+- The inbox and Jira-like board preserve one ticket identity and state; neither projection can drift from or silently overwrite the other.
 - Workload-specific model assignments survive restart, reject incompatible context/capability budgets, and persist only credential references rather than secrets.
 - The three defined Orchard-on-Orchard proof changes reach local promotion with no source edits outside Orchard worktrees and no bypass of the conductor or existing governance gates.
 - Full backend/frontend build, clean diagnostics, compatibility tests, ADR acceptance, user/developer documentation, and committed milestone.
@@ -190,6 +227,7 @@ Non-goals:
 - Remote multi-client control, cryptographic identity, quorum, signatures, or automatic Git push.
 - Voice/mobile clients, distributed agent swarms, and automatic budget increases.
 - Requiring the future symbol-aware evidence graph before the conductor can use existing revision-pinned repository analysis.
+- Full architecture, UML, workflow, ADR, documentation, and evidence-map generation. These supercharge the core project experience after repository-first onboarding, inbox threads, subscriptions, and the board are proven.
 
 Implementation evidence recorded on 2026-07-18:
 
@@ -198,7 +236,7 @@ Implementation evidence recorded on 2026-07-18:
 - Objective state and dependencies are revalidated at dispatch, and paused/dependent correlated runs are filtered and priority-ordered before production worker scheduling.
 - Conversational model provenance is structured and checksum-covered; capability descriptors expose ownership, admission, projected result, and idempotency contracts.
 - Conversation, coding-worker, company-circuit, desktop-client, compatibility, and full Gradle build validation pass with no editor diagnostics.
-- Remaining completion gate: initialize admitted Orchard-on-Orchard authority and record the three required locally promoted changes, including intervention, provider/token, elapsed-time, failure, evidence, and bypass reports. ADR 044 remains `Proposed` until this proof succeeds.
+- At that date, the remaining gate for the original conductor scope was to initialize admitted Orchard-on-Orchard authority and record the three required locally promoted changes, including intervention, provider/token, elapsed-time, failure, evidence, and bypass reports. ADR 044 remains `Proposed` until this proof succeeds.
 
 Onboarding-gate evidence recorded on 2026-07-19:
 
@@ -206,7 +244,8 @@ Onboarding-gate evidence recorded on 2026-07-19:
 - Managed cloning disables terminal prompts, submodule recursion, and LFS smudging and does not execute repository build or setup code.
 - The conductor can inspect model configuration, register validated endpoint/binding pairs, and assign compatible bindings per execution profile without persisting credential values.
 - Focused tests cover canonical local onboarding, restart idempotency, real HTTP Git cloning, embedded-credential rejection, model registration, compatible coding assignment, and incompatible-budget rejection.
-- The remaining completion gate is unchanged: run the three required Orchard-on-Orchard changes through the newly onboarded authority and record the proof report.
+- At that date, the remaining gate for the original onboarding scope was to run the three required Orchard-on-Orchard changes through the newly onboarded authority and record the proof report.
+- These records prove the technical repository and model gate only. They do not claim completion of the Version 5 direct-to-project onboarding, baseline reports, subscriptions, canonical ticket threads, inbox, or board experience.
 
 ### Milestone 10.3: Identity, Delegation, Quorum, and Signed Decisions
 
@@ -367,6 +406,43 @@ Candidate scope:
 - Track provenance from every candidate lesson to completed episodes and evidence.
 - Require explicit standards or policy-pack admission before learned guidance becomes enforceable.
 
+### Milestone 12.3: Live Correlated Product Map and Conversational Knowledge
+
+- State: `PLANNED`
+- Depends on: `11.1`, `12.1`
+
+Goal: generate live architecture, UML, workflow, documentation, ADR, ticket, and evidence projections over one revision-bound correlation model, and let the user converse from any projected object.
+
+Deliverables:
+
+- A shared artifact and derivation graph spanning intent, design authority, work, code, configuration, techniques, tests, reports, and runtime evidence.
+- Jira-like work, architecture, component, sequence, workflow, ADR-impact, and intent-to-evidence views generated as queries over shared authority rather than independent documents.
+- Stable links from every projected node and relationship to repository evidence, authority revisions, tickets, reports, and canonical conversation threads.
+- User-created report scopes from selected map paths with subscriptions that emit meaningful revision-bound deltas into the project inbox.
+- Conversational successor proposals for documentation and ADRs with explicit impact analysis and admission before authority changes.
+- Deterministic invalidation of affected projections and evidence after an admitted intent, ADR, design, code, test, or repository revision changes.
+
+Exit evidence:
+
+- One admitted ADR revision identifies affected design, tickets, code, tests, reports, and map relationships without rewriting prior history.
+- One report subscription follows a selected end-to-end capability path and emits only relevant changes when its evidence or integration state changes.
+- Board, inbox, document, architecture, and evidence projections resolve to the same underlying authority IDs and repository revisions after restart.
+
+### Milestone 12.4: Generalized Correlation Repair and Self-Healing
+
+- State: `CANDIDATE`
+- Depends on: `9.9`, `12.3`
+
+Goal: detect and repair missing, stale, contradictory, or disconnected derivation relationships across the product while preserving human intent and admission boundaries.
+
+Candidate scope:
+
+- Classify missing artifacts, missing derivations, inadequate coverage, contradictions, disconnected implementations, stale evidence, and unproven reports.
+- Find the earliest invalid point in a derivation chain, invalidate dependent projections, and select the narrowest governed repair technique.
+- Re-run downstream implementation, verification, audit, reporting, and map compilation after repair.
+- Escalate only when a repair would change human intent, policy, architecture authority, or another explicitly protected decision.
+- Publish repair progress and evidence through the affected ticket threads and report subscriptions.
+
 ## Operational Scale Arc
 
 ### Milestone 13.0: Storage Lifecycle and Workspace Capacity
@@ -475,6 +551,7 @@ Update this file in the same change that alters roadmap intent.
 
 | Date | Version | Change |
 | --- | --- | --- |
+| 2026-07-21 | 5 | Reprioritized Milestone 10.2 around repository-first onboarding, an inbox-style report and ticket interface, and the Jira-like project overview; sequenced live visual correlation, conversational ADRs and documentation, and generalized self-healing as later product multipliers. |
 | 2026-07-19 | 4 | Expanded Milestone 13.2 from remote Architect access into a self-hosted organizational control plane with authenticated multi-client use, organization-managed runners, source custody, recovery, and authority export. |
 | 2026-07-18 | 3 | Prioritized a durable multi-objective conversational conductor as Milestone 10.2 and moved identity and later policy work behind the workflow-replacement proof. |
 | 2026-07-18 | 2 | Completed scoped standards overlays and exception authority; selected identity, delegation, quorum, and signed decisions as Milestone 10.2. |

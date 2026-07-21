@@ -14,6 +14,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.Serializable
@@ -173,15 +174,98 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
         error("The Architect proposal failed with HTTP ${response.status.value}.")
     }
 
+    suspend fun getLatestRepositoryAssessment(projectId: Int): RepositoryObjectiveAssessmentResponse? {
+        val response = client.get("http://127.0.0.1:8085/api/projects/$projectId/genesis/repository-assessment")
+        if (response.status == HttpStatusCode.NotFound) return null
+        if (response.status.isSuccess()) return response.body()
+        error("Loading the repository assessment failed with HTTP ${response.status.value}.")
+    }
+
+    suspend fun getProjectReports(
+        projectId: Int,
+        filters: Set<String> = emptySet(),
+        actor: String = "HUMAN",
+    ): ProjectReportInboxResponse = client.get("http://127.0.0.1:8085/api/projects/$projectId/reports") {
+        parameter("actor", actor)
+        filters.sorted().forEach { parameter("filter", it) }
+    }.successBody()
+
+    suspend fun createProjectReport(
+        projectId: Int,
+        request: CreateProjectReportRequest,
+    ): ReportPublicationResponse = client.post("http://127.0.0.1:8085/api/projects/$projectId/reports") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(request)
+    }.successBody()
+
+    suspend fun subscribeToProjectReport(
+        projectId: Int,
+        reportId: Long,
+        mode: String,
+        actor: String = "HUMAN",
+    ): ReportSubscriptionResponse = client.post(
+        "http://127.0.0.1:8085/api/projects/$projectId/reports/$reportId/subscriptions"
+    ) {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(ReportSubscriptionRequest(mode, actor))
+    }.successBody()
+
+    suspend fun pauseProjectReportSubscription(
+        projectId: Int,
+        reportId: Long,
+        actor: String = "HUMAN",
+    ): ReportSubscriptionResponse = reportActorPost(projectId, reportId, "subscriptions/pause", actor)
+
+    suspend fun resumeProjectReportSubscription(
+        projectId: Int,
+        reportId: Long,
+        actor: String = "HUMAN",
+    ): ReportSubscriptionResponse = reportActorPost(projectId, reportId, "subscriptions/resume", actor)
+
+    suspend fun markProjectReportRead(
+        projectId: Int,
+        reportId: Long,
+        revision: Int,
+        actor: String = "HUMAN",
+    ): ReportReadResponse = client.put(
+        "http://127.0.0.1:8085/api/projects/$projectId/reports/$reportId/revisions/$revision/read"
+    ) {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(ReportActorRequest(actor))
+    }.successBody()
+
+    suspend fun resolveProjectThread(
+        projectId: Int,
+        targetType: String,
+        targetId: Long,
+        actor: String = "HUMAN",
+    ): ReportThreadLinkResponse = client.post("http://127.0.0.1:8085/api/projects/$projectId/reports/threads") {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(ReportThreadRequest(targetType, targetId, actor))
+    }.successBody()
+
+    private suspend fun reportActorPost(
+        projectId: Int,
+        reportId: Long,
+        action: String,
+        actor: String,
+    ): ReportSubscriptionResponse = client.post(
+        "http://127.0.0.1:8085/api/projects/$projectId/reports/$reportId/$action"
+    ) {
+        headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+        setBody(ReportActorRequest(actor))
+    }.successBody()
+
     suspend fun createProjectGenesisFirstOutcome(
         projectId: Int,
         title: String,
         baseRevision: Int,
         baseHash: String?,
+        confirmedProductIntent: String? = null,
     ): ProjectGenesisFirstOutcomeResponse {
         val response = client.post("http://127.0.0.1:8085/api/projects/$projectId/genesis/first-outcome") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
-            setBody(ProjectGenesisFirstOutcomeRequest(title, baseRevision, baseHash))
+            setBody(ProjectGenesisFirstOutcomeRequest(title, baseRevision, baseHash, confirmedProductIntent))
         }
         val result = runCatching { response.body<ProjectGenesisFirstOutcomeResponse>() }.getOrNull()
         if (response.status.isSuccess() && result != null) return result
@@ -1171,6 +1255,7 @@ private data class ProjectGenesisFirstOutcomeRequest(
     val title: String,
     val baseRevision: Int,
     val baseHash: String? = null,
+    val confirmedProductIntent: String? = null,
 )
 
 @Serializable
@@ -1192,6 +1277,7 @@ data class GenesisProposalResponse(
     val repositoryRevision: String? = null,
     val repositoryEvidence: List<GenesisRepositoryEvidenceResponse> = emptyList(),
     val omittedRepositoryFileCount: Int = 0,
+    val repositoryAssessment: RepositoryObjectiveAssessmentResponse? = null,
     val model: String,
 )
 
@@ -1199,6 +1285,190 @@ data class GenesisProposalResponse(
 data class GenesisRepositoryEvidenceResponse(
     val path: String,
     val contentHash: String,
+)
+
+@Serializable
+data class RepositoryObjectiveAssessmentResponse(
+    val assessmentId: Long,
+    val objective: String,
+    val repositoryRevision: String,
+    val claims: List<RepositoryCapabilityClaimResponse>,
+    val unresolvedQuestions: List<String> = emptyList(),
+)
+
+@Serializable
+data class RepositoryCapabilityClaimResponse(
+    val claimId: String,
+    val statement: String,
+    val status: String,
+    val support: List<RepositoryClaimEvidenceResponse> = emptyList(),
+    val defeaters: List<RepositoryClaimEvidenceResponse> = emptyList(),
+)
+
+@Serializable
+data class RepositoryClaimEvidenceResponse(
+    val path: String,
+    val contentHash: String,
+    val observation: String,
+)
+
+@Serializable
+data class ReportScopeRequest(
+    val type: String,
+    val targetId: String,
+)
+
+@Serializable
+data class ReportEvidenceReferenceResponse(
+    val type: String,
+    val identity: String,
+    val revision: String = "",
+    val hash: String = "",
+    val description: String = "",
+)
+
+@Serializable
+data class ReportItemInputRequest(
+    val itemKey: String,
+    val kind: String,
+    val state: String,
+    val title: String,
+    val summary: String,
+    val actionRequired: Boolean = false,
+    val evidence: List<ReportEvidenceReferenceResponse> = emptyList(),
+)
+
+@Serializable
+data class CreateProjectReportRequest(
+    val clientRequestId: String,
+    val scope: ReportScopeRequest,
+    val title: String,
+    val items: List<ReportItemInputRequest>,
+    val actor: String = "HUMAN",
+)
+
+@Serializable
+data class ReportSubscriptionRequest(
+    val mode: String,
+    val actor: String = "HUMAN",
+)
+
+@Serializable
+data class ReportActorRequest(val actor: String = "HUMAN")
+
+@Serializable
+data class ReportThreadRequest(
+    val targetType: String,
+    val targetId: Long,
+    val actor: String = "HUMAN",
+)
+
+@Serializable
+data class ProjectReportResponse(
+    val reportId: Long,
+    val projectId: Int,
+    val key: String = "",
+    val scope: ReportScopeRequest,
+    val title: String,
+    val createdAt: String = "",
+)
+
+@Serializable
+data class ReportRevisionResponse(
+    val reportId: Long,
+    val revision: Int,
+    val sourceType: String = "",
+    val sourceIdentity: String = "",
+    val sourceRevision: String = "",
+    val sourceHash: String = "",
+    val repositoryRevision: String = "",
+    val genesisRevision: Int? = null,
+    val state: String = "OPEN",
+    val createdAt: String = "",
+    val contentHash: String = "",
+)
+
+@Serializable
+data class ReportItemResponse(
+    val reportId: Long,
+    val reportRevision: Int,
+    val itemKey: String,
+    val kind: String = "",
+    val state: String = "OPEN",
+    val title: String,
+    val summary: String = "",
+    val actionRequired: Boolean = false,
+    val evidence: List<ReportEvidenceReferenceResponse> = emptyList(),
+)
+
+@Serializable
+data class ReportSubscriptionResponse(
+    val subscriptionId: Long,
+    val reportId: Long,
+    val revision: Int,
+    val previousRevision: Int? = null,
+    val mode: String = "IMPORTANT",
+    val state: String = "ACTIVE",
+    val actor: String = "HUMAN",
+    val createdAt: String = "",
+    val hash: String = "",
+)
+
+@Serializable
+data class ReportReadResponse(
+    val reportId: Long,
+    val reportRevision: Int,
+    val actor: String = "HUMAN",
+    val readAt: String = "",
+)
+
+@Serializable
+data class ReportThreadLinkResponse(
+    val threadLinkId: Long,
+    val projectId: Int,
+    val targetType: String,
+    val targetId: Long,
+    val conversationId: Long,
+    val createdAt: String = "",
+)
+
+@Serializable
+data class ReportRevisionProjectionResponse(
+    val report: ProjectReportResponse,
+    val revision: ReportRevisionResponse,
+    val items: List<ReportItemResponse> = emptyList(),
+    val subscription: ReportSubscriptionResponse? = null,
+    val thread: ReportThreadLinkResponse? = null,
+    val unread: Boolean = false,
+    val actionRequired: Boolean = false,
+    val subscribed: Boolean = false,
+    val blocked: Boolean = false,
+    val completed: Boolean = false,
+)
+
+@Serializable
+data class ProjectReportFilterDataResponse(
+    val total: Int = 0,
+    val unread: Int = 0,
+    val actionRequired: Int = 0,
+    val subscribed: Int = 0,
+    val blocked: Int = 0,
+    val completed: Int = 0,
+)
+
+@Serializable
+data class ProjectReportInboxResponse(
+    val projectId: Int,
+    val reports: List<ReportRevisionProjectionResponse> = emptyList(),
+    val filters: ProjectReportFilterDataResponse = ProjectReportFilterDataResponse(),
+    val lastEventId: Long = 0,
+)
+
+@Serializable
+data class ReportPublicationResponse(
+    val report: ProjectReportResponse,
+    val revision: ReportRevisionResponse,
+    val items: List<ReportItemResponse> = emptyList(),
 )
 
 @Serializable
@@ -1374,7 +1644,7 @@ data class StagedDeliveryPlanResponse(
     val scopeType: Int,
     val title: String,
     val stages: List<StagedPlanStageResponse>,
-    val acceptedBy: String,
+    val acceptedBy: String = "HUMAN",
     val acceptedAt: String,
     val hash: String,
     val sourceProposal: CircuitProposalReferenceRequest? = null,
@@ -1743,6 +2013,7 @@ data class EvidenceRecordResponse(
 
 @Serializable
 data class ContextManifestResponse(
+    val projectId: Int = 0,
     val workItemId: Int,
     val repository: RepositoryHeadResponse,
     val recalledEpisodes: List<EpisodeRecallResponse> = emptyList(),

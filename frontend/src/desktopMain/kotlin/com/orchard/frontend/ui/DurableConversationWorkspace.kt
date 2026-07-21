@@ -51,6 +51,7 @@ import androidx.compose.material.TextField
 import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -78,6 +79,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.ControlConversationObjectiveRequest
+import com.orchard.frontend.network.CompanyWorkspaceResponse
 import com.orchard.frontend.network.ConversationActivityResponse
 import com.orchard.frontend.network.ConversationCommandViewResponse
 import com.orchard.frontend.network.ConversationListItemResponse
@@ -90,6 +92,7 @@ import com.orchard.frontend.network.EngineeringStandardsViewResponse
 import com.orchard.frontend.network.GenesisProposalFailureException
 import com.orchard.frontend.network.GenesisProposalResponse
 import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
+import com.orchard.frontend.network.RepositoryObjectiveAssessmentResponse
 import com.orchard.frontend.network.SubmitConversationMessageRequest
 import com.orchard.frontend.network.WorkspaceSnapshotResponse
 import java.util.UUID
@@ -113,10 +116,15 @@ private val ConductorRed = Color(0xFFB64A45)
 @Composable
 internal fun DurableConversationWorkspace(
     networkClient: DesktopNetworkClient,
+    initialConversationId: Long? = null,
+    projectId: Int? = null,
+    onOpenInbox: (Int) -> Unit = {},
+    onOpenProject: (Int?) -> Unit = {},
+    onProjectOnboarded: (Int) -> Unit = {},
 ) {
     var conversations by remember { mutableStateOf(emptyList<ConversationListItemResponse>()) }
     var projection by remember { mutableStateOf<ConversationProjectionResponse?>(null) }
-    var selectedConversationId by remember { mutableStateOf<Long?>(null) }
+    var selectedConversationId by remember(initialConversationId) { mutableStateOf(initialConversationId) }
     var selectedObjectiveId by remember { mutableStateOf<Long?>(null) }
     var prompt by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
@@ -126,9 +134,11 @@ internal fun DurableConversationWorkspace(
     var showOnboardRepository by remember { mutableStateOf(false) }
     var projectSetup by remember { mutableStateOf<ConductorProjectSetupState?>(null) }
     var genesisProposal by remember { mutableStateOf<GenesisProposalResponse?>(null) }
+    var repositoryAssessment by remember { mutableStateOf<RepositoryObjectiveAssessmentResponse?>(null) }
     var genesisProposalFeedback by remember { mutableStateOf<String?>(null) }
     var isSetupSubmitting by remember { mutableStateOf(false) }
     var setupError by remember { mutableStateOf<String?>(null) }
+    var deliveryGuidance by remember { mutableStateOf<DeliveryGuidance?>(null) }
     val scope = rememberCoroutineScope()
 
     suspend fun loadConversations(createWhenEmpty: Boolean = false) {
@@ -138,8 +148,12 @@ internal fun DurableConversationWorkspace(
             projection = created.projection
             selectedConversationId = created.projection?.conversation?.conversationId
             conversations = networkClient.getConversations()
-        } else if (selectedConversationId == null || conversations.none { it.conversation.conversationId == selectedConversationId }) {
-            selectedConversationId = conversations.lastOrNull()?.conversation?.conversationId
+        } else {
+            selectedConversationId = focusedConversationId(
+                initialConversationId,
+                selectedConversationId,
+                conversations.map { it.conversation.conversationId },
+            )
         }
     }
 
@@ -157,11 +171,19 @@ internal fun DurableConversationWorkspace(
         val workspace = networkClient.getWorkspace()
         val standards = networkClient.getEngineeringStandards(projectId)
         projectSetup = conductorProjectSetupState(projectId, workspace, standards)
+        repositoryAssessment = networkClient.getLatestRepositoryAssessment(projectId)
     }
 
     LaunchedEffect(Unit) {
         runCatching { loadConversations(createWhenEmpty = true) }
             .onFailure { error = it.message ?: "Unable to load conversations." }
+    }
+    LaunchedEffect(initialConversationId) {
+        if (initialConversationId != null && selectedConversationId != initialConversationId) {
+            selectedConversationId = initialConversationId
+            selectedObjectiveId = null
+            projection = null
+        }
     }
     LaunchedEffect(selectedConversationId) {
         if (selectedConversationId == null) return@LaunchedEffect
@@ -171,11 +193,17 @@ internal fun DurableConversationWorkspace(
             delay(1_500)
         }
     }
-    val setupProjectId = projection?.let { latestOnboardedProjectId(it.commands, it.activities) }
+    val onboardedProjectId = projection?.let { latestOnboardedProjectId(it.commands, it.activities) }
+    LaunchedEffect(onboardedProjectId) {
+        onboardedProjectId?.let(onProjectOnboarded)
+    }
+    val setupProjectId: Int? = null
     LaunchedEffect(setupProjectId) {
         if (setupProjectId == null) {
             projectSetup = null
             genesisProposal = null
+            repositoryAssessment = null
+            deliveryGuidance = null
         } else {
             runCatching { refreshProjectSetup(setupProjectId) }
                 .onFailure { setupError = it.message ?: "Unable to load project setup." }
@@ -184,6 +212,15 @@ internal fun DurableConversationWorkspace(
     LaunchedEffect(projectSetup?.genesis?.phase, projectSetup?.genesis?.revision?.hash) {
         genesisProposal = null
         genesisProposalFeedback = null
+    }
+    LaunchedEffect(setupProjectId, projectSetup?.genesis?.phase) {
+        val projectId = setupProjectId ?: return@LaunchedEffect
+        if (projectSetup?.genesis?.phase != "READY") return@LaunchedEffect
+        while (true) {
+            runCatching { networkClient.getCompanyState() }
+                .onSuccess { deliveryGuidance = companyDeliveryGuidance(it, projectId) }
+            delay(1_500)
+        }
     }
 
     fun submitMessage(message: String) {
@@ -238,11 +275,9 @@ internal fun DurableConversationWorkspace(
             runCatching { networkClient.proposeProjectGenesis(current.projectId, content) }
                 .onSuccess { genesisProposal = it }
                 .onFailure { failure ->
-                    if ((failure as? GenesisProposalFailureException)?.canRefinePrompt == true) {
-                        genesisProposalFeedback = failure.message ?: "The description needs more detail."
-                    } else {
-                        setupError = failure.message ?: "The Architect could not form a proposal."
-                    }
+                    val diagnostic = failure.message ?: "The Architect could not form a proposal."
+                    genesisProposalFeedback = diagnostic
+                    if ((failure as? GenesisProposalFailureException)?.canRefinePrompt != true) setupError = diagnostic
                 }
             isSetupSubmitting = false
         }
@@ -256,7 +291,6 @@ internal fun DurableConversationWorkspace(
         setupError = null
         genesisProposalFeedback = null
         scope.launch {
-            var outcomeCreated = false
             runCatching {
                 networkClient.createProjectGenesisFirstOutcome(
                     current.projectId,
@@ -264,19 +298,29 @@ internal fun DurableConversationWorkspace(
                     revision.revision,
                     revision.hash,
                 )
-                outcomeCreated = true
                 refreshProjectSetup(current.projectId)
-                networkClient.proposeProjectGenesis(current.projectId, title)
-            }.onSuccess { genesisProposal = it }
+                genesisProposal = null
+            }.onFailure { failure ->
+                setupError = failure.message ?: "The first working outcome could not be recorded."
+            }
+            isSetupSubmitting = false
+        }
+    }
+
+    fun startDelivery() {
+        val current = projectSetup ?: return
+        if (isSetupSubmitting) return
+        isSetupSubmitting = true
+        setupError = null
+        deliveryGuidance = null
+        scope.launch {
+            runCatching { networkClient.startCompany(current.projectId) }
+                .onSuccess { response ->
+                    deliveryGuidance = companyDeliveryGuidance(response, current.projectId)
+                    refreshProjectSetup(current.projectId)
+                }
                 .onFailure { failure ->
-                    if (outcomeCreated && (failure as? GenesisProposalFailureException)?.canRefinePrompt == true) {
-                        genesisProposalFeedback = "The first working outcome was recorded. ${failure.message.orEmpty()}"
-                    } else setupError = if (outcomeCreated) {
-                        "The first working outcome was recorded, but the Architect could not form the technical plan. " +
-                            (failure.message ?: "Edit the prompt and choose Form proposal to retry.")
-                    } else {
-                        failure.message ?: "The first working outcome could not be created."
-                    }
+                    setupError = failure.message ?: "Governed delivery could not be started."
                 }
             isSetupSubmitting = false
         }
@@ -309,10 +353,17 @@ internal fun DurableConversationWorkspace(
             onSelect = { selectedConversationId = it; projection = null; selectedObjectiveId = null },
             onCreate = { showNewConversation = true },
             onOnboardRepository = { showOnboardRepository = true },
+            projectId = projectId,
+            onOpenInbox = onOpenInbox,
+            onOpenProject = onOpenProject,
             onRefresh = {
                 if (!isRefreshing) scope.launch {
                     isRefreshing = true
-                    runCatching { loadConversations(); refresh() }
+                    runCatching {
+                        loadConversations()
+                        refresh()
+                        setupProjectId?.let { refreshProjectSetup(it) }
+                    }
                         .onFailure { error = it.message ?: "Unable to refresh the conversation." }
                     isRefreshing = false
                 }
@@ -329,6 +380,7 @@ internal fun DurableConversationWorkspace(
                     else Text(error.orEmpty(), color = ConductorRed, fontSize = 13.sp)
                 }
             } else {
+                val showAuthority = shouldShowAuthorityRail(current.commands, selectedObjectiveId)
                 Row(Modifier.fillMaxSize()) {
                     ObjectiveRail(
                         width = objectiveRailWidth,
@@ -352,6 +404,7 @@ internal fun DurableConversationWorkspace(
                         onSuggestedAction = ::submitMessage,
                         projectSetup = projectSetup,
                         genesisProposal = genesisProposal,
+                        repositoryAssessment = repositoryAssessment,
                         genesisProposalFeedback = genesisProposalFeedback,
                         isSetupSubmitting = isSetupSubmitting,
                         setupError = setupError,
@@ -381,35 +434,39 @@ internal fun DurableConversationWorkspace(
                             runSetupMutation { setup -> networkClient.admitProjectGenesis(setup.projectId) }
                         },
                         onCreateFirstOutcome = ::createFirstOutcome,
+                        deliveryGuidance = deliveryGuidance,
+                        onStartDelivery = ::startDelivery,
                     )
-                    Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
-                    AuthorityRail(
-                        width = authorityRailWidth,
-                        commands = current.commands,
-                        activities = current.activities,
-                        selectedObjectiveId = selectedObjectiveId,
-                        onAdmit = { command ->
-                            scope.launch {
-                                runCatching {
-                                    val response = networkClient.admitConversationCommand(command.proposal.commandId, command.proposal.hash)
-                                    val updated = response.projection ?: projection
-                                    projection = updated
-                                    if (response.diagnostic.isNotBlank()) error = response.diagnostic
-                                    updated?.let { latestOnboardedProjectId(it.commands, it.activities) }
-                                        ?.let { refreshProjectSetup(it) }
-                                }.onFailure { error = it.message ?: "Command admission failed." }
-                            }
-                        },
-                        onReject = { command ->
-                            scope.launch {
-                                runCatching {
-                                    val response = networkClient.rejectConversationCommand(command.proposal.commandId, command.proposal.hash)
-                                    projection = response.projection ?: projection
-                                    if (response.diagnostic.isNotBlank()) error = response.diagnostic
-                                }.onFailure { error = it.message ?: "Command rejection failed." }
-                            }
-                        },
-                    )
+                    if (showAuthority) {
+                        Divider(Modifier.fillMaxHeight().width(1.dp), color = ConductorLine)
+                        AuthorityRail(
+                            width = authorityRailWidth,
+                            commands = current.commands,
+                            activities = current.activities,
+                            selectedObjectiveId = selectedObjectiveId,
+                            onAdmit = { command ->
+                                scope.launch {
+                                    runCatching {
+                                        val response = networkClient.admitConversationCommand(command.proposal.commandId, command.proposal.hash)
+                                        val updated = response.projection ?: projection
+                                        projection = updated
+                                        if (response.diagnostic.isNotBlank()) error = response.diagnostic
+                                        updated?.let { latestOnboardedProjectId(it.commands, it.activities) }
+                                            ?.let { refreshProjectSetup(it) }
+                                    }.onFailure { error = it.message ?: "Command admission failed." }
+                                }
+                            },
+                            onReject = { command ->
+                                scope.launch {
+                                    runCatching {
+                                        val response = networkClient.rejectConversationCommand(command.proposal.commandId, command.proposal.hash)
+                                        projection = response.projection ?: projection
+                                        if (response.diagnostic.isNotBlank()) error = response.diagnostic
+                                    }.onFailure { error = it.message ?: "Command rejection failed." }
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -453,6 +510,9 @@ private fun ConductorHeader(
     onSelect: (Long) -> Unit,
     onCreate: () -> Unit,
     onOnboardRepository: () -> Unit,
+    projectId: Int?,
+    onOpenInbox: (Int) -> Unit,
+    onOpenProject: (Int?) -> Unit,
     onRefresh: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -538,6 +598,18 @@ private fun ConductorHeader(
             }
         }
         Spacer(Modifier.weight(1f))
+        if (projectId != null) {
+            TextButton(onClick = { onOpenInbox(projectId) }, modifier = Modifier.height(36.dp)) {
+                Text("Inbox", color = ConductorInk, fontSize = 12.sp)
+            }
+            Spacer(Modifier.width(4.dp))
+        }
+        TextButton(onClick = { onOpenProject(projectId) }, modifier = Modifier.height(36.dp)) {
+            Icon(Icons.AutoMirrored.Filled.ViewList, null, Modifier.size(16.dp), tint = ConductorInk)
+            Spacer(Modifier.width(6.dp))
+            Text("Project", color = ConductorInk, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(4.dp))
         TextButton(onClick = onOnboardRepository, modifier = Modifier.height(36.dp)) {
             Icon(Icons.Default.FolderOpen, null, Modifier.size(16.dp), tint = ConductorGreen)
             Spacer(Modifier.width(6.dp))
@@ -742,6 +814,7 @@ private fun Transcript(
     onSuggestedAction: (String) -> Unit,
     projectSetup: ConductorProjectSetupState?,
     genesisProposal: GenesisProposalResponse?,
+    repositoryAssessment: RepositoryObjectiveAssessmentResponse?,
     genesisProposalFeedback: String?,
     isSetupSubmitting: Boolean,
     setupError: String?,
@@ -751,6 +824,8 @@ private fun Transcript(
     onApplyGenesisProposal: () -> Unit,
     onAdmitGenesis: () -> Unit,
     onCreateFirstOutcome: (String) -> Unit,
+    deliveryGuidance: DeliveryGuidance?,
+    onStartDelivery: () -> Unit,
 ) {
     val transcriptScroll = rememberScrollState()
     val setupStep = projectSetup?.let(::conductorSetupStep)
@@ -784,6 +859,7 @@ private fun Transcript(
                 ConductorProjectSetupCard(
                     state = setup,
                     proposal = genesisProposal,
+                    repositoryAssessment = repositoryAssessment,
                     proposalFeedback = genesisProposalFeedback,
                     isSubmitting = isSubmitting || isSetupSubmitting,
                     error = setupError,
@@ -793,6 +869,9 @@ private fun Transcript(
                     onApplyProposal = onApplyGenesisProposal,
                     onAdmit = onAdmitGenesis,
                     onCreateFirstOutcome = onCreateFirstOutcome,
+                    onSuggestedAction = onSuggestedAction,
+                    deliveryGuidance = deliveryGuidance,
+                    onStartDelivery = onStartDelivery,
                 )
             }
         }
@@ -1037,6 +1116,51 @@ internal fun latestOnboardedProjectId(
 ): Int? = latestOnboardedProjectId(commands)
     ?: activities.asReversed().firstOrNull { it.authorityType == "REPOSITORY_ONBOARDING" }
         ?.authorityId?.toIntOrNull()
+
+internal fun focusedConversationId(
+    requestedConversationId: Long?,
+    currentConversationId: Long?,
+    availableConversationIds: List<Long>,
+): Long? = requestedConversationId
+    ?: currentConversationId?.takeIf { it in availableConversationIds }
+    ?: availableConversationIds.lastOrNull()
+
+internal fun shouldShowAuthorityRail(
+    commands: List<ConversationCommandViewResponse>,
+    selectedObjectiveId: Long?,
+): Boolean = commands.any { command ->
+    (selectedObjectiveId == null || command.proposal.objectiveId == selectedObjectiveId) &&
+        command.proposal.mutation && command.admission == null &&
+        command.executions.lastOrNull()?.state != "REJECTED"
+}
+
+internal fun companyDeliveryGuidance(response: CompanyWorkspaceResponse, projectId: Int): DeliveryGuidance? {
+    val company = response.companyProjects.singleOrNull { it.projectId == projectId } ?: return null
+    company.requiredDecision?.takeIf(String::isNotBlank)?.let { decision ->
+        return DeliveryGuidance("Orchard is waiting for this decision: $decision", actionRequired = true)
+    }
+    val run = response.workspace.workflowRuns.lastOrNull { it.context.projectId == projectId }
+    val hasExecutionPlan = run?.let { candidate -> response.executionPlans.any { it.runId == candidate.runId } } == true
+    val message = when (run?.state) {
+        "CONTEXT_READY" -> if (hasExecutionPlan) {
+            "The repository plan is ready and the local coding worker is implementing the first outcome. No action is needed. Keep Orchard running; you can leave this screen and return later. This status updates automatically."
+        } else {
+            "Orchard is analyzing repository evidence before coding the first outcome. No action is needed. Keep Orchard running; you can leave this screen and return later. This status updates automatically."
+        }
+        "EVIDENCE_PENDING" ->
+            "A candidate has been produced and Orchard is verifying and auditing it. No action is needed unless a decision appears here."
+        "EVIDENCE_BLOCKED" ->
+            "The current candidate did not satisfy its evidence gates. Orchard is preparing a governed repair; no action is needed unless a decision appears here."
+        "DONE" -> "The first delivery run passed its evidence gates. Orchard will show any promotion decision here."
+        "CANCELLED" -> return DeliveryGuidance("The delivery run was cancelled. Start a new outcome when you are ready.", actionRequired = true)
+        else -> when (company.phase) {
+            "DELIVERY_PLANNING", "STAFFING" ->
+                "Orchard is forming the first governed delivery run. No action is needed; this status updates automatically."
+            else -> "Orchard is advancing delivery automatically. No action is needed unless a decision appears here."
+        }
+    }
+    return DeliveryGuidance(message)
+}
 
 internal fun conductorProjectSetupState(
     projectId: Int,

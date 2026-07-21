@@ -41,6 +41,7 @@ import androidx.compose.material.TextButton
 import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
@@ -127,13 +128,54 @@ private const val BUG = "BUG"
 @Composable
 fun App() {
     val networkClient = remember { DesktopNetworkClient() }
+    val binder = remember(networkClient) { OrchardCircuitBinder(networkClient) }
+    var destination by remember { mutableStateOf(AppDestination(AppSurface.CONVERSATION)) }
     DisposableEffect(networkClient) {
         onDispose { networkClient.close() }
     }
     OrchardTheme {
-        DurableConversationWorkspace(networkClient)
+        when (destination.surface) {
+            AppSurface.INBOX -> ProjectInboxWorkspace(
+                networkClient = networkClient,
+                projectId = requireNotNull(destination.projectId),
+                onOpenProject = { destination = AppDestination(AppSurface.PROJECT, it) },
+                onOpenThread = { conversationId, projectId ->
+                    destination = AppDestination(AppSurface.CONVERSATION, projectId, conversationId)
+                },
+            )
+            AppSurface.PROJECT -> binder.renderProject(
+                initialProjectId = destination.projectId,
+                onOpenInbox = { destination = AppDestination(AppSurface.INBOX, it) },
+                onOpenThread = { conversationId, projectId ->
+                    destination = AppDestination(AppSurface.CONVERSATION, projectId, conversationId)
+                },
+                onOpenConversation = { destination = AppDestination(AppSurface.CONVERSATION, it) },
+            )
+            AppSurface.CONVERSATION -> DurableConversationWorkspace(
+                networkClient = networkClient,
+                initialConversationId = destination.conversationId,
+                projectId = destination.projectId,
+                onOpenInbox = { destination = AppDestination(AppSurface.INBOX, it) },
+                onOpenProject = { destination = AppDestination(AppSurface.PROJECT, it) },
+                onProjectOnboarded = { destination = onboardingProjectDestination(it) },
+            )
+        }
     }
 }
+
+internal enum class AppSurface { CONVERSATION, INBOX, PROJECT }
+
+internal data class AppDestination(
+    val surface: AppSurface,
+    val projectId: Int? = null,
+    val conversationId: Long? = null,
+)
+
+internal fun onboardingProjectDestination(projectId: Int): AppDestination =
+    AppDestination(AppSurface.INBOX, projectId)
+
+internal const val WORKSPACE_CONVERSATION = "CONVERSATION"
+internal const val WORKSPACE_PROJECT = "PROJECT"
 
 private data class WorkspaceEntity(
     val id: Int,
@@ -448,7 +490,22 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
     }
 
     @Composable
-    private fun renderLegacyWorkspace() {
+    fun renderProject(
+        initialProjectId: Int? = null,
+        onOpenInbox: (Int) -> Unit = {},
+        onOpenThread: (Long, Int) -> Unit = { _, _ -> },
+        onOpenConversation: (Int?) -> Unit = {},
+    ) {
+        renderLegacyWorkspace(initialProjectId, onOpenInbox, onOpenThread, onOpenConversation)
+    }
+
+    @Composable
+    private fun renderLegacyWorkspace(
+        initialProjectId: Int?,
+        onOpenInbox: (Int) -> Unit,
+        onOpenThread: (Long, Int) -> Unit,
+        onOpenConversation: (Int?) -> Unit,
+    ) {
         var prompt by remember { mutableStateOf("") }
         var isSubmitting by remember { mutableStateOf(false) }
         var isBindingRepository by remember { mutableStateOf(false) }
@@ -470,7 +527,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         var isSavingModelProvider by remember { mutableStateOf(false) }
         var isInspectingModelProvider by remember { mutableStateOf(false) }
         var isApplyingModelPreset by remember { mutableStateOf(false) }
-        var selectedProjectId by remember { mutableStateOf(0) }
+        var selectedProjectId by remember(initialProjectId) { mutableStateOf(initialProjectId ?: 0) }
         var selectedEpicId by remember { mutableStateOf(0) }
         var planningScopeId by remember { mutableStateOf(0) }
         var isSavingStagedPlan by remember { mutableStateOf(false) }
@@ -524,10 +581,19 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         }
 
         OrchardTheme {
-            Row(modifier = Modifier.fillMaxSize().background(OrchardColors.canvas)) {
+            Column(modifier = Modifier.fillMaxSize().background(OrchardColors.canvas)) {
+                ProjectWorkspaceNavigation(
+                    projectTitle = projects.firstOrNull { it.id == activeProjectId }?.title ?: "Workspace",
+                    selected = "PROJECT",
+                    onInbox = { if (activeProjectId > 0) onOpenInbox(activeProjectId) },
+                    onProject = {},
+                )
+                Divider(color = OrchardColors.divider)
+                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 ProjectSidebar(
                     projects = projects,
                     selectedProjectId = activeProjectId,
+                    onOpenConversation = { onOpenConversation(activeProjectId.takeIf { it > 0 }) },
                     onSelect = {
                         selectedProjectId = it
                         selectedEpicId = 0
@@ -626,6 +692,15 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                         }
                     },
                     onPlanScope = { planningScopeId = it },
+                    onOpenTicketThread = { ticketId ->
+                        if (activeProjectId > 0) scope.launch {
+                            runCatching {
+                                networkClient.resolveProjectThread(activeProjectId, "TICKET", ticketId.toLong())
+                            }.onSuccess { link ->
+                                openResolvedThread(link, onOpenThread)
+                            }.onFailure { requestError = it.message ?: "The canonical ticket thread could not be opened." }
+                        }
+                    },
                 )
                 Divider(modifier = Modifier.fillMaxHeight().width(1.dp), color = OrchardColors.divider)
                 ArchitectPanel(
@@ -635,6 +710,7 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                     onPromptChange = { prompt = it },
                     onSubmit = ::submitPrompt,
                 )
+                }
             }
             snapshot.entities.firstOrNull { it.id == definingWorkItemId }?.let { workItem ->
                 val latestProposal = snapshot.definitionProposals
@@ -1026,6 +1102,7 @@ private fun OrchardTheme(content: @Composable () -> Unit) {
 private fun ProjectSidebar(
     projects: List<WorkspaceEntity>,
     selectedProjectId: Int,
+    onOpenConversation: () -> Unit,
     onSelect: (Int) -> Unit,
 ) {
     Column(
@@ -1033,6 +1110,15 @@ private fun ProjectSidebar(
     ) {
         Text("ORCHARD", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, fontSize = 18.sp)
         Text("Project Center", color = OrchardColors.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp, bottom = 30.dp))
+        TextButton(
+            onClick = onOpenConversation,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(7.dp))
+            Text("Conversation", modifier = Modifier.fillMaxWidth(), color = OrchardColors.moss)
+        }
         Text("PROJECTS", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp, color = OrchardColors.muted)
         Spacer(Modifier.height(10.dp))
         if (projects.isEmpty()) {
@@ -1079,6 +1165,7 @@ private fun WorkspaceBoard(
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit,
     onPlanScope: (Int) -> Unit,
+    onOpenTicketThread: (Int) -> Unit,
 ) {
     val project = snapshot.entities.firstOrNull { it.id == projectId }
     val stories = snapshot.entities.filter { it.type == STORY && it.parentId == epicId }
@@ -1158,6 +1245,7 @@ private fun WorkspaceBoard(
                         analyzingWorkItemIds = analyzingWorkItemIds,
                         onAnalyzeWork = onAnalyzeWork,
                         onPlanScope = onPlanScope,
+                        onOpenTicketThread = onOpenTicketThread,
                     )
                 }
             }
@@ -1606,6 +1694,7 @@ private fun StoryBoard(
     analyzingWorkItemIds: Set<Int>,
     onAnalyzeWork: (Int) -> Unit,
     onPlanScope: (Int) -> Unit,
+    onOpenTicketThread: (Int) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().background(OrchardColors.storyBand, RoundedCornerShape(8.dp)).padding(18.dp),
@@ -1644,6 +1733,7 @@ private fun StoryBoard(
                             isAnalyzing = ticket.id in analyzingWorkItemIds,
                             onAnalyzeWork = { onAnalyzeWork(ticket.id) },
                             circuitManaged = stagedPlan?.nodes?.any { it.node.workItemId == ticket.id } == true,
+                            onOpenThread = { onOpenTicketThread(ticket.id) },
                         )
                     }
                     if (statusTickets.isEmpty()) {
@@ -1669,6 +1759,7 @@ private fun TicketCard(
     isAnalyzing: Boolean,
     onAnalyzeWork: () -> Unit,
     circuitManaged: Boolean,
+    onOpenThread: () -> Unit,
 ) {
     Surface(
         color = OrchardColors.white,
@@ -1678,7 +1769,12 @@ private fun TicketCard(
         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
     ) {
         Column(Modifier.padding(11.dp)) {
-            Text(ticket.title, fontSize = 13.sp, lineHeight = 18.sp, color = OrchardColors.ink)
+            Row(verticalAlignment = Alignment.Top) {
+                Text(ticket.title, Modifier.weight(1f), fontSize = 13.sp, lineHeight = 18.sp, color = OrchardColors.ink)
+                IconButton(onClick = onOpenThread, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.AutoMirrored.Filled.Chat, "Open canonical ticket thread", Modifier.size(15.dp), tint = OrchardColors.moss)
+                }
+            }
             Text(
                 ticket.type,
                 modifier = Modifier.padding(top = 10.dp),
