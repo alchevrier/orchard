@@ -92,14 +92,13 @@ Admission makes the exact experience, architecture, first Epic, and blueprint th
 
 ## Services
 
-The backend process starts two loopback-only HTTP servers:
+The backend process starts one loopback-only HTTP server:
 
 | Service | Address | Purpose |
 | --- | --- | --- |
 | Workspace API | `127.0.0.1:8085` | Workspace, company, delivery, models, standards, campaigns, and resources |
-| Architect API | `127.0.0.1:8086` | Architect conversation |
 
-The desktop client connects to both automatically.
+The desktop client connects automatically. Conversation interpretation and admitted commands use the durable conductor routes on the workspace API.
 
 ## Next Steps
 

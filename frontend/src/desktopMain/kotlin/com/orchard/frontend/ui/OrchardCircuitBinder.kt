@@ -129,38 +129,41 @@ private const val BUG = "BUG"
 fun App() {
     val networkClient = remember { DesktopNetworkClient() }
     val binder = remember(networkClient) { OrchardCircuitBinder(networkClient) }
-    var destination by remember { mutableStateOf(AppDestination(AppSurface.CONVERSATION)) }
+    var destination by remember { mutableStateOf<AppDestination?>(null) }
     DisposableEffect(networkClient) {
         onDispose { networkClient.close() }
     }
+    LaunchedEffect(Unit) {
+        destination = runCatching { initialAppDestination(networkClient.getWorkspace()) }
+            .getOrDefault(AppDestination(AppSurface.ONBOARDING))
+    }
     OrchardTheme {
-        when (destination.surface) {
+        when (destination?.surface) {
             AppSurface.INBOX -> ProjectInboxWorkspace(
                 networkClient = networkClient,
-                projectId = requireNotNull(destination.projectId),
-                initialConversationId = destination.conversationId,
+                projectId = requireNotNull(destination?.projectId),
+                initialConversationId = destination?.conversationId,
                 onOpenProject = { destination = AppDestination(AppSurface.PROJECT, it) },
             )
             AppSurface.PROJECT -> binder.renderProject(
-                initialProjectId = destination.projectId,
+                initialProjectId = destination?.projectId,
                 onOpenInbox = { destination = AppDestination(AppSurface.INBOX, it) },
                 onOpenThread = { conversationId, projectId ->
                     destination = AppDestination(AppSurface.INBOX, projectId, conversationId)
                 },
             )
-            AppSurface.CONVERSATION -> DurableConversationWorkspace(
+            AppSurface.ONBOARDING -> DurableConversationWorkspace(
                 networkClient = networkClient,
-                initialConversationId = destination.conversationId,
-                projectId = destination.projectId,
-                onOpenInbox = { destination = AppDestination(AppSurface.INBOX, it) },
-                onOpenProject = { destination = AppDestination(AppSurface.PROJECT, it) },
                 onProjectOnboarded = { destination = onboardingProjectDestination(it) },
             )
+            null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = OrchardColors.moss)
+            }
         }
     }
 }
 
-internal enum class AppSurface { CONVERSATION, INBOX, PROJECT }
+internal enum class AppSurface { ONBOARDING, INBOX, PROJECT }
 
 internal data class AppDestination(
     val surface: AppSurface,
@@ -170,6 +173,16 @@ internal data class AppDestination(
 
 internal fun onboardingProjectDestination(projectId: Int): AppDestination =
     AppDestination(AppSurface.INBOX, projectId)
+
+internal fun initialAppDestination(workspace: WorkspaceSnapshotResponse): AppDestination {
+    val projectId = workspace.resources.values.asSequence()
+        .filter { it.type == PROJECT }
+        .mapNotNull { resource ->
+            Regex("(?:^|[?&;])id=(\\d+)(?:[&;]|$)").find(resource.action)?.groupValues?.get(1)?.toIntOrNull()
+        }
+        .firstOrNull()
+    return projectId?.let(::onboardingProjectDestination) ?: AppDestination(AppSurface.ONBOARDING)
+}
 
 internal const val WORKSPACE_CONVERSATION = "CONVERSATION"
 internal const val WORKSPACE_PROJECT = "PROJECT"
@@ -501,7 +514,6 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         onOpenInbox: (Int) -> Unit,
         onOpenThread: (Long, Int) -> Unit,
     ) {
-        var prompt by remember { mutableStateOf("") }
         var isSubmitting by remember { mutableStateOf(false) }
         var isBindingRepository by remember { mutableStateOf(false) }
         var startingWorkItemId by remember { mutableStateOf(0) }
@@ -561,19 +573,6 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
             ?: epics.firstOrNull()?.id
             ?: 0
         val activeRepository = snapshot.repositories[activeProjectId]
-
-        fun submitPrompt() {
-            val message = prompt.trim()
-            if (message.isEmpty() || isSubmitting) return
-            prompt = ""
-            isSubmitting = true
-            requestError = null
-            scope.launch {
-                sendArchitectPrompt(message)
-                    .onFailure { requestError = it.message ?: "The Architect request failed." }
-                isSubmitting = false
-            }
-        }
 
         OrchardTheme {
             Column(modifier = Modifier.fillMaxSize().background(OrchardColors.canvas)) {
@@ -695,14 +694,6 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                             }.onFailure { requestError = it.message ?: "The canonical ticket thread could not be opened." }
                         }
                     },
-                )
-                Divider(modifier = Modifier.fillMaxHeight().width(1.dp), color = OrchardColors.divider)
-                ArchitectPanel(
-                    prompt = prompt,
-                    message = requestError ?: snapshot.message,
-                    isSubmitting = isSubmitting,
-                    onPromptChange = { prompt = it },
-                    onSubmit = ::submitPrompt,
                 )
                 }
             }
@@ -2587,72 +2578,4 @@ private fun DefinitionField(label: String, value: String, enabled: Boolean, onVa
             backgroundColor = OrchardColors.white,
         ),
     )
-}
-
-@Composable
-private fun ArchitectPanel(
-    prompt: String,
-    message: String,
-    isSubmitting: Boolean,
-    onPromptChange: (String) -> Unit,
-    onSubmit: () -> Unit,
-) {
-    Column(
-        modifier = Modifier.width(352.dp).fillMaxHeight().background(OrchardColors.canvas),
-    ) {
-        Column(Modifier.padding(22.dp)) {
-            Text("ARCHITECT", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, fontSize = 14.sp)
-            Text("Intent to governed workspace", color = OrchardColors.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp))
-        }
-        Divider(color = OrchardColors.divider)
-        Column(
-            modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp),
-            verticalArrangement = Arrangement.Bottom,
-        ) {
-            Surface(color = OrchardColors.mossSoft, shape = RoundedCornerShape(6.dp)) {
-                Text(message, modifier = Modifier.padding(14.dp), color = OrchardColors.ink, fontSize = 13.sp, lineHeight = 19.sp)
-            }
-        }
-        Divider(color = OrchardColors.divider)
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = onPromptChange,
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 88.dp, max = 180.dp)
-                    .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.Enter) {
-                            onSubmit()
-                            true
-                        } else {
-                            false
-                        }
-                    },
-                placeholder = { Text("Describe what to create, including its name, description, and parent.", fontSize = 12.sp) },
-                enabled = !isSubmitting,
-                singleLine = false,
-                minLines = 3,
-                maxLines = 7,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
-                shape = RoundedCornerShape(6.dp),
-                colors = TextFieldDefaults.outlinedTextFieldColors(
-                    focusedBorderColor = OrchardColors.moss,
-                    unfocusedBorderColor = OrchardColors.divider,
-                    backgroundColor = OrchardColors.surface,
-                ),
-            )
-            Spacer(Modifier.width(6.dp))
-            IconButton(onClick = onSubmit, enabled = prompt.isNotBlank() && !isSubmitting) {
-                if (isSubmitting) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = OrchardColors.moss)
-                } else {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send to Architect", tint = OrchardColors.moss)
-                }
-            }
-        }
-    }
 }

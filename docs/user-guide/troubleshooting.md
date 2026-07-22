@@ -8,16 +8,6 @@ Check the workspace API:
 curl -fsS http://127.0.0.1:8085/api/workspace
 ```
 
-The Architect server currently exposes a POST-only chat route. Check that its port is listening:
-
-```bash
-curl --silent --output /dev/null --write-out '%{http_code}\n' \
-	-X POST -H 'Content-Type: application/json' -d '{}' \
-	http://127.0.0.1:8086/api/architect/chat
-```
-
-An HTTP `400` confirms the Architect server is reachable and rejected the deliberately incomplete request without invoking a model.
-
 Check Ollama when using the default provider:
 
 ```bash

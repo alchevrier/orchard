@@ -7,15 +7,13 @@ Orchard is a local desktop application with one backend process and one Compose 
 ```mermaid
 flowchart LR
     UI[Compose Desktop] -->|typed HTTP| W[Workspace API :8085]
-    UI -->|Architect chat| A[Architect API :8086]
     W --> S[Governed services]
-    A --> S
     S --> P[File authorities under ~/.orchard]
     S --> G[Bound Git repositories and worktrees]
     S --> M[Ollama or OpenAI-compatible providers]
 ```
 
-`OrchardApplication.kt` is the backend composition root. It initializes paths, constructs file-backed stores, composes services, launches periodic workers, and starts two loopback-only Ktor Netty servers.
+`OrchardApplication.kt` is the backend composition root. It initializes paths, constructs file-backed stores, composes services, launches periodic workers, and starts one loopback-only Ktor Netty server.
 
 ## Module Boundaries
 

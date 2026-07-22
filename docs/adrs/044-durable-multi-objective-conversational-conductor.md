@@ -135,7 +135,7 @@ The first typed workspace API is:
 
 UI focus is convenience, not authority. A message request carries an objective ID when the operator selected one. Without an explicit target, the host accepts implicit routing only when deterministic conversation state identifies exactly one applicable objective; otherwise it records `CLARIFY` without dispatch.
 
-The current `POST /api/architect/chat` direct prompt-to-workspace mutation path is deprecated during the ledger slice. The desktop migrates to conversation APIs before domain adapters expand. At milestone completion there is no production route that can bypass command identity and correlation; compatibility behavior must enter a named legacy conversation through the same conductor or fail with an explicit migration response.
+The former `POST /api/architect/chat` direct prompt-to-workspace mutation path is removed. The desktop uses conversation APIs, and no production route can bypass command identity and correlation. Any future compatibility behavior must enter a named legacy conversation through the same conductor or fail with an explicit migration response.
 
 The first vertical capability set is deliberately narrow:
 

@@ -663,27 +663,6 @@ class DesktopNetworkClientTest {
     }
 
     @Test
-    fun decodesWorkspaceSnapshotFromConflictResponse() = runBlocking {
-        val engine = MockEngine {
-            respond(
-                content = """{"resources":{"message":{"type":"MESSAGE","path":"Busy","action":"none"}}}""",
-                status = HttpStatusCode.Conflict,
-                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
-            )
-        }
-        val httpClient = HttpClient(engine) {
-            expectSuccess = false
-            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
-        }
-        val client = DesktopNetworkClient(httpClient)
-
-        val snapshot = client.submitArchitectPrompt("Create a project")
-
-        assertEquals("Busy", snapshot.resources.getValue("message").path)
-        client.close()
-    }
-
-    @Test
     fun bindsRepositoryToSelectedProject() = runBlocking {
         val engine = MockEngine { request ->
             assertEquals(HttpMethod.Put, request.method)

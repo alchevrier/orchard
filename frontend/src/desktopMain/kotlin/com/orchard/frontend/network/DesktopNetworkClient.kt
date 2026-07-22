@@ -343,12 +343,6 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     suspend fun acceptCircuitProposal(proposalId: Long): WorkspaceSnapshotResponse =
         client.post("http://127.0.0.1:8085/api/staged-plan-proposals/$proposalId/accept").successBody()
 
-    suspend fun submitArchitectPrompt(prompt: String): WorkspaceSnapshotResponse =
-        client.post("http://127.0.0.1:8086/api/architect/chat") {
-            headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
-            setBody(ArchitectChatRequest(prompt))
-        }.body()
-
     suspend fun bindRepository(projectId: Int, path: String): WorkspaceSnapshotResponse =
         client.put("http://127.0.0.1:8085/api/projects/$projectId/repository") {
             headers.append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
@@ -424,9 +418,6 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
         }
     }
 }
-
-@Serializable
-private data class ArchitectChatRequest(val prompt: String)
 
 @Serializable data class CreateConversationRequest(val title: String, val actor: String = "HUMAN")
 @Serializable data class SubmitConversationMessageRequest(

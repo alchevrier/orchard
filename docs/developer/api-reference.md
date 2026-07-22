@@ -1,15 +1,14 @@
 # API Reference
 
-The backend exposes JSON over two loopback-only Ktor servers. The Compose desktop is the primary client; the HTTP surface is not currently versioned as a public remote API.
+The backend exposes JSON over one loopback-only Ktor server. The Compose desktop is the primary client; the HTTP surface is not currently versioned as a public remote API.
 
 ## Servers
 
 | Server | Base URL | Routes |
 | --- | --- | --- |
-| Workspace API | `http://127.0.0.1:8085` | `/api/*` except Architect chat |
-| Architect API | `http://127.0.0.1:8086` | `/api/architect/chat` |
+| Workspace API | `http://127.0.0.1:8085` | `/api/*` |
 
-Both install `ContentNegotiation` with `kotlinx.serialization`. Decoding ignores unknown JSON keys. Request and response DTOs live beside backend routes and in the frontend typed client; inspect both before changing a contract.
+The server installs `ContentNegotiation` with `kotlinx.serialization`. Decoding ignores unknown JSON keys. Request and response DTOs live beside backend routes and in the frontend typed client; inspect both before changing a contract.
 
 ## Workspace and Company
 
@@ -93,12 +92,6 @@ Exception admission never changes the proposal's requested scope, practices, pol
 | `GET` | `/api/model-providers/inspection` | Inspect configured endpoints/models |
 | `GET` | `/api/machine-resources` | Get capacity, usage, and policy projection |
 | `PUT` | `/api/machine-resources/policy` | Update resource admission policy |
-
-## Architect
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/api/architect/chat` | Submit Architect chat input and return its snapshot |
 
 ## Status Semantics
 

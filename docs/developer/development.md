@@ -76,7 +76,7 @@ Run the desktop only after the backend is ready:
 ./gradlew :frontend:desktopRun --no-daemon
 ```
 
-The backend binds `127.0.0.1:8085` and `127.0.0.1:8086`. Avoid parallel backend test/manual processes that attempt to own those ports.
+The backend binds `127.0.0.1:8085`. Avoid parallel backend test/manual processes that attempt to own that port.
 
 ## Change Workflow
 

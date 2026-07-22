@@ -34,6 +34,29 @@ class ProjectInboxWorkspaceTest {
     }
 
     @Test
+    fun `launch opens an existing project in its inbox`() {
+        val workspace = com.orchard.frontend.network.WorkspaceSnapshotResponse(
+            resources = mapOf(
+                "project:42" to com.orchard.frontend.network.WorkspaceResourceResponse(
+                    type = "PROJECT",
+                    path = "Orchard",
+                    action = "id=42;parent=0;status=0",
+                ),
+            ),
+        )
+
+        assertEquals(AppDestination(AppSurface.INBOX, projectId = 42), initialAppDestination(workspace))
+    }
+
+    @Test
+    fun `launch without a project opens repository onboarding`() {
+        assertEquals(
+            AppDestination(AppSurface.ONBOARDING),
+            initialAppDestination(com.orchard.frontend.network.WorkspaceSnapshotResponse()),
+        )
+    }
+
+    @Test
     fun `requested canonical conversation wins over fallback selection`() {
         assertEquals(31L, focusedConversationId(31, 9, listOf(7, 9)))
         assertEquals(9L, focusedConversationId(null, 9, listOf(7, 9)))

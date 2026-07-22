@@ -1,7 +1,5 @@
 package com.orchard.backend
 
-import com.orchard.backend.agent.ArchitectChatRequest
-import com.orchard.backend.agent.ArchitectService
 import com.orchard.backend.agent.DefinitionIntelligenceService
 import com.orchard.backend.agent.ProposalGenerationStatus
 import com.orchard.backend.agent.CircuitIntelligenceService
@@ -1430,20 +1428,6 @@ data class DefinitionFeedbackRequest(val content: String)
 
 @Serializable
 data class AcceptDefinitionProposalRequest(val definition: WorkDefinitionSubmission? = null)
-
-fun Application.architectApi(architect: ArchitectService) {
-    configureJson()
-    routing {
-        post("/api/architect/chat") {
-            val request = runCatching { call.receive<ArchitectChatRequest>() }.getOrElse {
-                call.respond(HttpStatusCode.BadRequest)
-                return@post
-            }
-            val result = architect.submit(request)
-            call.respond(HttpStatusCode.fromValue(result.statusCode), result.snapshot)
-        }
-    }
-}
 
 private fun Application.configureJson() {
     install(ContentNegotiation) {
