@@ -1048,6 +1048,19 @@ class MachineResourceControllerTest {
 
 class DefinitionIntelligenceServiceTest {
     @Test
+    fun defaultPromptIncludesConcreteSchemaValidBugExample() {
+        val prompt = requireNotNull(
+            DefinitionIntelligenceService::class.java.getResourceAsStream(
+                "/default-system-prompts/work_definition_agent.md"
+            )
+        ).bufferedReader().use { it.readText() }
+
+        assertTrue(prompt.contains("For a Bug, a valid complete response looks like this:"))
+        assertTrue(prompt.contains("\"requestedOutcome\": \"Interactive work receives a bounded scheduling opportunity\""))
+        assertTrue(prompt.contains("Include exactly the definition, observations, and assumptions top-level keys."))
+    }
+
+    @Test
     fun userOverrideSelectsPreferredBindingAndAppliesOutputReserve() = runTest {
         val workspace = definitionWorkspace()
         var smallCalls = 0

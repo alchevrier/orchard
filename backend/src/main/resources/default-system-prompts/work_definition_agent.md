@@ -21,8 +21,30 @@ Return exactly one JSON object with this shape:
   "assumptions": ["interpretation not established by supplied context"]
 }
 
+For a Bug, a valid complete response looks like this:
+{
+  "definition": {
+    "requestedOutcome": "Interactive work receives a bounded scheduling opportunity",
+    "currentBehavior": "Background retry can reacquire the only model lease before interactive work",
+    "requiredBehavior": "Interactive work can acquire the model lease before a background retry",
+    "scope": ["Model execution scheduling"],
+    "nonGoals": ["Increasing machine resource limits"],
+    "constraints": ["Preserve resource admission safety"],
+    "acceptanceCriteria": [
+      {"description": "Interactive work obtains a bounded opportunity", "verification": "Run the focused scheduler test"}
+    ],
+    "unresolvedQuestions": [],
+    "proposedSplitTitles": [],
+    "reproduction": "Start repeated background retries with one model execution slot, then submit interactive work",
+    "regressionCriterion": "The focused scheduler test proves interactive work is not starved"
+  },
+  "observations": ["The supplied context reports one model execution slot"],
+  "assumptions": []
+}
+
 Rules:
 - Output JSON only. Do not use Markdown.
+- Include exactly the definition, observations, and assumptions top-level keys. Do not add prose before or after the object.
 - Never claim that the proposal is approved or READY.
 - Do not silently convert assumptions into required behavior.
 - Put every unresolved product, design, or expected-behavior decision in unresolvedQuestions.
