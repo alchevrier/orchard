@@ -286,7 +286,7 @@ class ProjectReportService(
                     ReportThreadRequest(REPORT_TARGET_TICKET, report.scope.targetId.toLong(), request.actor)
                 } else request
             }
-            REPORT_TARGET_TICKET -> request.also { requireTicket(projectId, request.targetId.toInt()) }
+            REPORT_TARGET_TICKET -> request.also { ensureTicketInboxEnvelope(projectId, request.targetId.toInt()) }
             else -> throw IllegalArgumentException("Unsupported report thread target")
         }
         store.events().mapNotNull { it.threadLink }.singleOrNull {
@@ -304,6 +304,32 @@ class ProjectReportService(
         }
         val conversationId = requireNotNull(created.projection).conversation.conversationId
         return store.linkThread(projectId, target.targetType, target.targetId, conversationId, now())
+    }
+
+    private fun ensureTicketInboxEnvelope(projectId: Int, ticketId: Int) {
+        val ticket = requireTicket(projectId, ticketId)
+        val reportKey = "ticket:$ticketId"
+        if (store.events().mapNotNull { it.report }.any { it.projectId == projectId && it.key == reportKey }) return
+        val sourceHash = stagedPlanHash(serviceJson.encodeToString(ticket))
+        store.publish(
+            projectId = projectId,
+            reportKey = reportKey,
+            scope = ReportScope(REPORT_SCOPE_TICKET, ticketId.toString()),
+            title = ticket.title,
+            sourceType = "WORKSPACE_TICKET",
+            sourceIdentity = ticketId.toString(),
+            sourceRevision = sourceHash,
+            sourceHash = sourceHash,
+            state = REPORT_STATE_OPEN,
+            items = listOf(ReportItemInput(
+                itemKey = "ticket",
+                kind = "TICKET",
+                state = REPORT_STATE_OPEN,
+                title = ticket.title,
+                summary = ticket.content.ifBlank { ticket.title },
+            )),
+            createdAt = now(),
+        )
     }
 
     private fun synchronizeRepositoryBaseline(projectId: Int) {

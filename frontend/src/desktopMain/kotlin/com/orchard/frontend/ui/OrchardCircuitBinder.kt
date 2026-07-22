@@ -138,18 +138,19 @@ fun App() {
             AppSurface.INBOX -> ProjectInboxWorkspace(
                 networkClient = networkClient,
                 projectId = requireNotNull(destination.projectId),
+                initialConversationId = destination.conversationId,
                 onOpenProject = { destination = AppDestination(AppSurface.PROJECT, it) },
-                onOpenThread = { conversationId, projectId ->
-                    destination = AppDestination(AppSurface.CONVERSATION, projectId, conversationId)
-                },
             )
             AppSurface.PROJECT -> binder.renderProject(
                 initialProjectId = destination.projectId,
                 onOpenInbox = { destination = AppDestination(AppSurface.INBOX, it) },
                 onOpenThread = { conversationId, projectId ->
-                    destination = AppDestination(AppSurface.CONVERSATION, projectId, conversationId)
+                    destination = AppDestination(AppSurface.INBOX, projectId, conversationId)
                 },
-                onOpenConversation = { destination = AppDestination(AppSurface.CONVERSATION, it) },
+                onOpenConversation = { projectId ->
+                    destination = if (projectId == null) AppDestination(AppSurface.CONVERSATION)
+                    else AppDestination(AppSurface.INBOX, projectId)
+                },
             )
             AppSurface.CONVERSATION -> DurableConversationWorkspace(
                 networkClient = networkClient,

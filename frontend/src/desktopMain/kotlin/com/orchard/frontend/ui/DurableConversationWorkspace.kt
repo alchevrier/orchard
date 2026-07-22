@@ -739,7 +739,7 @@ private fun ObjectiveRail(
 }
 
 @Composable
-private fun ObjectiveControls(
+internal fun ObjectiveControls(
     objective: ConversationObjectiveResponse,
     allObjectives: List<ConversationObjectiveResponse>,
     onControl: (ConversationObjectiveResponse, String, Int?, List<Long>?) -> Unit,

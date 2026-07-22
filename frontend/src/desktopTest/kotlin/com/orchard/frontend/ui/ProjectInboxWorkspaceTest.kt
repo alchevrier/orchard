@@ -3,6 +3,10 @@ package com.orchard.frontend.ui
 import com.orchard.frontend.network.ProjectGenesisRevisionResponse
 import com.orchard.frontend.network.ProjectGenesisViewResponse
 import com.orchard.frontend.network.ReportThreadLinkResponse
+import com.orchard.frontend.network.ProjectReportResponse
+import com.orchard.frontend.network.ReportRevisionProjectionResponse
+import com.orchard.frontend.network.ReportRevisionResponse
+import com.orchard.frontend.network.ReportScopeRequest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -65,6 +69,26 @@ class ProjectInboxWorkspaceTest {
         openResolvedThread(link) { conversationId, projectId -> opened += conversationId to projectId }
 
         assertEquals(listOf(31L to 42, 31L to 42), opened)
+    }
+
+    @Test
+    fun `project thread selects its canonical Inbox item`() {
+        val reports = listOf(7L to 31L, 8L to 44L).map { (reportId, conversationId) ->
+            ReportRevisionProjectionResponse(
+                report = ProjectReportResponse(reportId, 42, scope = ReportScopeRequest("PROJECT", "42"), title = "Report $reportId"),
+                revision = ReportRevisionResponse(reportId, 1),
+                thread = ReportThreadLinkResponse(
+                    threadLinkId = reportId,
+                    projectId = 42,
+                    targetType = "REPORT",
+                    targetId = reportId,
+                    conversationId = conversationId,
+                ),
+            )
+        }
+
+        assertEquals(8L, inboxReportForConversation(reports, 44)?.report?.reportId)
+        assertNull(inboxReportForConversation(reports, 99))
     }
 
     private fun genesis(phase: String, firstEpicId: Int? = null) = ProjectGenesisViewResponse(

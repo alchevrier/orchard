@@ -242,8 +242,44 @@ class ProjectReportServiceTest {
 
         val first = fixture.service.resolveThread(1, ReportThreadRequest(REPORT_TARGET_TICKET, 2))
         val second = fixture.service.resolveThread(1, ReportThreadRequest(REPORT_TARGET_TICKET, 2))
+        val inboxItem = fixture.service.inbox(1).reports.single { it.report.scope == ReportScope(REPORT_SCOPE_TICKET, "2") }
         assertEquals(first, second)
+        assertEquals(first, inboxItem.thread)
+        assertEquals("WORKSPACE_TICKET", inboxItem.revision.sourceType)
         assertEquals(1, fixture.conductor.list().size)
+    }
+
+    @Test
+    fun `new project conversation is an Inbox item with one canonical thread`() {
+        val fixture = fixture()
+        val publication = fixture.service.create(
+            1,
+            CreateProjectReportRequest(
+                clientRequestId = "conversation-1",
+                scope = ReportScope(REPORT_SCOPE_PROJECT, "1"),
+                title = "How should verification evolve?",
+                items = listOf(ReportItemInput(
+                    "conversation-seed",
+                    "CONVERSATION",
+                    "OPEN",
+                    "How should verification evolve?",
+                    "Correlate the missing methodology and propose evidence work.",
+                )),
+            ),
+        )
+
+        val link = fixture.service.resolveThread(
+            1,
+            ReportThreadRequest(REPORT_TARGET_REPORT, publication.report.reportId),
+        )
+        val inboxItem = fixture.service.inbox(1).reports.single {
+            it.report.reportId == publication.report.reportId
+        }
+
+        assertEquals(link, inboxItem.thread)
+        assertEquals("USER_REPORT", inboxItem.revision.sourceType)
+        assertEquals("CONVERSATION", inboxItem.items.single().kind)
+        assertEquals(1, fixture.conductor.list().count { it.conversation.conversationId == link.conversationId })
     }
 
     private fun fixture(now: () -> String = { "2026-07-21T00:00:00Z" }): Fixture {

@@ -42,7 +42,9 @@ Subscriptions use immutable actor-scoped successor revisions. The initial modes 
 
 ### Canonical threads
 
-A report or workspace ticket has at most one active canonical conversation link. Opening a board ticket resolves or creates that link and opens the same conversation used by its inbox updates. Replies use the existing conductor and typed capabilities. A reply can propose or admit a domain mutation, but neither a report item nor a thread link performs the mutation itself.
+A report or workspace ticket has at most one active canonical conversation link. The project Inbox renders that conversation inside the selected report or ticket content, so the transcript, objective controls, and exact command admissions remain in the same operating surface as the update they govern. Opening a board ticket resolves or creates that link, routes to the Inbox, and selects the same conversation used by its updates. Replies use the existing conductor and typed capabilities. A reply can propose or admit a domain mutation, but neither a report item nor a thread link performs the mutation itself.
+
+Starting a project conversation creates one user-report envelope and resolves its one canonical conversation. The envelope supplies project, scope, subscription, and Inbox identity; the conversation ledger remains authoritative for the seed message and all replies. Orchard selects the new Inbox item immediately and does not create an unscoped global conversation as a side effect.
 
 Thread identity is stable across restart. Reports may link several items to one ticket thread, but Orchard never creates duplicate conversations merely because another report revision references the ticket.
 
@@ -67,7 +69,7 @@ The project workspace has two primary projections:
 - `Inbox` lists durable report revisions and ticket updates using unread, action-required, subscribed, blocked, and completed filters.
 - `Project` shows the Jira-like hierarchy and workflow state for all tickets.
 
-Both projections resolve the same project and ticket IDs. Opening an inbox item focuses its report and canonical thread. Opening a board ticket focuses the same thread. Updating work through that thread is visible on the board after the owning domain service records the change.
+Both projections resolve the same project and ticket IDs. Opening an inbox item focuses its report and renders its canonical conversation in the same detail surface. Opening a board ticket returns to the Inbox and selects the same canonical conversation. Updating work through that thread is visible on the board after the owning domain service records the change.
 
 The inbox receives synthesized transitions, decisions, failures, and terminal outcomes. It does not expose every scheduler tick or model token event.
 
@@ -92,6 +94,7 @@ Existing projects and conversations remain valid. Projects without reports recei
 - A report, subscription, item identity, and canonical thread survive backend restart without duplication.
 - A user can subscribe, pause, or resume report delivery without changing ticket or evidence authority.
 - Opening a ticket from the board and its report item from the inbox resolves the same canonical conversation.
+- Starting a project conversation creates one Inbox item and one canonical conversation, then restores that identity after restart without duplicating either record.
 - A reply that proposes or admits work records its consequence through the existing conductor and owning domain service.
 - Inbox and board projections resolve the same project and ticket state after restart.
 - `ProjectInboxIntegrationTest` proves repository binding, pending and enriched baseline reports, first-outcome admission, workflow projection, subscription, canonical report and ticket threads, and fresh-instance replay in one scenario.

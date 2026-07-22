@@ -6,14 +6,16 @@ Orchard organizes desktop work around a project Inbox, a Project board, and dura
 
 The project workspace has two primary surfaces:
 
-- **Inbox** follows meaningful report revisions, decisions, failures, evidence, and outcomes for one project. Use unread, action-required, subscribed, blocked, and completed filters to narrow the list. Selecting a revision shows its details and exact evidence references.
+- **Inbox** follows meaningful report revisions, decisions, failures, evidence, outcomes, and user-started conversations for one project. Use unread, action-required, subscribed, blocked, and completed filters to narrow the list. Selecting an item shows its report content, exact evidence references, and canonical conversation together.
 - **Project** is the Jira-like whole-project view of epics, stories, tasks, bugs, workflow state, and delivery controls. Use it to understand and organize the complete body of work.
 
 The two surfaces are projections over the same project and ticket authority. Inbox reports do not copy or edit ticket state, and the Project board does not create separate chat state.
 
 ## Start and Restore a Conversation
 
-Open a report or ticket thread from Inbox or Project. Orchard restores the exact conversation from `~/.orchard/projects/workspace/conversations.jsonl`; creating a conversation when none exists does not create or mutate product authority. A project-context conversation header returns directly to that project's Inbox or Project board.
+Open an Inbox item or a ticket from Project. Orchard keeps you in the project Inbox and restores the exact canonical conversation from `~/.orchard/projects/workspace/conversations.jsonl`. The transcript, composer, objective controls, and exact command admissions appear inside the selected Inbox content.
+
+Use **New conversation** in Inbox to create a durable user-report envelope and its canonical conversation. The envelope provides project, scope, subscription, and Inbox identity; the conversation ledger owns the seed message and replies. This does not create or edit ticket, repository, workflow, or evidence authority. Orchard clears active Inbox filters and selects the new item so the conversation remains visible immediately.
 
 Select an objective before sending a message when more than one objective could match. Orchard rejects ambiguous implicit routing instead of guessing. The desktop refreshes from a monotonic event cursor and restores messages, objective revisions, admissions, command results, and projected workflow activity after restart.
 
@@ -80,11 +82,11 @@ Subscribe from the report details using one of these modes:
 - `ACTION_REQUIRED` follows changes that need a decision or intervention.
 - `ALL` follows every meaningful published revision.
 
-Pause or resume a subscription without changing the report, ticket, repository, or evidence authority. User-created reports can choose a supported scope and an initial subscription mode when created.
+Pause or resume a subscription without changing the report, ticket, repository, or evidence authority. User-started conversations can choose a supported report scope and an initial subscription mode when created. Their report envelope remains the Inbox projection; conversation messages are not copied into report authority.
 
 ## Canonical Threads
 
-Every report and workspace ticket resolves through the project thread API to one durable canonical conversation. Reopening the same report or ticket, including after restart, opens the same conversation ID. Inbox and Project pass that exact ID into the durable conversation workspace instead of embedding another chat interface.
+Every report and workspace ticket resolves through the project thread API to one durable canonical conversation. Reopening the same report or ticket, including after restart, selects the same conversation ID inside the Inbox. Project ticket links route to that Inbox item instead of opening a separate project chat surface.
 
 Replies can discuss evidence or propose typed conductor commands. A report item and its thread link cannot mutate domain state directly; any mutation still requires the owning capability, exact command proposal, and applicable admission.
 

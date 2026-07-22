@@ -34,6 +34,7 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -56,6 +57,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.CreateProjectReportRequest
+import com.orchard.frontend.network.ControlConversationObjectiveRequest
+import com.orchard.frontend.network.ConversationCommandViewResponse
+import com.orchard.frontend.network.ConversationObjectiveResponse
+import com.orchard.frontend.network.ConversationProjectionResponse
 import com.orchard.frontend.network.DesktopNetworkClient
 import com.orchard.frontend.network.ProjectGenesisViewResponse
 import com.orchard.frontend.network.ProjectReportFilterDataResponse
@@ -115,12 +120,17 @@ internal fun openResolvedThread(
     onOpenThread: (Long, Int) -> Unit,
 ) = onOpenThread(link.conversationId, link.projectId)
 
+internal fun inboxReportForConversation(
+    reports: List<ReportRevisionProjectionResponse>,
+    conversationId: Long,
+): ReportRevisionProjectionResponse? = reports.firstOrNull { it.thread?.conversationId == conversationId }
+
 @Composable
 internal fun ProjectInboxWorkspace(
     networkClient: DesktopNetworkClient,
     projectId: Int,
+    initialConversationId: Long? = null,
     onOpenProject: (Int) -> Unit,
-    onOpenThread: (Long, Int) -> Unit,
 ) {
     var inbox by remember(projectId) { mutableStateOf(ProjectReportInboxResponse(projectId)) }
     var genesis by remember(projectId) { mutableStateOf<ProjectGenesisViewResponse?>(null) }
@@ -131,9 +141,15 @@ internal fun ProjectInboxWorkspace(
     var error by remember(projectId) { mutableStateOf<String?>(null) }
     var isLoading by remember(projectId) { mutableStateOf(true) }
     var isMutating by remember(projectId) { mutableStateOf(false) }
-    var showCreateReport by remember(projectId) { mutableStateOf(false) }
+    var showNewConversation by remember(projectId) { mutableStateOf(false) }
     var confirmedIntent by remember(projectId) { mutableStateOf("") }
     var outcomeTitle by remember(projectId) { mutableStateOf("") }
+    var threadLink by remember(projectId) { mutableStateOf<ReportThreadLinkResponse?>(null) }
+    var conversation by remember(projectId) { mutableStateOf<ConversationProjectionResponse?>(null) }
+    var conversationPrompt by remember(projectId) { mutableStateOf("") }
+    var conversationError by remember(projectId) { mutableStateOf<String?>(null) }
+    var isConversationSubmitting by remember(projectId) { mutableStateOf(false) }
+    var requestedConversationId by remember(projectId, initialConversationId) { mutableStateOf(initialConversationId) }
     val scope = rememberCoroutineScope()
 
     suspend fun refresh() {
@@ -145,6 +161,13 @@ internal fun ProjectInboxWorkspace(
         projectTitle = workspace.resources.values.singleOrNull {
             it.type == "PROJECT" && inboxActionValue(it.action, "id") == projectId
         }?.path ?: projectTitle
+        requestedConversationId?.let { conversationId ->
+            inboxReportForConversation(nextInbox.reports, conversationId)?.let { report ->
+                selectedReportId = report.report.reportId
+                selectedRevision = report.revision.revision
+                requestedConversationId = null
+            }
+        }
         val selectedStillExists = nextInbox.reports.any {
             it.report.reportId == selectedReportId && it.revision.revision == selectedRevision
         }
@@ -167,7 +190,21 @@ internal fun ProjectInboxWorkspace(
         }
     }
 
-    fun openThread(
+    suspend fun resolveConversation(report: ReportRevisionProjectionResponse): ReportThreadLinkResponse {
+        val current = threadLink?.takeIf { it.conversationId == report.thread?.conversationId }
+        val link = report.thread ?: current ?: networkClient.resolveProjectThread(
+            projectId,
+            "REPORT",
+            report.report.reportId,
+        )
+        threadLink = link
+        if (conversation?.conversation?.conversationId != link.conversationId) {
+            conversation = networkClient.getConversation(link.conversationId)
+        }
+        return link
+    }
+
+    fun continueConversation(
         report: ReportRevisionProjectionResponse,
         prompt: String? = null,
         advisory: Boolean = false,
@@ -180,7 +217,7 @@ internal fun ProjectInboxWorkspace(
                 if (report.unread) {
                     networkClient.markProjectReportRead(projectId, report.report.reportId, report.revision.revision)
                 }
-                val link = networkClient.resolveProjectThread(projectId, "REPORT", report.report.reportId)
+                val link = resolveConversation(report)
                 if (!prompt.isNullOrBlank()) {
                     val response = networkClient.submitConversationMessageAtCurrentSequence(
                         conversationId = link.conversationId,
@@ -191,10 +228,47 @@ internal fun ProjectInboxWorkspace(
                     check(response.status in setOf("RECORDED", "ALREADY_RECORDED", "ADMISSION_REQUIRED", "REJECTED")) {
                         response.diagnostic.ifBlank { "The canonical thread did not record the requested message." }
                     }
+                    conversation = response.projection ?: networkClient.getConversation(link.conversationId)
+                    conversationError = response.diagnostic.takeIf(String::isNotBlank)
                 }
-                openResolvedThread(link, onOpenThread)
             }.onFailure { error = it.message ?: "The canonical report thread could not be opened." }
             isMutating = false
+        }
+    }
+
+    fun submitConversation() {
+        val report = inbox.reports.singleOrNull {
+            it.report.reportId == selectedReportId && it.revision.revision == selectedRevision
+        } ?: return
+        val content = conversationPrompt.trim()
+        if (content.isEmpty() || isConversationSubmitting) return
+        conversationPrompt = ""
+        isConversationSubmitting = true
+        conversationError = null
+        scope.launch {
+            runCatching {
+                val link = resolveConversation(report)
+                val response = networkClient.submitConversationMessageAtCurrentSequence(
+                    link.conversationId,
+                    "desktop:${UUID.randomUUID()}",
+                    content,
+                )
+                conversation = response.projection ?: networkClient.getConversation(link.conversationId)
+                conversationError = response.diagnostic.takeIf(String::isNotBlank)
+            }.onFailure { conversationError = it.message ?: "The conversation reply failed." }
+            isConversationSubmitting = false
+        }
+    }
+
+    fun mutateConversation(operation: suspend (ConversationProjectionResponse) -> Unit) {
+        val current = conversation ?: return
+        if (isConversationSubmitting) return
+        isConversationSubmitting = true
+        conversationError = null
+        scope.launch {
+            runCatching { operation(current) }
+                .onFailure { conversationError = it.message ?: "The conversation action failed." }
+            isConversationSubmitting = false
         }
     }
 
@@ -212,6 +286,24 @@ internal fun ProjectInboxWorkspace(
     } ?: inbox.reports.firstOrNull()
     val outcomeAction = firstOutcomeAction(genesis)
 
+    LaunchedEffect(selected?.report?.reportId) {
+        val report = selected ?: run {
+            threadLink = null
+            conversation = null
+            return@LaunchedEffect
+        }
+        threadLink = null
+        conversation = null
+        conversationError = null
+        while (true) {
+            runCatching {
+                val link = resolveConversation(report)
+                conversation = networkClient.getConversation(link.conversationId)
+            }.onFailure { conversationError = it.message ?: "The embedded conversation could not be loaded." }
+            delay(1_500)
+        }
+    }
+
     Column(Modifier.fillMaxSize().background(InboxSurface)) {
         ProjectWorkspaceNavigation(projectTitle, "INBOX", { }, { onOpenProject(projectId) })
         Divider(color = InboxLine)
@@ -222,7 +314,7 @@ internal fun ProjectInboxWorkspace(
                     counts = inbox.filters,
                     isLoading = isLoading,
                     onToggle = { selectedFilters = toggleInboxFilter(selectedFilters, it) },
-                    onCreate = { showCreateReport = true },
+                    onCreate = { showNewConversation = true },
                     onRefresh = { scope.launch { runCatching { refresh() }.onFailure { error = it.message } } },
                 )
                 Divider(color = InboxLine)
@@ -238,7 +330,6 @@ internal fun ProjectInboxWorkspace(
                                     networkClient.markProjectReportRead(projectId, report.report.reportId, report.revision.revision)
                                 }
                             },
-                            onOpenThread = { openThread(report) },
                         )
                     }
                     if (!isLoading && inbox.reports.isEmpty()) {
@@ -269,11 +360,10 @@ internal fun ProjectInboxWorkspace(
                         onConfirmedIntentChange = { confirmedIntent = it },
                         outcomeTitle = outcomeTitle,
                         onOutcomeTitleChange = { outcomeTitle = it },
-                        onOpenThread = { openThread(selected) },
                         onPlanRemediation = { item ->
-                            openThread(selected, requireNotNull(item.remediation).prompt, advisory = true)
+                            continueConversation(selected, requireNotNull(item.remediation).prompt, advisory = true)
                         },
-                        onPromptForOutcome = { openThread(selected, requireNotNull(outcomeAction).prompt) },
+                        onPromptForOutcome = { continueConversation(selected, requireNotNull(outcomeAction).prompt) },
                         onCreateOutcome = {
                             if (confirmedIntent.isNotBlank() && outcomeTitle.isNotBlank()) mutate {
                                 networkClient.createProjectGenesisFirstOutcome(
@@ -296,28 +386,59 @@ internal fun ProjectInboxWorkspace(
                         onResume = { mutate {
                             networkClient.resumeProjectReportSubscription(projectId, selected.report.reportId)
                         } },
+                        conversation = conversation,
+                        conversationPrompt = conversationPrompt,
+                        conversationError = conversationError,
+                        isConversationSubmitting = isConversationSubmitting,
+                        onConversationPromptChange = { conversationPrompt = it },
+                        onSubmitConversation = ::submitConversation,
+                        onAdmitCommand = { command -> mutateConversation {
+                            val response = networkClient.admitConversationCommand(command.proposal.commandId, command.proposal.hash)
+                            conversation = response.projection ?: conversation
+                            conversationError = response.diagnostic.takeIf(String::isNotBlank)
+                        } },
+                        onRejectCommand = { command -> mutateConversation {
+                            val response = networkClient.rejectConversationCommand(command.proposal.commandId, command.proposal.hash)
+                            conversation = response.projection ?: conversation
+                            conversationError = response.diagnostic.takeIf(String::isNotBlank)
+                        } },
+                        onControlObjective = { objective, action, priority, dependencies -> mutateConversation {
+                            val response = networkClient.controlConversationObjective(
+                                objective.objectiveId,
+                                ControlConversationObjectiveRequest(
+                                    action,
+                                    objective.sourceMessageId,
+                                    objective.sourceMessageHash,
+                                    priority,
+                                    dependencies,
+                                ),
+                            )
+                            conversation = response.projection ?: conversation
+                            conversationError = response.diagnostic.takeIf(String::isNotBlank)
+                        } },
                     )
                 }
             }
         }
     }
 
-    if (showCreateReport) {
-        CreateReportDialog(
+    if (showNewConversation) {
+        NewConversationDialog(
             projectId = projectId,
             isSubmitting = isMutating,
-            onDismiss = { if (!isMutating) showCreateReport = false },
-            onCreate = { title, summary, scopeType, targetId, subscriptionMode ->
+            onDismiss = { if (!isMutating) showNewConversation = false },
+            onCreate = { clientRequestId, title, summary, scopeType, targetId, subscriptionMode ->
+                selectedFilters = emptySet()
                 mutate {
                     val publication = networkClient.createProjectReport(
                         projectId,
                         CreateProjectReportRequest(
-                            clientRequestId = UUID.randomUUID().toString(),
+                            clientRequestId = clientRequestId,
                             scope = ReportScopeRequest(scopeType, targetId),
                             title = title,
                             items = listOf(ReportItemInputRequest(
-                                itemKey = "user-${UUID.randomUUID().toString().take(8)}",
-                                kind = "NOTE",
+                                itemKey = "conversation-${clientRequestId.take(8)}",
+                                kind = "CONVERSATION",
                                 state = "OPEN",
                                 title = title,
                                 summary = summary,
@@ -327,9 +448,26 @@ internal fun ProjectInboxWorkspace(
                     if (subscriptionMode != null) {
                         networkClient.subscribeToProjectReport(projectId, publication.report.reportId, subscriptionMode)
                     }
+                    val link = networkClient.resolveProjectThread(
+                        projectId,
+                        "REPORT",
+                        publication.report.reportId,
+                    )
+                    val response = networkClient.submitConversationMessageAtCurrentSequence(
+                        link.conversationId,
+                        "desktop:$clientRequestId",
+                        summary,
+                    )
+                    check(response.status in setOf("RECORDED", "ALREADY_RECORDED", "ADMISSION_REQUIRED", "REJECTED")) {
+                        response.diagnostic.ifBlank { "The new conversation could not be started." }
+                    }
                     selectedReportId = publication.report.reportId
                     selectedRevision = publication.revision.revision
-                    showCreateReport = false
+                    threadLink = link
+                    conversation = response.projection ?: networkClient.getConversation(link.conversationId)
+                    conversationError = response.diagnostic.takeIf(String::isNotBlank)
+                    refresh()
+                    showNewConversation = false
                 }
             },
         )
@@ -381,7 +519,7 @@ private fun InboxToolbar(
             Text(" ${counts.total}", color = InboxMuted, fontSize = 11.sp)
             Spacer(Modifier.weight(1f))
             IconButton(onClick = onCreate, modifier = Modifier.size(30.dp)) {
-                Icon(Icons.Default.Add, "Create report", tint = InboxGreen, modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Add, "New conversation", tint = InboxGreen, modifier = Modifier.size(18.dp))
             }
             IconButton(onClick = onRefresh, modifier = Modifier.size(30.dp)) {
                 if (isLoading) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = InboxGreen)
@@ -418,7 +556,6 @@ private fun InboxReportRow(
     report: ReportRevisionProjectionResponse,
     selected: Boolean,
     onSelect: () -> Unit,
-    onOpenThread: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().background(if (selected) InboxSelected else Color.Transparent).clickable(onClick = onSelect)
@@ -441,9 +578,6 @@ private fun InboxReportRow(
                 if (report.subscribed) Text(report.subscription?.mode.orEmpty(), color = InboxGreen, fontWeight = FontWeight.Bold, fontSize = 8.sp)
             }
         }
-        IconButton(onClick = onOpenThread, modifier = Modifier.size(28.dp)) {
-            Icon(Icons.AutoMirrored.Filled.Chat, "Open canonical thread", tint = InboxGreen, modifier = Modifier.size(16.dp))
-        }
     }
     Divider(color = InboxLine)
 }
@@ -457,7 +591,6 @@ private fun ReportDetail(
     onConfirmedIntentChange: (String) -> Unit,
     outcomeTitle: String,
     onOutcomeTitleChange: (String) -> Unit,
-    onOpenThread: () -> Unit,
     onPlanRemediation: (ReportItemResponse) -> Unit,
     onPromptForOutcome: () -> Unit,
     onCreateOutcome: () -> Unit,
@@ -465,17 +598,21 @@ private fun ReportDetail(
     onSubscribe: (String) -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
+    conversation: ConversationProjectionResponse?,
+    conversationPrompt: String,
+    conversationError: String?,
+    isConversationSubmitting: Boolean,
+    onConversationPromptChange: (String) -> Unit,
+    onSubmitConversation: () -> Unit,
+    onAdmitCommand: (ConversationCommandViewResponse) -> Unit,
+    onRejectCommand: (ConversationCommandViewResponse) -> Unit,
+    onControlObjective: (ConversationObjectiveResponse, String, Int?, List<Long>?) -> Unit,
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(report.report.title, color = InboxInk, fontWeight = FontWeight.Bold, fontSize = 21.sp)
                 Text("${report.report.scope.type.replace('_', ' ')} ${report.report.scope.targetId}  |  revision ${report.revision.revision}  |  ${report.revision.state}", Modifier.padding(top = 5.dp), color = InboxMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
-            }
-            TextButton(onClick = onOpenThread, enabled = !isMutating) {
-                Icon(Icons.AutoMirrored.Filled.Chat, null, Modifier.size(16.dp), tint = InboxGreen)
-                Spacer(Modifier.width(6.dp))
-                Text("Open thread", color = InboxGreen)
             }
         }
         if (outcomeAction != null) {
@@ -515,9 +652,12 @@ private fun ReportDetail(
                 TextButton(onClick = onPromptForOutcome, enabled = !isMutating) { Text(outcomeAction.label) }
             }
         }
-        Divider(Modifier.padding(top = 14.dp), color = InboxLine)
-        Text("REPORT ITEMS", Modifier.padding(top = 16.dp), color = InboxMuted, fontWeight = FontWeight.Bold, fontSize = 9.sp)
-        report.items.forEach { item ->
+        val structuredItems = report.items.filter { it.kind != "CONVERSATION" }
+        if (structuredItems.isNotEmpty()) {
+            Divider(Modifier.padding(top = 14.dp), color = InboxLine)
+            Text("REPORT ITEMS", Modifier.padding(top = 16.dp), color = InboxMuted, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+        }
+        structuredItems.forEach { item ->
             Column(Modifier.fillMaxWidth().padding(vertical = 13.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(item.title, Modifier.weight(1f), color = InboxInk, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
@@ -584,16 +724,133 @@ private fun ReportDetail(
                 }
             }
         }
+        Divider(Modifier.padding(top = 16.dp), color = InboxLine)
+        InlineInboxConversation(
+            conversation = conversation,
+            prompt = conversationPrompt,
+            error = conversationError,
+            isSubmitting = isConversationSubmitting,
+            onPromptChange = onConversationPromptChange,
+            onSubmit = onSubmitConversation,
+            onAdmitCommand = onAdmitCommand,
+            onRejectCommand = onRejectCommand,
+            onControlObjective = onControlObjective,
+        )
     }
 }
 
 @Composable
-private fun CreateReportDialog(
+private fun InlineInboxConversation(
+    conversation: ConversationProjectionResponse?,
+    prompt: String,
+    error: String?,
+    isSubmitting: Boolean,
+    onPromptChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    onAdmitCommand: (ConversationCommandViewResponse) -> Unit,
+    onRejectCommand: (ConversationCommandViewResponse) -> Unit,
+    onControlObjective: (ConversationObjectiveResponse, String, Int?, List<Long>?) -> Unit,
+) {
+    Text("CONVERSATION", Modifier.padding(top = 18.dp), color = InboxMuted, fontWeight = FontWeight.Bold, fontSize = 9.sp)
+    if (conversation == null) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 20.dp), horizontalArrangement = Arrangement.Center) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = InboxGreen)
+        }
+        return
+    }
+    conversation.messages.forEach { message ->
+        val user = message.role == "USER"
+        Row(
+            Modifier.fillMaxWidth().padding(top = 12.dp),
+            horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
+        ) {
+            Column(Modifier.fillMaxWidth(0.82f)) {
+                Text(
+                    if (user) "You" else "Orchard",
+                    color = if (user) InboxBlue else InboxGreen,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 9.sp,
+                )
+                Surface(
+                    modifier = Modifier.padding(top = 4.dp),
+                    color = if (user) InboxBlue else InboxListSurface,
+                    shape = RoundedCornerShape(6.dp),
+                    border = if (user) null else BorderStroke(1.dp, InboxLine),
+                ) {
+                    Text(
+                        message.content,
+                        Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        color = if (user) Color.White else InboxInk,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+        }
+    }
+    conversation.objectives.forEach { objective ->
+        Column(
+            Modifier.fillMaxWidth().padding(top = 12.dp).background(InboxGreenSoft).padding(10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(objective.title, color = InboxInk, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
+                    Text(objective.state.replace('_', ' '), Modifier.padding(top = 2.dp), color = InboxMuted, fontSize = 9.sp)
+                }
+            }
+            ObjectiveControls(objective, conversation.objectives, onControlObjective)
+        }
+    }
+    conversation.commands.filter { it.admission == null && it.executions.isEmpty() }.forEach { command ->
+        Row(
+            Modifier.fillMaxWidth().padding(top = 10.dp).background(InboxAmberSoft).padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(command.proposal.capabilityId.replace('_', ' '), color = InboxInk, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
+                Text("Exact command admission required", Modifier.padding(top = 2.dp), color = InboxAmber, fontSize = 9.sp)
+                Text(command.proposal.payloadJson, Modifier.padding(top = 5.dp), color = InboxMuted, fontFamily = FontFamily.Monospace, fontSize = 9.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                Text("command ${command.proposal.commandId}  |  ${command.proposal.hash}", Modifier.padding(top = 5.dp), color = InboxMuted, fontFamily = FontFamily.Monospace, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            TextButton(onClick = { onRejectCommand(command) }, enabled = !isSubmitting) { Text("Reject", fontSize = 10.sp) }
+            TextButton(onClick = { onAdmitCommand(command) }, enabled = !isSubmitting) { Text("Admit", fontSize = 10.sp) }
+        }
+    }
+    if (!error.isNullOrBlank()) {
+        Text(error, Modifier.fillMaxWidth().padding(top = 10.dp).background(InboxAmberSoft).padding(8.dp), color = InboxAmber, fontSize = 10.sp)
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            value = prompt,
+            onValueChange = onPromptChange,
+            modifier = Modifier.weight(1f).heightIn(min = 52.dp, max = 120.dp),
+            placeholder = { Text("Reply in this conversation", fontSize = 11.sp) },
+            enabled = !isSubmitting,
+            minLines = 2,
+            maxLines = 5,
+        )
+        IconButton(
+            onClick = onSubmit,
+            enabled = prompt.isNotBlank() && !isSubmitting,
+            modifier = Modifier.size(38.dp),
+        ) {
+            if (isSubmitting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = InboxGreen)
+            else Icon(Icons.AutoMirrored.Filled.Send, "Send reply", Modifier.size(18.dp), tint = InboxGreen)
+        }
+    }
+}
+
+@Composable
+private fun NewConversationDialog(
     projectId: Int,
     isSubmitting: Boolean,
     onDismiss: () -> Unit,
-    onCreate: (String, String, String, String, String?) -> Unit,
+    onCreate: (String, String, String, String, String, String?) -> Unit,
 ) {
+    val clientRequestId = remember { UUID.randomUUID().toString() }
     var title by remember { mutableStateOf("") }
     var summary by remember { mutableStateOf("") }
     var scopeType by remember { mutableStateOf("PROJECT") }
@@ -605,11 +862,11 @@ private fun CreateReportDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Create report") },
+        title = { Text("New conversation") },
         text = {
             Column(Modifier.width(520.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
-                OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), label = { Text("Report title") }, enabled = !isSubmitting, singleLine = true)
-                OutlinedTextField(summary, { summary = it }, Modifier.fillMaxWidth().padding(top = 8.dp), label = { Text("What should this report follow?") }, enabled = !isSubmitting, minLines = 3, maxLines = 6)
+                OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), label = { Text("Subject") }, enabled = !isSubmitting, singleLine = true)
+                OutlinedTextField(summary, { summary = it }, Modifier.fillMaxWidth().padding(top = 8.dp), label = { Text("Message") }, enabled = !isSubmitting, minLines = 3, maxLines = 6)
                 Box(Modifier.padding(top = 8.dp)) {
                     TextButton(onClick = { scopeExpanded = true }, enabled = !isSubmitting) {
                         Text("Scope: ${scopeType.replace('_', ' ').lowercase()}")
@@ -646,8 +903,8 @@ private fun CreateReportDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onCreate(title.trim(), summary.trim(), scopeType, targetId.trim(), subscriptionMode) }, enabled = !isSubmitting && title.isNotBlank() && summary.isNotBlank() && targetId.isNotBlank()) {
-                if (isSubmitting) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp) else Text("Create")
+            TextButton(onClick = { onCreate(clientRequestId, title.trim(), summary.trim(), scopeType, targetId.trim(), subscriptionMode) }, enabled = !isSubmitting && title.isNotBlank() && summary.isNotBlank() && targetId.isNotBlank()) {
+                if (isSubmitting) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp) else Text("Start conversation")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !isSubmitting) { Text("Cancel") } },

@@ -68,7 +68,8 @@ The priority order is:
   - Let the user confirm or correct inferred current intent and define the first desired outcome from the project workspace. Repository evidence cannot invent future human intent.
 2. **Inbox-style project operation**
   - Make reports and ticket updates arrive as concise, threaded messages while Orchard works.
-  - Give every report item and ticket one canonical conversation through which the user can question, correct, prioritize, pause, approve, or request follow-up work.
+  - Render each report item's or ticket's one canonical conversation inside its Inbox content so the user can question, correct, prioritize, pause, approve, or request follow-up work without leaving the Inbox.
+  - Make a user-started project conversation one new Inbox item backed by a durable report envelope and one canonical conversation.
   - Let users subscribe to meaningful changes for a ticket, outcome, capability, repository area, or later map selection without exposing a noisy internal event stream.
   - Bind every update to exact authority, repository revision, evidence, and downstream work so a reply has governed consequences rather than becoming detached chat history.
 3. **Jira-like project overview**
@@ -143,6 +144,7 @@ Product contract:
 
 - One chronological conversation may contain several explicitly identified objective lanes.
 - The operator can discuss, investigate, propose, admit, start, pause, resume, reprioritize, redirect, cancel, and inspect work from the inbox thread attached to the relevant ticket or report item.
+- Project conversations live inside their Inbox items; starting one creates a durable Inbox envelope instead of an unscoped global chat.
 - The project board shows all outcomes and tickets, while the inbox exposes subscribed changes, decisions, evidence, and conversations for individual work. Both project the same durable authority.
 - Repository onboarding opens the project immediately and compiles its baseline asynchronously. Only future intent and genuine authority choices require user input.
 - Conversation records prove what was said and correlated; existing domain records remain authoritative for product, work, code, evidence, audit, policy, and promotion.
@@ -177,6 +179,8 @@ Delivery slices:
 5. **Project inbox, ticket threads, and board**
   - An inbox-style desktop projection with unread, action-required, subscribed, blocked, and completed report updates while Orchard works asynchronously.
   - One canonical thread per ticket or report item, with state, dependencies, priority, pending admissions, diagnostics, and correlated evidence.
+  - The canonical transcript, composer, objective controls, and command admissions embedded in the selected Inbox item, with board links selecting the same conversation there.
+  - New project conversations represented by one user-report Inbox envelope and one canonical thread rather than a parallel global chat entry.
   - User-created report scopes over a ticket, outcome, capability, or repository area, with subscriptions to meaningful revision-bound changes and configurable completion or continuation behavior.
   - A Jira-like project board for outcomes, epics, stories, tasks, bugs, dependencies, workflow state, and blocked authority, with direct navigation to each canonical thread.
   - Inline questioning, correction, control, review, and admission of exact proposed actions plus links into detailed authority and evidence projections.
