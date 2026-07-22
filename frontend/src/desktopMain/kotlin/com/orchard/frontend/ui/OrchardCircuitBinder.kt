@@ -147,10 +147,6 @@ fun App() {
                 onOpenThread = { conversationId, projectId ->
                     destination = AppDestination(AppSurface.INBOX, projectId, conversationId)
                 },
-                onOpenConversation = { projectId ->
-                    destination = if (projectId == null) AppDestination(AppSurface.CONVERSATION)
-                    else AppDestination(AppSurface.INBOX, projectId)
-                },
             )
             AppSurface.CONVERSATION -> DurableConversationWorkspace(
                 networkClient = networkClient,
@@ -495,9 +491,8 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         initialProjectId: Int? = null,
         onOpenInbox: (Int) -> Unit = {},
         onOpenThread: (Long, Int) -> Unit = { _, _ -> },
-        onOpenConversation: (Int?) -> Unit = {},
     ) {
-        renderLegacyWorkspace(initialProjectId, onOpenInbox, onOpenThread, onOpenConversation)
+        renderLegacyWorkspace(initialProjectId, onOpenInbox, onOpenThread)
     }
 
     @Composable
@@ -505,7 +500,6 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
         initialProjectId: Int?,
         onOpenInbox: (Int) -> Unit,
         onOpenThread: (Long, Int) -> Unit,
-        onOpenConversation: (Int?) -> Unit,
     ) {
         var prompt by remember { mutableStateOf("") }
         var isSubmitting by remember { mutableStateOf(false) }
@@ -594,7 +588,6 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
                 ProjectSidebar(
                     projects = projects,
                     selectedProjectId = activeProjectId,
-                    onOpenConversation = { onOpenConversation(activeProjectId.takeIf { it > 0 }) },
                     onSelect = {
                         selectedProjectId = it
                         selectedEpicId = 0
@@ -1073,17 +1066,17 @@ class OrchardCircuitBinder(private val networkClient: DesktopNetworkClient) {
 }
 
 private object OrchardColors {
-    val canvas = Color(0xFFF4F1EC)
-    val sidebar = Color(0xFFEEE9E2)
-    val surface = Color(0xFFFCFBF8)
-    val storyBand = Color(0xFFF0ECE5)
-    val divider = Color(0xFFD9D2C8)
-    val ink = Color(0xFF22231F)
-    val muted = Color(0xFF72736D)
-    val moss = Color(0xFF71804A)
-    val mossSoft = Color(0xFFDDE3CC)
-    val clay = Color(0xFFC4664E)
-    val white = Color(0xFFFFFFFF)
+    val canvas = OrchardDesktopColors.canvas
+    val sidebar = OrchardDesktopColors.raised
+    val surface = OrchardDesktopColors.surface
+    val storyBand = OrchardDesktopColors.raised
+    val divider = OrchardDesktopColors.line
+    val ink = OrchardDesktopColors.ink
+    val muted = OrchardDesktopColors.muted
+    val moss = OrchardDesktopColors.green
+    val mossSoft = OrchardDesktopColors.greenSoft
+    val clay = OrchardDesktopColors.red
+    val white = OrchardDesktopColors.surface
 }
 
 @Composable
@@ -1103,24 +1096,14 @@ private fun OrchardTheme(content: @Composable () -> Unit) {
 private fun ProjectSidebar(
     projects: List<WorkspaceEntity>,
     selectedProjectId: Int,
-    onOpenConversation: () -> Unit,
     onSelect: (Int) -> Unit,
 ) {
     Column(
-        modifier = Modifier.width(224.dp).fillMaxHeight().background(OrchardColors.sidebar).padding(20.dp),
+        modifier = Modifier.width(224.dp).fillMaxHeight().background(OrchardColors.sidebar).padding(horizontal = 16.dp, vertical = 18.dp),
     ) {
-        Text("ORCHARD", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, fontSize = 18.sp)
-        Text("Project Center", color = OrchardColors.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp, bottom = 30.dp))
-        TextButton(
-            onClick = onOpenConversation,
-            modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-        ) {
-            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(7.dp))
-            Text("Conversation", modifier = Modifier.fillMaxWidth(), color = OrchardColors.moss)
-        }
-        Text("PROJECTS", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 11.sp, color = OrchardColors.muted)
+        Text("Orchard", color = OrchardColors.ink, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+        Text("Project workspace", color = OrchardColors.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp, bottom = 24.dp))
+        Text("Projects", fontWeight = FontWeight.SemiBold, fontSize = 11.sp, color = OrchardColors.muted)
         Spacer(Modifier.height(10.dp))
         if (projects.isEmpty()) {
             Text("Your first project will appear here.", color = OrchardColors.muted, fontSize = 13.sp)
@@ -1177,8 +1160,8 @@ private fun WorkspaceBoard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column {
-                Text(project?.title ?: "Workspace", fontSize = 27.sp, fontWeight = FontWeight.Black, color = OrchardColors.ink)
-                Text("AI-governed delivery backlog", fontSize = 13.sp, color = OrchardColors.muted)
+                Text(project?.title ?: "Workspace", fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = OrchardColors.ink)
+                Text("AI-governed delivery backlog", Modifier.padding(top = 2.dp), fontSize = 12.sp, color = OrchardColors.muted)
             }
             Row {
                 TextButton(onClick = { if (epicId != 0) onPlanScope(epicId) }, enabled = epicId != 0) {
@@ -1698,10 +1681,12 @@ private fun StoryBoard(
     onOpenTicketThread: (Int) -> Unit,
 ) {
     Column(
-        modifier = Modifier.fillMaxWidth().background(OrchardColors.storyBand, RoundedCornerShape(8.dp)).padding(18.dp),
+        modifier = Modifier.fillMaxWidth()
+            .background(OrchardColors.storyBand, RoundedCornerShape(8.dp))
+            .padding(horizontal = 16.dp, vertical = 15.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(story.title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = OrchardColors.ink)
+            Text(story.title, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = OrchardColors.ink)
             TextButton(onClick = { onPlanScope(story.id) }) {
                 Icon(Icons.Default.Edit, contentDescription = null, tint = OrchardColors.moss, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(4.dp))
@@ -1764,9 +1749,9 @@ private fun TicketCard(
 ) {
     Surface(
         color = OrchardColors.white,
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(8.dp),
         border = BorderStroke(1.dp, OrchardColors.divider),
-        elevation = 1.dp,
+        elevation = 0.dp,
         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
     ) {
         Column(Modifier.padding(11.dp)) {

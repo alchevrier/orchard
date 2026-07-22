@@ -94,16 +94,16 @@ private const val GENESIS_BLUEPRINT = "BLUEPRINT"
 private const val GENESIS_ADMISSION = "ADMISSION"
 private const val GENESIS_READY = "READY"
 
-private val GenesisCanvas = Color(0xFFF5F5F3)
-private val GenesisSurface = Color(0xFFFCFCFB)
-private val GenesisInk = Color(0xFF171918)
-private val GenesisMuted = Color(0xFF6E7370)
-private val GenesisLine = Color(0xFFDADDD9)
-private val GenesisGreen = Color(0xFF2D6A4F)
-private val GenesisGreenSoft = Color(0xFFE1EDE7)
-private val GenesisBlue = Color(0xFF315F8C)
-private val GenesisAmber = Color(0xFF9A681C)
-private val GenesisRed = Color(0xFFA1463F)
+private val GenesisCanvas = OrchardDesktopColors.canvas
+private val GenesisSurface = OrchardDesktopColors.surface
+private val GenesisInk = OrchardDesktopColors.ink
+private val GenesisMuted = OrchardDesktopColors.muted
+private val GenesisLine = OrchardDesktopColors.line
+private val GenesisGreen = OrchardDesktopColors.green
+private val GenesisGreenSoft = OrchardDesktopColors.greenSoft
+private val GenesisBlue = OrchardDesktopColors.blue
+private val GenesisAmber = OrchardDesktopColors.amber
+private val GenesisRed = OrchardDesktopColors.red
 
 private val GenesisStages = listOf(
     GENESIS_CLASSIFICATION to "Context",

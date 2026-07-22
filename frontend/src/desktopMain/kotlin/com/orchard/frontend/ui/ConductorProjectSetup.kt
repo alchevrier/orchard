@@ -46,16 +46,16 @@ import com.orchard.frontend.network.ProjectGenesisSubmissionRequest
 import com.orchard.frontend.network.ProjectGenesisViewResponse
 import com.orchard.frontend.network.RepositoryObjectiveAssessmentResponse
 
-private val SetupSurface = Color(0xFFFFFFFF)
-private val SetupRaised = Color(0xFFFAFAFC)
-private val SetupInk = Color(0xFF1D1D1F)
-private val SetupMuted = Color(0xFF6E6E73)
-private val SetupLine = Color(0xFFE5E5EA)
-private val SetupGreen = Color(0xFF277A57)
-private val SetupGreenSoft = Color(0xFFEAF4EF)
-private val SetupBlue = Color(0xFF2877C7)
-private val SetupAmber = Color(0xFF936516)
-private val SetupAmberSoft = Color(0xFFFAF2E3)
+private val SetupSurface = OrchardDesktopColors.surface
+private val SetupRaised = OrchardDesktopColors.raised
+private val SetupInk = OrchardDesktopColors.ink
+private val SetupMuted = OrchardDesktopColors.muted
+private val SetupLine = OrchardDesktopColors.line
+private val SetupGreen = OrchardDesktopColors.green
+private val SetupGreenSoft = OrchardDesktopColors.greenSoft
+private val SetupBlue = OrchardDesktopColors.blue
+private val SetupAmber = OrchardDesktopColors.amber
+private val SetupAmberSoft = OrchardDesktopColors.amberSoft
 
 internal data class ConductorProjectSetupState(
     val projectId: Int,

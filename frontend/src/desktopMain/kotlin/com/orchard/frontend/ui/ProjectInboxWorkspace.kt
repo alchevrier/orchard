@@ -304,7 +304,7 @@ internal fun ProjectInboxWorkspace(
         }
     }
 
-    Column(Modifier.fillMaxSize().background(InboxSurface)) {
+    Column(Modifier.fillMaxSize().background(OrchardDesktopColors.canvas)) {
         ProjectWorkspaceNavigation(projectTitle, "INBOX", { }, { onOpenProject(projectId) })
         Divider(color = InboxLine)
         Row(Modifier.fillMaxSize()) {
@@ -343,7 +343,7 @@ internal fun ProjectInboxWorkspace(
                 }
             }
             Divider(Modifier.fillMaxHeight().width(1.dp), color = InboxLine)
-            Column(Modifier.weight(1f).fillMaxHeight()) {
+            Column(Modifier.weight(1f).fillMaxHeight().background(InboxSurface)) {
                 if (!error.isNullOrBlank()) {
                     Text(error.orEmpty(), Modifier.fillMaxWidth().background(InboxAmberSoft).padding(10.dp), color = InboxAmber, fontSize = 11.sp)
                 }
@@ -490,16 +490,30 @@ internal fun ProjectWorkspaceNavigation(
             Text("Project workspace", color = InboxMuted, fontSize = 10.sp)
         }
         Spacer(Modifier.weight(1f))
-        listOf("INBOX" to onInbox, "PROJECT" to onProject).forEach { (name, action) ->
-            val active = selected == name
-            TextButton(
-                onClick = action,
-                colors = ButtonDefaults.textButtonColors(backgroundColor = if (active) InboxGreenSoft else Color.Transparent),
-                shape = RoundedCornerShape(6.dp),
-            ) {
-                Text(name.lowercase().replaceFirstChar(Char::uppercase), color = if (active) InboxGreen else InboxMuted, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal)
+        Surface(
+            color = InboxListSurface,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, InboxLine),
+        ) {
+            Row(Modifier.padding(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                listOf("INBOX" to onInbox, "PROJECT" to onProject).forEach { (name, action) ->
+                    val active = selected == name
+                    Surface(
+                        color = if (active) InboxSurface else Color.Transparent,
+                        shape = RoundedCornerShape(6.dp),
+                        border = if (active) BorderStroke(1.dp, InboxLine) else null,
+                        modifier = Modifier.clickable(onClick = action),
+                    ) {
+                        Text(
+                            name.lowercase().replaceFirstChar(Char::uppercase),
+                            Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                            color = if (active) InboxInk else InboxMuted,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
             }
-            Spacer(Modifier.width(4.dp))
         }
     }
 }
@@ -924,15 +938,15 @@ private fun inboxActionValue(action: String, key: String): Int {
 
 private fun String.inboxTimestamp(): String = take(16).replace('T', ' ')
 
-private val InboxSurface = Color(0xFFFFFFFF)
-private val InboxListSurface = Color(0xFFFAFAF8)
-private val InboxSelected = Color(0xFFF0F4EA)
-private val InboxLine = Color(0xFFE1E2DD)
-private val InboxInk = Color(0xFF252724)
-private val InboxMuted = Color(0xFF6D716B)
-private val InboxGreen = Color(0xFF52713F)
-private val InboxGreenSoft = Color(0xFFE8EFE1)
-private val InboxBlue = Color(0xFF326FA0)
-private val InboxAmber = Color(0xFF936516)
-private val InboxAmberSoft = Color(0xFFFAF2E3)
-private val InboxRed = Color(0xFFAA4B45)
+private val InboxSurface = OrchardDesktopColors.surface
+private val InboxListSurface = OrchardDesktopColors.raised
+private val InboxSelected = OrchardDesktopColors.selected
+private val InboxLine = OrchardDesktopColors.line
+private val InboxInk = OrchardDesktopColors.ink
+private val InboxMuted = OrchardDesktopColors.muted
+private val InboxGreen = OrchardDesktopColors.green
+private val InboxGreenSoft = OrchardDesktopColors.greenSoft
+private val InboxBlue = OrchardDesktopColors.blue
+private val InboxAmber = OrchardDesktopColors.amber
+private val InboxAmberSoft = OrchardDesktopColors.amberSoft
+private val InboxRed = OrchardDesktopColors.red

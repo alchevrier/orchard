@@ -100,18 +100,18 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private val ConductorCanvas = Color(0xFFF5F5F7)
-private val ConductorSurface = Color(0xFFFFFFFF)
-private val ConductorRaised = Color(0xFFFAFAFC)
-private val ConductorInk = Color(0xFF1D1D1F)
-private val ConductorMuted = Color(0xFF6E6E73)
-private val ConductorLine = Color(0xFFE5E5EA)
-private val ConductorGreen = Color(0xFF277A57)
-private val ConductorGreenSoft = Color(0xFFEAF4EF)
-private val ConductorBlue = Color(0xFF2877C7)
-private val ConductorAmber = Color(0xFF936516)
-private val ConductorAmberSoft = Color(0xFFFAF2E3)
-private val ConductorRed = Color(0xFFB64A45)
+private val ConductorCanvas = OrchardDesktopColors.canvas
+private val ConductorSurface = OrchardDesktopColors.surface
+private val ConductorRaised = OrchardDesktopColors.raised
+private val ConductorInk = OrchardDesktopColors.ink
+private val ConductorMuted = OrchardDesktopColors.muted
+private val ConductorLine = OrchardDesktopColors.line
+private val ConductorGreen = OrchardDesktopColors.green
+private val ConductorGreenSoft = OrchardDesktopColors.greenSoft
+private val ConductorBlue = OrchardDesktopColors.blue
+private val ConductorAmber = OrchardDesktopColors.amber
+private val ConductorAmberSoft = OrchardDesktopColors.amberSoft
+private val ConductorRed = OrchardDesktopColors.red
 
 @Composable
 internal fun DurableConversationWorkspace(
