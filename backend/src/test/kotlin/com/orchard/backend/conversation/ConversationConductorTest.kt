@@ -77,6 +77,9 @@ class ConversationConductorTest {
         assertTrue(executionPrompt.contains("Never return a top-level payload key or a nested payload object."))
         assertTrue(executionPrompt.contains("A credential-free HTTP(S) Git URL is sufficient for ONBOARD_REPOSITORY"))
         assertTrue(executionPrompt.contains("A domain action does not require a separate objective"))
+        assertTrue(executionPrompt.contains("A valid objective response has this exact outer shape"))
+        assertTrue(executionPrompt.contains("\"objective\":{\"projectId\":5,\"title\":\"Prevent background model starvation\""))
+        assertTrue(executionPrompt.contains("Never return PROPOSE_OBJECTIVE with objective set to null."))
         assertTrue(executionPrompt.contains("The first output character must be { and the last output character must be }."))
         assertTrue(executionPrompt.contains("\"payloadJson\":\"{\\\"source\\\":\\\"GIT_URL\\\""))
     }
