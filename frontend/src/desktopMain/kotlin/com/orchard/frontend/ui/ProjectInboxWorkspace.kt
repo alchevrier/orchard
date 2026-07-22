@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.orchard.frontend.network.CreateProjectReportRequest
 import com.orchard.frontend.network.ControlConversationObjectiveRequest
+import com.orchard.frontend.network.ConversationActivityResponse
 import com.orchard.frontend.network.ConversationCommandViewResponse
 import com.orchard.frontend.network.ConversationObjectiveResponse
 import com.orchard.frontend.network.ConversationProjectionResponse
@@ -70,6 +71,8 @@ import com.orchard.frontend.network.ReportItemResponse
 import com.orchard.frontend.network.ReportRevisionProjectionResponse
 import com.orchard.frontend.network.ReportScopeRequest
 import com.orchard.frontend.network.ReportThreadLinkResponse
+import com.orchard.frontend.network.WorkflowRunResponse
+import com.orchard.frontend.network.WorkspaceSnapshotResponse
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -125,6 +128,85 @@ internal fun inboxReportForConversation(
     conversationId: Long,
 ): ReportRevisionProjectionResponse? = reports.firstOrNull { it.thread?.conversationId == conversationId }
 
+internal data class InboxDeliveryTimelineItem(
+    val id: String,
+    val recordedAt: String,
+    val kind: String,
+    val title: String,
+    val summary: String,
+    val authorityType: String? = null,
+    val authorityId: String? = null,
+    val authorityHash: String? = null,
+)
+
+internal data class InboxDeliveryEvidence(
+    val runId: Long,
+    val state: String,
+    val repositoryRevision: String,
+    val worktree: String?,
+    val passedGateCount: Int,
+    val requiredGateCount: Int,
+    val evidence: List<Pair<String, Boolean>>,
+)
+
+internal fun inboxDeliveryTimeline(conversation: ConversationProjectionResponse): List<InboxDeliveryTimelineItem> =
+    (conversation.commands.flatMap { command ->
+        command.executions.map { execution ->
+            val authority = listOfNotNull(execution.downstreamType, execution.downstreamId).joinToString(" ")
+            InboxDeliveryTimelineItem(
+                id = "command:${execution.executionId}",
+                recordedAt = execution.recordedAt,
+                kind = execution.state,
+                title = command.proposal.capabilityId.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase),
+                summary = execution.diagnostic.ifBlank {
+                    if (authority.isBlank()) execution.state.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase)
+                    else "${execution.state.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase)} · $authority"
+                },
+                authorityType = execution.downstreamType,
+                authorityId = execution.downstreamId,
+                authorityHash = execution.downstreamHash,
+            )
+        }
+    } + conversation.activities.map { activity -> activity.asInboxTimelineItem() })
+        .sortedWith(compareBy(InboxDeliveryTimelineItem::recordedAt, InboxDeliveryTimelineItem::id))
+
+private fun ConversationActivityResponse.asInboxTimelineItem() = InboxDeliveryTimelineItem(
+    id = "activity:$activityId",
+    recordedAt = recordedAt,
+    kind = kind,
+    title = authorityType?.replace('_', ' ')?.lowercase()?.replaceFirstChar(Char::uppercase) ?: "Orchard activity",
+    summary = summary,
+    authorityType = authorityType,
+    authorityId = authorityId,
+    authorityHash = authorityHash,
+)
+
+internal fun correlatedInboxWorkflowRun(
+    conversation: ConversationProjectionResponse,
+    workspace: WorkspaceSnapshotResponse,
+): WorkflowRunResponse? {
+    val runIds = conversation.commands.flatMap(ConversationCommandViewResponse::executions)
+        .filter { it.downstreamType == "WORKFLOW_RUN" }
+        .mapNotNull { it.downstreamId?.toLongOrNull() }
+    return runIds.asReversed().firstNotNullOfOrNull { runId -> workspace.workflowRuns.singleOrNull { it.runId == runId } }
+}
+
+internal fun inboxDeliveryEvidence(run: WorkflowRunResponse): InboxDeliveryEvidence {
+    val latestEvidence = run.evidence.groupBy { it.kind }.values.map { records -> records.maxBy { it.evidenceId } }
+    val requiredKinds = run.workflow.evidenceContract.requirements.mapTo(linkedSetOf()) { it.kind }
+    val repositoryRevision = latestEvidence.maxByOrNull { it.evidenceId }?.revision
+        ?: run.context.repository.commitHash
+    return InboxDeliveryEvidence(
+        runId = run.runId,
+        state = run.state,
+        repositoryRevision = repositoryRevision,
+        worktree = run.context.workspaceReservation?.branch,
+        passedGateCount = latestEvidence.count { it.kind in requiredKinds && it.passed },
+        requiredGateCount = requiredKinds.size,
+        evidence = latestEvidence.sortedBy { it.kind }.map { it.kind to it.passed },
+    )
+}
+
 @Composable
 internal fun ProjectInboxWorkspace(
     networkClient: DesktopNetworkClient,
@@ -133,6 +215,7 @@ internal fun ProjectInboxWorkspace(
     onOpenProject: (Int) -> Unit,
 ) {
     var inbox by remember(projectId) { mutableStateOf(ProjectReportInboxResponse(projectId)) }
+    var workspace by remember(projectId) { mutableStateOf(WorkspaceSnapshotResponse()) }
     var genesis by remember(projectId) { mutableStateOf<ProjectGenesisViewResponse?>(null) }
     var projectTitle by remember(projectId) { mutableStateOf("Project $projectId") }
     var selectedFilters by remember(projectId) { mutableStateOf(emptySet<ProjectInboxFilter>()) }
@@ -147,6 +230,7 @@ internal fun ProjectInboxWorkspace(
     var threadLink by remember(projectId) { mutableStateOf<ReportThreadLinkResponse?>(null) }
     var conversation by remember(projectId) { mutableStateOf<ConversationProjectionResponse?>(null) }
     var conversationPrompt by remember(projectId) { mutableStateOf("") }
+    var pendingConversationMessage by remember(projectId) { mutableStateOf<String?>(null) }
     var conversationError by remember(projectId) { mutableStateOf<String?>(null) }
     var isConversationSubmitting by remember(projectId) { mutableStateOf(false) }
     var requestedConversationId by remember(projectId, initialConversationId) { mutableStateOf(initialConversationId) }
@@ -154,11 +238,12 @@ internal fun ProjectInboxWorkspace(
 
     suspend fun refresh() {
         val nextInbox = networkClient.getProjectReports(projectId, selectedFilters.mapTo(mutableSetOf()) { it.wireValue })
-        val workspace = networkClient.getWorkspace()
+        val nextWorkspace = networkClient.getWorkspace()
         inbox = nextInbox
-        genesis = workspace.projectGenesis.singleOrNull { it.projectId == projectId }
+        workspace = nextWorkspace
+        genesis = nextWorkspace.projectGenesis.singleOrNull { it.projectId == projectId }
         if (confirmedIntent.isBlank()) confirmedIntent = genesis?.revision?.productIntent.orEmpty()
-        projectTitle = workspace.resources.values.singleOrNull {
+        projectTitle = nextWorkspace.resources.values.singleOrNull {
             it.type == "PROJECT" && inboxActionValue(it.action, "id") == projectId
         }?.path ?: projectTitle
         requestedConversationId?.let { conversationId ->
@@ -243,6 +328,7 @@ internal fun ProjectInboxWorkspace(
         val content = conversationPrompt.trim()
         if (content.isEmpty() || isConversationSubmitting) return
         conversationPrompt = ""
+        pendingConversationMessage = content
         isConversationSubmitting = true
         conversationError = null
         scope.launch {
@@ -255,7 +341,11 @@ internal fun ProjectInboxWorkspace(
                 )
                 conversation = response.projection ?: networkClient.getConversation(link.conversationId)
                 conversationError = response.diagnostic.takeIf(String::isNotBlank)
-            }.onFailure { conversationError = it.message ?: "The conversation reply failed." }
+            }.onFailure {
+                conversationPrompt = content
+                conversationError = it.message ?: "The conversation reply failed."
+            }
+            pendingConversationMessage = null
             isConversationSubmitting = false
         }
     }
@@ -387,7 +477,9 @@ internal fun ProjectInboxWorkspace(
                             networkClient.resumeProjectReportSubscription(projectId, selected.report.reportId)
                         } },
                         conversation = conversation,
+                        deliveryRun = conversation?.let { correlatedInboxWorkflowRun(it, workspace) },
                         conversationPrompt = conversationPrompt,
+                        pendingConversationMessage = pendingConversationMessage,
                         conversationError = conversationError,
                         isConversationSubmitting = isConversationSubmitting,
                         onConversationPromptChange = { conversationPrompt = it },
@@ -613,7 +705,9 @@ private fun ReportDetail(
     onPause: () -> Unit,
     onResume: () -> Unit,
     conversation: ConversationProjectionResponse?,
+    deliveryRun: WorkflowRunResponse?,
     conversationPrompt: String,
+    pendingConversationMessage: String?,
     conversationError: String?,
     isConversationSubmitting: Boolean,
     onConversationPromptChange: (String) -> Unit,
@@ -622,7 +716,11 @@ private fun ReportDetail(
     onRejectCommand: (ConversationCommandViewResponse) -> Unit,
     onControlObjective: (ConversationObjectiveResponse, String, Int?, List<Long>?) -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp)) {
+    val detailScroll = rememberScrollState()
+    LaunchedEffect(conversation?.lastEventId, pendingConversationMessage, detailScroll.maxValue) {
+        if (conversation != null || pendingConversationMessage != null) detailScroll.animateScrollTo(detailScroll.maxValue)
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(detailScroll).padding(horizontal = 28.dp, vertical = 24.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(report.report.title, color = InboxInk, fontWeight = FontWeight.Bold, fontSize = 21.sp)
@@ -741,7 +839,9 @@ private fun ReportDetail(
         Divider(Modifier.padding(top = 16.dp), color = InboxLine)
         InlineInboxConversation(
             conversation = conversation,
+            deliveryRun = deliveryRun,
             prompt = conversationPrompt,
+            pendingMessage = pendingConversationMessage,
             error = conversationError,
             isSubmitting = isConversationSubmitting,
             onPromptChange = onConversationPromptChange,
@@ -756,7 +856,9 @@ private fun ReportDetail(
 @Composable
 private fun InlineInboxConversation(
     conversation: ConversationProjectionResponse?,
+    deliveryRun: WorkflowRunResponse?,
     prompt: String,
+    pendingMessage: String?,
     error: String?,
     isSubmitting: Boolean,
     onPromptChange: (String) -> Unit,
@@ -801,6 +903,26 @@ private fun InlineInboxConversation(
             }
         }
     }
+    pendingMessage?.let { message ->
+        Row(
+            Modifier.fillMaxWidth().padding(top = 12.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Column(Modifier.fillMaxWidth(0.82f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("You", color = InboxBlue, fontWeight = FontWeight.SemiBold, fontSize = 9.sp)
+                    Text("Sending", Modifier.padding(start = 6.dp), color = InboxMuted, fontSize = 8.sp)
+                }
+                Surface(
+                    modifier = Modifier.padding(top = 4.dp),
+                    color = InboxBlue,
+                    shape = RoundedCornerShape(6.dp),
+                ) {
+                    Text(message, Modifier.padding(horizontal = 12.dp, vertical = 9.dp), color = Color.White, fontSize = 11.sp)
+                }
+            }
+        }
+    }
     conversation.objectives.forEach { objective ->
         Column(
             Modifier.fillMaxWidth().padding(top = 12.dp).background(InboxGreenSoft).padding(10.dp),
@@ -813,6 +935,18 @@ private fun InlineInboxConversation(
             }
             ObjectiveControls(objective, conversation.objectives, onControlObjective)
         }
+    }
+    deliveryRun?.let { InboxDeliveryEvidenceCard(inboxDeliveryEvidence(it)) }
+    val timeline = inboxDeliveryTimeline(conversation)
+    if (timeline.isNotEmpty()) {
+        Text(
+            "DELIVERY ACTIVITY",
+            Modifier.padding(top = 18.dp, bottom = 2.dp),
+            color = InboxMuted,
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp,
+        )
+        timeline.takeLast(20).forEach { item -> InboxDeliveryTimelineRow(item) }
     }
     conversation.commands.filter { it.admission == null && it.executions.isEmpty() }.forEach { command ->
         Row(
@@ -855,6 +989,101 @@ private fun InlineInboxConversation(
             else Icon(Icons.AutoMirrored.Filled.Send, "Send reply", Modifier.size(18.dp), tint = InboxGreen)
         }
     }
+}
+
+@Composable
+private fun InboxDeliveryEvidenceCard(evidence: InboxDeliveryEvidence) {
+    val stateColor = deliveryStateColor(evidence.state)
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+        color = InboxListSurface,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, InboxLine),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Delivery run ${evidence.runId}", color = InboxInk, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                    Text(
+                        evidence.state.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase),
+                        Modifier.padding(top = 2.dp),
+                        color = stateColor,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 9.sp,
+                    )
+                }
+                Text(
+                    "${evidence.passedGateCount}/${evidence.requiredGateCount} gates",
+                    color = if (evidence.requiredGateCount > 0 && evidence.passedGateCount >= evidence.requiredGateCount) InboxGreen else InboxMuted,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 10.sp,
+                )
+            }
+            Text(
+                "Revision ${evidence.repositoryRevision.take(12)}",
+                Modifier.padding(top = 8.dp),
+                color = InboxMuted,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+            )
+            evidence.worktree?.let {
+                Text(it, Modifier.padding(top = 3.dp), color = InboxMuted, fontFamily = FontFamily.Monospace, fontSize = 8.sp)
+            }
+            if (evidence.evidence.isNotEmpty()) {
+                Divider(Modifier.padding(vertical = 9.dp), color = InboxLine)
+                evidence.evidence.forEach { (kind, passed) ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(7.dp).background(if (passed) InboxGreen else InboxRed, RoundedCornerShape(4.dp)),
+                        )
+                        Text(
+                            kind.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase),
+                            Modifier.padding(start = 7.dp).weight(1f),
+                            color = InboxInk,
+                            fontSize = 10.sp,
+                        )
+                        Text(if (passed) "Passed" else "Failed", color = if (passed) InboxGreen else InboxRed, fontSize = 9.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InboxDeliveryTimelineRow(item: InboxDeliveryTimelineItem) {
+    val color = deliveryStateColor(item.kind)
+    Row(Modifier.fillMaxWidth().padding(top = 9.dp), verticalAlignment = Alignment.Top) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.padding(top = 4.dp).size(8.dp).background(color, RoundedCornerShape(4.dp)))
+            Box(Modifier.padding(top = 3.dp).width(1.dp).height(28.dp).background(InboxLine))
+        }
+        Column(Modifier.weight(1f).padding(start = 9.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(item.title, Modifier.weight(1f), color = InboxInk, fontWeight = FontWeight.SemiBold, fontSize = 10.sp)
+                Text(item.recordedAt.inboxTimestamp(), color = InboxMuted, fontSize = 8.sp)
+            }
+            Text(item.summary, Modifier.padding(top = 2.dp), color = InboxMuted, fontSize = 10.sp)
+            if (item.authorityType != null) {
+                Text(
+                    "${item.authorityType} ${item.authorityId.orEmpty()}${item.authorityHash?.let { " · ${it.take(8)}" }.orEmpty()}",
+                    Modifier.padding(top = 3.dp),
+                    color = InboxBlue,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 8.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+private fun deliveryStateColor(state: String): Color = when {
+    state in setOf("ATTENTION", "FAILED", "REJECTED", "EVIDENCE_BLOCKED", "CANCELLED") -> InboxRed
+    state in setOf("TERMINAL", "CORRELATED", "COMPLETED", "DONE") -> InboxGreen
+    state in setOf("DISPATCH_INTENT", "ACTIVE", "IN_PROGRESS") -> InboxBlue
+    else -> InboxAmber
 }
 
 @Composable

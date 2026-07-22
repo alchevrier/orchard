@@ -91,6 +91,77 @@ class ProjectInboxWorkspaceTest {
         assertNull(inboxReportForConversation(reports, 99))
     }
 
+    @Test
+    fun `delivery timeline combines command outcomes and correlated activity chronologically`() {
+        val conversation = com.orchard.frontend.network.ConversationProjectionResponse(
+            conversation = com.orchard.frontend.network.ConversationResponse(31, "Delivery", "HUMAN", "2026-07-22T00:00:00Z", "a"),
+            commands = listOf(com.orchard.frontend.network.ConversationCommandViewResponse(
+                proposal = com.orchard.frontend.network.ConversationCommandProposalResponse(
+                    7, 31, 3, 1, "b", "START_WORKFLOW", "{\"workItemId\":4}", true,
+                    "2026-07-22T00:00:01Z", "c",
+                ),
+                executions = listOf(com.orchard.frontend.network.ConversationCommandExecutionResponse(
+                    8, 7, "c", "CORRELATED", "WORKFLOW_RUN", "12", "d", "abc123",
+                    recordedAt = "2026-07-22T00:00:02Z", hash = "e",
+                )),
+            )),
+            activities = listOf(com.orchard.frontend.network.ConversationActivityResponse(
+                9, 31, 3, "ATTENTION", "Verification failed; Orchard will prepare a governed repair.",
+                "WORKFLOW_RUN", "12", "f", "2026-07-22T00:00:03Z", "g",
+            )),
+            lastEventId = 9,
+        )
+
+        val timeline = inboxDeliveryTimeline(conversation)
+
+        assertEquals(listOf("command:8", "activity:9"), timeline.map(InboxDeliveryTimelineItem::id))
+        assertEquals("Start workflow", timeline.first().title)
+        assertEquals("WORKFLOW_RUN", timeline.last().authorityType)
+        assertEquals("12", timeline.last().authorityId)
+    }
+
+    @Test
+    fun `delivery evidence uses latest record per kind`() {
+        val run = com.orchard.frontend.network.WorkflowRunResponse(
+            runId = 12,
+            state = "EVIDENCE_BLOCKED",
+            context = com.orchard.frontend.network.ContextManifestResponse(
+                projectId = 42,
+                workItemId = 4,
+                repository = com.orchard.frontend.network.RepositoryHeadResponse("base123"),
+                workspaceReservation = com.orchard.frontend.network.DispatchWorkspaceReservationResponse(
+                    "ISOLATED", "dispatch-12", "/tmp/dispatch-12", "orchard/dispatch-12", "base123",
+                ),
+            ),
+            workflow = com.orchard.frontend.network.ResolvedWorkflowResponse(
+                "delivery",
+                1,
+                com.orchard.frontend.network.EvidenceContractResponse(
+                    "delivery-evidence",
+                    1,
+                    listOf(
+                        com.orchard.frontend.network.EvidenceRequirementResponse("SOURCE_DIFF", "Source changed"),
+                        com.orchard.frontend.network.EvidenceRequirementResponse("TEST", "Tests pass"),
+                    ),
+                ),
+            ),
+            evidence = listOf(
+                com.orchard.frontend.network.EvidenceRecordResponse(1, "TEST", "candidate-1", false),
+                com.orchard.frontend.network.EvidenceRecordResponse(2, "SOURCE_DIFF", "candidate-2", true),
+                com.orchard.frontend.network.EvidenceRecordResponse(3, "TEST", "candidate-2", true),
+                com.orchard.frontend.network.EvidenceRecordResponse(4, "DIAGNOSTIC", "candidate-2", true),
+            ),
+        )
+
+        val evidence = inboxDeliveryEvidence(run)
+
+        assertEquals("candidate-2", evidence.repositoryRevision)
+        assertEquals(2, evidence.passedGateCount)
+        assertEquals(2, evidence.requiredGateCount)
+        assertEquals(listOf("DIAGNOSTIC" to true, "SOURCE_DIFF" to true, "TEST" to true), evidence.evidence)
+        assertEquals("orchard/dispatch-12", evidence.worktree)
+    }
+
     private fun genesis(phase: String, firstEpicId: Int? = null) = ProjectGenesisViewResponse(
         projectId = 42,
         phase = phase,
