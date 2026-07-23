@@ -84,16 +84,17 @@ class LocalCodingWorkspaceGateway(
     private val policyCatalog: ToolchainPolicyCatalog = FileToolchainPolicyCatalog(),
 ) : CodingWorkspaceGateway {
     override fun collectContext(workspacePath: String, query: String): CodingRepositoryContext =
-        collectContext(workspacePath, query, MAX_CONTEXT_FILES, MAX_CONTEXT_BYTES)
+        collectContext(workspacePath, query, MAX_CONTEXT_FILES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FILE_BYTES)
 
     override fun collectAnalysisContext(workspacePath: String, query: String): CodingRepositoryContext =
-        collectContext(workspacePath, query, MAX_ANALYSIS_CONTEXT_FILES, MAX_ANALYSIS_CONTEXT_BYTES)
+        collectContext(workspacePath, query, MAX_ANALYSIS_CONTEXT_FILES, MAX_ANALYSIS_CONTEXT_BYTES, MAX_ANALYSIS_CONTEXT_FILE_BYTES)
 
     override fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext =
         collectContext(
             workspacePath,
             query,
             MAX_GENESIS_CONTEXT_FILES,
+            MAX_GENESIS_CONTEXT_BYTES,
             MAX_GENESIS_CONTEXT_BYTES,
             includePath = ::isGenesisImplementationPath,
         )
@@ -157,6 +158,7 @@ class LocalCodingWorkspaceGateway(
         query: String,
         maxFiles: Int,
         maxBytes: Int,
+        maxFileBytes: Int,
         includePath: (String) -> Boolean = { true },
     ): CodingRepositoryContext {
         val root = validatedRoot(workspacePath)
@@ -176,7 +178,7 @@ class LocalCodingWorkspaceGateway(
             val bytes = runCatching { Files.readAllBytes(path) }.getOrNull() ?: return@mapNotNull null
             if (bytes.any { it == 0.toByte() }) return@mapNotNull null
             val source = bytes.toString(Charsets.UTF_8)
-            val content = focusedContextExcerpt(source, queryTokens, MAX_CONTEXT_FILE_BYTES.toInt())
+            val content = focusedContextExcerpt(source, queryTokens, maxFileBytes)
             val relative = root.relativize(path).toString().replace('\\', '/')
             val lowerPath = relative.lowercase()
             val lowerContent = source.lowercase()
@@ -509,11 +511,12 @@ class LocalCodingWorkspaceGateway(
     private companion object {
         const val MAX_REPLACEMENTS = 32
         const val MAX_CONTEXT_FILES = 32
-        const val MAX_CONTEXT_FILE_BYTES = 64 * 1024L
+        const val MAX_CONTEXT_FILE_BYTES = 64 * 1024
         const val MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024L
         const val MAX_CONTEXT_BYTES = 256 * 1024
         const val MAX_ANALYSIS_CONTEXT_FILES = 96
         const val MAX_ANALYSIS_CONTEXT_BYTES = 768 * 1024
+        const val MAX_ANALYSIS_CONTEXT_FILE_BYTES = 12 * 1024
         const val MAX_GENESIS_CONTEXT_FILES = 6
         const val MAX_GENESIS_CONTEXT_BYTES = 4 * 1024
         const val MAX_OPERATIONS = 32

@@ -284,6 +284,7 @@ class CodingWorkerTest {
     fun `workspace gateway excerpts query matches from oversized source files`() {
         val repository = initializedRepository()
         val source = repository.resolve("src/Main.kt")
+        val secondary = repository.resolve("src/Secondary.kt")
         val content = buildString {
             repeat(2_000) { appendLine("val filler$it = $it") }
             appendLine("val heading = FontFamily.Serif")
@@ -292,6 +293,7 @@ class CodingWorkerTest {
             repeat(2_000) { appendLine("val finalFiller$it = $it") }
         }
         Files.writeString(source, content)
+        Files.writeString(secondary, content.replace("FontFamily.Serif", "Typography.Default"))
         run(repository, "git", "add", ".")
         run(repository, "git", "commit", "-m", "Add oversized source")
 
@@ -300,11 +302,14 @@ class CodingWorkerTest {
             "Remove serif and review monospace typography.",
         )
         val excerpt = context.files.single { it.path == "src/Main.kt" }.content
+        val secondaryExcerpt = context.files.single { it.path == "src/Secondary.kt" }.content
 
         assertTrue(excerpt.encodeToByteArray().size < content.encodeToByteArray().size)
+        assertTrue(secondaryExcerpt.encodeToByteArray().size < content.encodeToByteArray().size)
         assertTrue(excerpt.contains("[Orchard excerpt lines"))
         assertTrue(excerpt.contains("FontFamily.Serif"))
         assertTrue(excerpt.contains("FontFamily.Monospace"))
+        assertTrue(secondaryExcerpt.contains("FontFamily.Monospace"))
     }
 
     @Test
