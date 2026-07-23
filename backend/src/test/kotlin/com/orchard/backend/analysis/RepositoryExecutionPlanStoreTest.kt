@@ -81,6 +81,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("never put a requiredScope value in acceptanceCriteria"))
         assert(prompt.contains("verificationCommands may contain only exact values from requiredVerificationCommands"))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
+        assert(prompt.contains("Every operation, including every CREATE, MODIFY, DELETE, and VERIFY operation, must contain at least one exact value from requiredAcceptanceCriteria"))
+        assert(prompt.contains("never emit an empty acceptanceCriteria array"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
     }
