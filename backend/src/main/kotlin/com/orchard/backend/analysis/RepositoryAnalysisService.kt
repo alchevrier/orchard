@@ -110,8 +110,12 @@ class RepositoryAnalysisService(
 
     fun currentPlan(runId: Long): RepositoryExecutionPlan? {
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.singleOrNull { it.runId == runId } ?: return null
-        return planStore.load()
-            .filter { it.runId == runId && it.coversAcceptedScope(run) }
+        val staticCandidates = planStore.load().filter { it.runId == runId && it.coversAcceptedScope(run) }
+        if (staticCandidates.isEmpty()) return null
+        val workspacePath = run.context.workspaceReservation?.path ?: return null
+        val context = runCatching { workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run)) }.getOrNull() ?: return null
+        return staticCandidates
+            .filter { it.coversAcceptedScope(run, context) }
             .maxByOrNull { it.revision }
     }
 
@@ -126,8 +130,16 @@ class RepositoryAnalysisService(
             .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
             .sortedBy { it.runId }
             .filter { candidate ->
-                val currentRevision = workspaceGateway.currentRevision(requireNotNull(candidate.context.workspaceReservation).path)
-                plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate) }
+                val workspacePath = requireNotNull(candidate.context.workspaceReservation).path
+                val currentRevision = workspaceGateway.currentRevision(workspacePath)
+                val staticCandidates = plans.filter {
+                    it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate)
+                }
+                if (staticCandidates.isEmpty()) return@filter true
+                val context = runCatching {
+                    workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(candidate))
+                }.getOrNull() ?: return@filter true
+                staticCandidates.none { it.coversAcceptedScope(candidate, context) }
             }
             .map { it.runId }
             .toList()
@@ -147,12 +159,8 @@ class RepositoryAnalysisService(
         val plans = planStore.load()
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
-            .singleOrNull { candidate ->
-                candidate.runId == runId && run {
-                val currentRevision = workspaceGateway.currentRevision(requireNotNull(candidate.context.workspaceReservation).path)
-                plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate) }
-                }
-            } ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, runId)
+            .singleOrNull { it.runId == runId }
+            ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, runId)
         val workspacePath = requireNotNull(run.context.workspaceReservation).path
         val baseRevision = workspaceGateway.currentRevision(workspacePath)
             ?: return RepositoryAnalysisTickResult(
@@ -167,6 +175,9 @@ class RepositoryAnalysisService(
         }
         if (context.files.isEmpty()) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = "No repository evidence was selected.")
+        }
+        if (plans.any { it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) }) {
+            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, run.runId)
         }
         val profile = DefaultModelExecutionProfiles.broadRepositoryAnalysis
         val assignment = companyControl?.let { company ->
@@ -425,6 +436,15 @@ internal fun repositoryAnalysisIdentityDiagnostic(
 private fun RepositoryExecutionPlan.coversAcceptedScope(run: WorkflowRunView): Boolean {
     return repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), content) == null
 }
+
+private fun RepositoryExecutionPlan.coversAcceptedScope(
+    run: WorkflowRunView,
+    context: CodingRepositoryContext,
+): Boolean = coversAcceptedScope(run) && repositoryUniversalScopeCoverageDiagnostic(
+    run.workDefinition?.definition?.scope.orEmpty(),
+    context,
+    content,
+) == null
 
 internal fun repositoryScopeCoverageDiagnostic(
     acceptedScope: List<String>,

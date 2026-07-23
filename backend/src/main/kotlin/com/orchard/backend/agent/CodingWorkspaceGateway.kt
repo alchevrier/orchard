@@ -186,7 +186,7 @@ class LocalCodingWorkspaceGateway(
             val lowerContent = source.lowercase()
             val score = queryTokens.sumOf { token ->
                 (if (lowerPath.contains(token)) 20 else 0) + (if (lowerContent.contains(token)) 1 else 0)
-            } + foundationScore(relative)
+            } + foundationScore(relative) + ownershipScore(relative, source, queryTokens)
             RankedContextFile(
                 score,
                 relative,
@@ -512,6 +512,18 @@ class LocalCodingWorkspaceGateway(
         return if (name in FOUNDATION_FILES || path.startsWith("docs/")) 10 else 0
     }
 
+    private fun ownershipScore(path: String, source: String, queryTokens: Set<String>): Int {
+        val typographyOwner = "typography" in queryTokens && EXPLICIT_FONT_FAMILY.containsMatchIn(source)
+        val testOwner = queryTokens.any { it == "test" || it == "tests" || it == "regression" } && isTestSourcePath(path)
+        return (if (typographyOwner) OWNERSHIP_SCORE_BONUS else 0) +
+            (if (testOwner) OWNERSHIP_SCORE_BONUS else 0)
+    }
+
+    private fun isTestSourcePath(path: String): Boolean {
+        val normalized = path.replace('\\', '/').lowercase()
+        return "/test/" in normalized || normalized.substringAfterLast('/').contains("test.")
+    }
+
     private fun tokens(value: String): Set<String> = value.lowercase()
         .split(Regex("[^a-z0-9_]+"))
         .filter { it.length >= 3 }
@@ -529,6 +541,7 @@ class LocalCodingWorkspaceGateway(
 
     private companion object {
         const val MAX_REPLACEMENTS = 32
+        const val OWNERSHIP_SCORE_BONUS = 10_000
         const val MAX_CONTEXT_FILES = 32
         const val MAX_CONTEXT_FILE_BYTES = 64 * 1024
         const val MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024L

@@ -315,6 +315,37 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `analysis context retains all typography owners and a test beyond the file cap`() {
+        val repository = initializedRepository()
+        repeat(110) { index ->
+            Files.writeString(
+                repository.resolve("src/Distractor$index.kt"),
+                "fun projectTypographySettingsDelivery$index() = \"project typography settings delivery regression\"\n",
+            )
+        }
+        val ownerPaths = (1..4).map { index -> "src/Surface$index.kt" }.onEachIndexed { index, path ->
+            Files.writeString(repository.resolve(path), "val surface$index = FontFamily.Monospace\n")
+        }
+        val testPath = "src/test/TypographyRegressionTest.kt"
+        Files.createDirectories(repository.resolve("src/test"))
+        Files.writeString(repository.resolve(testPath), "class TypographyRegressionTest\n")
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add ranked analysis context")
+
+        val context = LocalCodingWorkspaceGateway().collectAnalysisContext(
+            repository.toString(),
+            "Inspect typography across all surfaces and add regression tests.",
+        )
+
+        assertTrue(ownerPaths.all { path -> context.files.any { it.path == path } })
+        assertTrue(context.files.any { it.path == testPath })
+        assertEquals(
+            (ownerPaths + testPath).sorted(),
+            context.files.filter { it.containsExplicitFontFamily || it.path == testPath }.map { it.path }.sorted(),
+        )
+    }
+
+    @Test
     fun `focused excerpts retain late owning declarations over repeated early usages`() {
         val content = buildString {
             repeat(300) { appendLine("Text(fontFamily = FontFamily.Monospace) // usage $it") }
