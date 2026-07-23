@@ -21,9 +21,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
         assert(prompt.contains("copying scope exactly without paraphrasing, omission, or invention"))
         assert(prompt.contains("or from a path introduced by a CREATE operation"))
-        assert(prompt.contains("A VERIFY-only mapping is invalid."))
-        assert(prompt.contains("must be the target path of one of that item's referenced non-VERIFY operations"))
-        assert(prompt.contains("must reference both the CREATE or MODIFY test operation and the final VERIFY operation"))
+        assert(prompt.contains("Every evidencePath in scopeCoverage must also be targeted by a CREATE, MODIFY, or DELETE operation"))
+        assert(prompt.contains("every referenced order must exist"))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
@@ -154,7 +153,10 @@ class RepositoryExecutionPlanStoreTest {
         val verifyOnly = content.copy(
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )
-        assertEquals("Scope coverage 1 has no concrete source operation.", repositoryScopeCoverageDiagnostic(scope, verifyOnly))
+        assertEquals(
+            "Scope coverage 1 cites a path without a corresponding source operation.",
+            repositoryScopeCoverageDiagnostic(scope, verifyOnly),
+        )
         val unmatchedEvidence = content.copy(
             evidence = content.evidence + RepositoryEvidenceCitation("src/Other.kt", null, "Another owner.", "d".repeat(64)),
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
