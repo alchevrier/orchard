@@ -62,6 +62,8 @@ private data class RepositoryAnalysisEnvelope(
     val repositoryContext: CodingRepositoryContext,
     val allowedDispositions: List<String>,
     val requiredOutputSchema: String,
+    val requiredAcceptanceCriteria: List<String>,
+    val requiredVerificationCommands: List<String>,
 )
 
 class RepositoryAnalysisService(
@@ -158,6 +160,8 @@ class RepositoryAnalysisService(
             candidate,
             DISPOSITIONS,
             OUTPUT_SCHEMA,
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
         val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens) { candidate ->
             "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"

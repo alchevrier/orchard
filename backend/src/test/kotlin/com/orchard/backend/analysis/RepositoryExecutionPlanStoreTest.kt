@@ -19,7 +19,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("A valid response has exactly this shape:"))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, operations, verificationCommands, and unresolvedQuestions top-level keys."))
-        assert(prompt.contains("Copy acceptance-criterion descriptions and verification strings exactly; do not paraphrase them."))
+        assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
+        assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
     }
 
     @Test
