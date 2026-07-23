@@ -172,13 +172,14 @@ class LocalCodingWorkspaceGateway(
         val queryTokens = tokens(query)
         val ranked = tracked.mapNotNull { path ->
             val size = runCatching { Files.size(path) }.getOrNull() ?: return@mapNotNull null
-            if (size > MAX_CONTEXT_FILE_BYTES) return@mapNotNull null
+            if (size > MAX_CONTEXT_SOURCE_BYTES) return@mapNotNull null
             val bytes = runCatching { Files.readAllBytes(path) }.getOrNull() ?: return@mapNotNull null
             if (bytes.any { it == 0.toByte() }) return@mapNotNull null
-            val content = bytes.toString(Charsets.UTF_8)
+            val source = bytes.toString(Charsets.UTF_8)
+            val content = focusedContextExcerpt(source, queryTokens, MAX_CONTEXT_FILE_BYTES.toInt())
             val relative = root.relativize(path).toString().replace('\\', '/')
             val lowerPath = relative.lowercase()
-            val lowerContent = content.lowercase()
+            val lowerContent = source.lowercase()
             val score = queryTokens.sumOf { token ->
                 (if (lowerPath.contains(token)) 20 else 0) + (if (lowerContent.contains(token)) 1 else 0)
             } + foundationScore(relative)
@@ -509,6 +510,7 @@ class LocalCodingWorkspaceGateway(
         const val MAX_REPLACEMENTS = 32
         const val MAX_CONTEXT_FILES = 32
         const val MAX_CONTEXT_FILE_BYTES = 64 * 1024L
+        const val MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024L
         const val MAX_CONTEXT_BYTES = 256 * 1024
         const val MAX_ANALYSIS_CONTEXT_FILES = 96
         const val MAX_ANALYSIS_CONTEXT_BYTES = 768 * 1024
@@ -541,6 +543,46 @@ class LocalCodingWorkspaceGateway(
         )
     }
 }
+
+internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, maxBytes: Int): String {
+    require(maxBytes > 0)
+    if (content.encodeToByteArray().size <= maxBytes) return content
+    val lines = content.split('\n')
+    val matches = lines.indices.mapNotNull { index ->
+        val lower = lines[index].lowercase()
+        queryTokens.count(lower::contains).takeIf { it > 0 }?.let { score -> index to score }
+    }.sortedWith(compareByDescending<Pair<Int, Int>> { it.second }.thenBy { it.first })
+        .take(MAX_EXCERPT_WINDOWS)
+        .map { it.first }
+        .sorted()
+    val windows = matches.map { index ->
+        (index - EXCERPT_CONTEXT_LINES).coerceAtLeast(0)..(index + EXCERPT_CONTEXT_LINES).coerceAtMost(lines.lastIndex)
+    }.fold(mutableListOf<IntRange>()) { merged, window ->
+        val previous = merged.lastOrNull()
+        if (previous != null && window.first <= previous.last + 1) {
+            merged[merged.lastIndex] = previous.first..maxOf(previous.last, window.last)
+        } else {
+            merged += window
+        }
+        merged
+    }.ifEmpty { mutableListOf(0..minOf(lines.lastIndex, EXCERPT_CONTEXT_LINES * 2)) }
+    val excerpt = StringBuilder()
+    windows.forEach { window ->
+        val section = buildString {
+            append("[Orchard excerpt lines ${window.first + 1}-${window.last + 1} of ${lines.size}]\n")
+            window.forEach { index -> append(lines[index]).append('\n') }
+        }
+        if ((excerpt.toString() + section).encodeToByteArray().size <= maxBytes) excerpt.append(section)
+    }
+    return excerpt.toString().ifBlank {
+        lines.asSequence().runningFold("") { result, line -> "$result$line\n" }
+            .takeWhile { it.encodeToByteArray().size <= maxBytes }
+            .lastOrNull().orEmpty()
+    }
+}
+
+private const val MAX_EXCERPT_WINDOWS = 64
+private const val EXCERPT_CONTEXT_LINES = 3
 
 internal fun sha256Content(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8))

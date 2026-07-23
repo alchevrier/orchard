@@ -281,6 +281,33 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `workspace gateway excerpts query matches from oversized source files`() {
+        val repository = initializedRepository()
+        val source = repository.resolve("src/Main.kt")
+        val content = buildString {
+            repeat(2_000) { appendLine("val filler$it = $it") }
+            appendLine("val heading = FontFamily.Serif")
+            repeat(2_000) { appendLine("val moreFiller$it = $it") }
+            appendLine("val telemetry = FontFamily.Monospace")
+            repeat(2_000) { appendLine("val finalFiller$it = $it") }
+        }
+        Files.writeString(source, content)
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add oversized source")
+
+        val context = LocalCodingWorkspaceGateway().collectAnalysisContext(
+            repository.toString(),
+            "Remove serif and review monospace typography.",
+        )
+        val excerpt = context.files.single { it.path == "src/Main.kt" }.content
+
+        assertTrue(excerpt.encodeToByteArray().size < content.encodeToByteArray().size)
+        assertTrue(excerpt.contains("[Orchard excerpt lines"))
+        assertTrue(excerpt.contains("FontFamily.Serif"))
+        assertTrue(excerpt.contains("FontFamily.Monospace"))
+    }
+
+    @Test
     fun `workspace gateway rejects ambiguous replacements without mutation`() {
         val repository = initializedRepository()
         val source = repository.resolve("src/Main.kt")
