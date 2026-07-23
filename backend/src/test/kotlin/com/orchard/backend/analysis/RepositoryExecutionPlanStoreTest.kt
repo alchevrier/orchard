@@ -303,7 +303,11 @@ class RepositoryExecutionPlanStoreTest {
                 CodingContextFile("frontend/src/main/Theme.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
                 CodingContextFile("frontend/src/main/Inbox.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
                 CodingContextFile("frontend/src/main/Body.kt", "Text(\"Body\")"),
-                CodingContextFile("backend/src/test/AnalysisTest.kt", "class AnalysisTest"),
+                CodingContextFile(
+                    "backend/src/test/AnalysisTest.kt",
+                    "val fixture = \"FontFamily.Serif\"",
+                    containsExplicitFontFamily = true,
+                ),
                 CodingContextFile("frontend/src/test/TypographyTest.kt", "class TypographyTest"),
             ),
             omittedFileCount = 0,

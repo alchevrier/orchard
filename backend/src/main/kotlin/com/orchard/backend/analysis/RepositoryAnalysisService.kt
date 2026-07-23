@@ -212,7 +212,11 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
-        val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens) { candidate ->
+        val requiredSourcePaths = requiredRepositorySourceOperationPaths(
+            run.workDefinition?.definition?.scope.orEmpty(),
+            context,
+        ).toSet()
+        val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens, requiredSourcePaths) { candidate ->
             "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
         } ?: return RepositoryAnalysisTickResult(
             RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
@@ -536,6 +540,7 @@ internal fun requiredRepositorySourceOperationPaths(
     }
     val typographyPaths = if (requiresExhaustiveTypography) {
         context.files.asSequence()
+            .filterNot { isTestSourcePath(it.path) }
             .filter { it.containsExplicitFontFamily || EXPLICIT_FONT_FAMILY.containsMatchIn(it.content) }
             .map { it.path }
             .toList()
@@ -672,23 +677,28 @@ internal fun repositoryOperationShapeDiagnostic(
 internal fun compactRepositoryContextToBudget(
     context: CodingRepositoryContext,
     inputBudgetTokens: Int,
+    requiredPaths: Set<String> = emptySet(),
     promptFor: (CodingRepositoryContext) -> String,
 ): CodingRepositoryContext? {
     if (context.files.isEmpty()) return null
-    var lower = 1
-    var upper = context.files.size
+    val availablePaths = context.files.mapTo(hashSetOf()) { it.path }
+    if (!availablePaths.containsAll(requiredPaths)) return null
+    val optionalFiles = context.files.filter { it.path !in requiredPaths }
+    var lower = if (requiredPaths.isEmpty()) 1 else 0
+    var upper = optionalFiles.size
     var best: CodingRepositoryContext? = null
     while (lower <= upper) {
-        val retained = (lower + upper) / 2
+        val retainedOptional = (lower + upper) / 2
+        val selectedPaths = requiredPaths + optionalFiles.take(retainedOptional).map { it.path }
         val candidate = context.copy(
-            files = context.files.take(retained),
-            omittedFileCount = context.omittedFileCount + context.files.size - retained,
+            files = context.files.filter { it.path in selectedPaths },
+            omittedFileCount = context.omittedFileCount + context.files.size - selectedPaths.size,
         )
         if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
             best = candidate
-            lower = retained + 1
+            lower = retainedOptional + 1
         } else {
-            upper = retained - 1
+            upper = retainedOptional - 1
         }
     }
     return best

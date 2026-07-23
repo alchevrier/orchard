@@ -87,6 +87,26 @@ class CompanyCircuitTest {
     }
 
     @Test
+    fun `repository analysis retains required evidence beyond the budgeted prefix`() {
+        val context = CodingRepositoryContext(
+            files = (1..6).map { index -> CodingContextFile("src/$index.kt", "x".repeat(400)) },
+            omittedFileCount = 0,
+        )
+        val requiredPaths = setOf("src/5.kt", "src/6.kt")
+        val threeFileBudget = estimateModelTokens(Json.encodeToString(context.copy(
+            files = listOf(context.files[0], context.files[4], context.files[5]),
+            omittedFileCount = 3,
+        )))
+
+        val compacted = requireNotNull(compactRepositoryContextToBudget(context, threeFileBudget, requiredPaths) { candidate ->
+            Json.encodeToString(candidate)
+        })
+
+        assertEquals(listOf("src/1.kt", "src/5.kt", "src/6.kt"), compacted.files.map { it.path })
+        assertEquals(3, compacted.omittedFileCount)
+    }
+
+    @Test
     fun `company repairs failed work and audit violations before local promotion`() = runTest {
         val state = createTempDirectory("orchard-company-acceptance-state-")
         val projects = createTempDirectory("orchard-company-acceptance-projects-")
