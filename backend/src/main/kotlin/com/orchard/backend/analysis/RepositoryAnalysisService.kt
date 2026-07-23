@@ -530,12 +530,25 @@ internal fun requiredRepositorySourceOperationPaths(
         emptyList()
     }
     val testPaths = if (acceptedScope.any(::requiresTestSource)) {
-        listOfNotNull(context.files.firstOrNull { isTestSourcePath(it.path) }?.path)
+        listOfNotNull(
+            context.files.filter { isTestSourcePath(it.path) }
+                .maxByOrNull { candidate ->
+                    typographyPaths.maxOfOrNull { owner -> commonPathPrefixLength(candidate.path, owner) } ?: 0
+                }
+                ?.path
+        )
     } else {
         emptyList()
     }
     return (typographyPaths + testPaths).distinct().sorted()
 }
+
+private fun commonPathPrefixLength(first: String, second: String): Int = first
+    .replace('\\', '/')
+    .split('/')
+    .zip(second.replace('\\', '/').split('/'))
+    .takeWhile { (left, right) -> left == right }
+    .size
 
 private fun canonicalAuthorityText(value: String): String = value
     .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")
