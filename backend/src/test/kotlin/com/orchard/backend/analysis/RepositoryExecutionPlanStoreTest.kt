@@ -22,6 +22,7 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("copying scope exactly without paraphrasing, omission, or invention"))
         assert(prompt.contains("or from a path introduced by a CREATE operation"))
         assert(prompt.contains("A VERIFY-only mapping is invalid."))
+        assert(prompt.contains("must reference both the CREATE or MODIFY test operation and the final VERIFY operation"))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
