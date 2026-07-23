@@ -45,6 +45,7 @@ import com.orchard.backend.workspace.FileWorkspaceRepository
 import com.orchard.backend.workspace.GENESIS_READY
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.PROJECT_GREENFIELD_LOCAL
+import com.orchard.backend.workspace.ProjectGenesisFirstOutcomeStatus
 import com.orchard.backend.workspace.ProjectGenesisStatus
 import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.RepositoryBlueprint
@@ -227,6 +228,65 @@ class CompanyCircuitTest {
         assertEquals(1, recovered.circuitDispatches.size)
         assertEquals(1, recovered.workflowRuns.size)
         assertEquals(1, recoveredCompany.projectView(1).ruleSet?.revision)
+    }
+
+    @Test
+    fun `repository first genesis compiles product intent governance`() {
+        val state = createTempDirectory("orchard-repository-first-company-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Existing product")))
+        workspace.commitBatch()
+        assertEquals(
+            ProjectGenesisStatus.RECORDED,
+            workspace.advanceProjectGenesis(
+                1,
+                ProjectGenesisSubmission(
+                    classification = PROJECT_GREENFIELD_LOCAL,
+                    productIntent = "Evolve the existing product under governed delivery.",
+                    baseRevision = 0,
+                ),
+            ).status,
+        )
+        val classified = requireNotNull(workspace.snapshot(MESSAGE_READY).projectGenesis.single().revision)
+        assertEquals(
+            ProjectGenesisStatus.RECORDED,
+            workspace.advanceProjectGenesis(
+                1,
+                ProjectGenesisSubmission(
+                    experience = ExperienceContract(
+                        audience = "Local maintainers",
+                        productPromise = "Existing product changes remain governed.",
+                        primaryJourney = listOf("Define an outcome", "Deliver it"),
+                        interactionPrinciples = listOf("Preserve authority"),
+                        emotionalQualities = listOf("Calm"),
+                        mustNotFeelLike = listOf("An ungoverned script"),
+                    ),
+                    baseRevision = classified.revision,
+                    baseHash = classified.hash,
+                ),
+            ).status,
+        )
+        val experienced = requireNotNull(workspace.snapshot(MESSAGE_READY).projectGenesis.single().revision)
+        assertEquals(
+            ProjectGenesisFirstOutcomeStatus.CREATED,
+            workspace.createProjectGenesisFirstOutcome(
+                projectId = 1,
+                title = "Deliver the first repository outcome",
+                baseRevision = experienced.revision,
+                baseHash = experienced.hash,
+                confirmedProductIntent = "Evolve the existing product under governed delivery.",
+            ).status,
+        )
+        assertEquals(ProjectGenesisStatus.ADMITTED, workspace.admitProjectGenesis(1).status)
+        val company = CompanyControlService(workspace, listOf(StaffModel), FileCompanyControlStore(state), bindings)
+
+        assertEquals(CompanyMutationStatus.RECORDED, company.compileRules(1).status)
+        val rule = requireNotNull(company.projectView(1).ruleSet).rules.single()
+        assertEquals("PRODUCT_INTENT", rule.ruleId)
+        assertEquals("Evolve the existing product under governed delivery.", rule.statement)
+        assertTrue(rule.requiresIndependentAudit)
     }
 
     private fun workspace(state: Path, bindings: FileRepositoryBindingStore) = WorkspaceStore(

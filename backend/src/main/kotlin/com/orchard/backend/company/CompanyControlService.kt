@@ -198,8 +198,21 @@ class CompanyControlService(
                 )
                 add(draft.copy(hash = companyRecordHash(draft.toString())))
             }
+            if (isEmpty()) {
+                val draft = ArchitectureRule(
+                    ruleId = "PRODUCT_INTENT",
+                    projectId = projectId,
+                    genesisRevision = genesis.revision,
+                    genesisHash = genesis.hash,
+                    kind = "PRODUCT_INTENT",
+                    statement = genesis.productIntent,
+                    severity = RISK_HIGH,
+                    requiresIndependentAudit = true,
+                    hash = "",
+                )
+                add(draft.copy(hash = companyRecordHash(draft.toString())))
+            }
         }
-        if (rules.isEmpty()) return CompanyMutationResult(CompanyMutationStatus.PROJECT_NOT_READY)
         val draft = ArchitectureRuleSet(
             ruleSetId = events.size + 1L,
             projectId = projectId,
