@@ -61,10 +61,25 @@ private data class RequiredRepositoryEvidence(
 )
 
 @Serializable
+private data class RepositoryAnalysisTaskContext(
+    val runId: Long,
+    val title: String,
+    val content: String,
+    val requestedOutcome: String,
+    val currentBehavior: String,
+    val requiredBehavior: String,
+    val nonGoals: List<String>,
+    val constraints: List<String>,
+    val reproduction: String,
+    val regressionCriterion: String,
+    val recalledEvidence: List<String>,
+)
+
+@Serializable
 private data class RepositoryAnalysisEnvelope(
     val executionProfileId: String,
     val baseRevision: String,
-    val run: WorkflowRunView,
+    val task: RepositoryAnalysisTaskContext,
     val repositoryContext: CodingRepositoryContext,
     val allowedDispositions: List<String>,
     val requiredOutputSchema: String,
@@ -167,7 +182,7 @@ class RepositoryAnalysisService(
         fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryAnalysisEnvelope(
             profile.id,
             baseRevision,
-            run,
+            taskContext(run),
             candidate,
             DISPOSITIONS,
             OUTPUT_SCHEMA,
@@ -315,6 +330,25 @@ class RepositoryAnalysisService(
             appendLine(it.constraints.joinToString(" "))
         }
         run.context.recalledEpisodes.forEach { appendLine("${it.problem} ${it.resolution} ${it.evidenceSummary}") }
+    }
+
+    private fun taskContext(run: WorkflowRunView): RepositoryAnalysisTaskContext {
+        val definition = run.workDefinition?.definition
+        return RepositoryAnalysisTaskContext(
+            runId = run.runId,
+            title = run.context.title,
+            content = run.context.content,
+            requestedOutcome = definition?.requestedOutcome.orEmpty(),
+            currentBehavior = definition?.currentBehavior.orEmpty(),
+            requiredBehavior = definition?.requiredBehavior.orEmpty(),
+            nonGoals = definition?.nonGoals.orEmpty(),
+            constraints = definition?.constraints.orEmpty(),
+            reproduction = definition?.reproduction.orEmpty(),
+            regressionCriterion = definition?.regressionCriterion.orEmpty(),
+            recalledEvidence = run.context.recalledEpisodes.map {
+                "${it.problem} ${it.resolution} ${it.evidenceSummary}"
+            },
+        )
     }
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")

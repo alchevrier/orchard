@@ -468,6 +468,14 @@ class CompanyCircuitTest {
             val envelope = Json.parseToJsonElement(
                 prompt.substringAfter("Authoritative repository analysis envelope:\n")
             ).jsonObject
+            assertTrue("run" !in envelope)
+            val task = requireNotNull(envelope["task"]).jsonObject
+            assertTrue(requireNotNull(task["title"]).jsonPrimitive.content.isNotBlank())
+            assertTrue("acceptanceCriteria" !in task)
+            assertTrue(
+                requireNotNull(envelope["requiredAcceptanceCriteria"]).jsonArray
+                    .all { it.jsonPrimitive.isString }
+            )
             val requiredScope = requireNotNull(envelope["requiredScope"]).jsonArray.map { it.jsonPrimitive.content }
             val criterion = "The architect can observe one complete governed journey."
             val disposition = if (analysisCalls++ == 0) DISPOSITION_SCAFFOLD_ONLY else DISPOSITION_PARTIALLY_IMPLEMENTED
