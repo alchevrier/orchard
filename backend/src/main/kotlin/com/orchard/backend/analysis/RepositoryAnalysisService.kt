@@ -267,9 +267,10 @@ class RepositoryAnalysisService(
     ): String? {
         repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
-        val criteria = run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }?.toSet().orEmpty()
-        if (criteria.isEmpty()) return "The workflow has no accepted criteria to compile."
-        if (output.operations.flatMap { it.acceptanceCriteria }.toSet() != criteria) return "Execution operations do not cover the exact acceptance criteria."
+        repositoryAcceptanceCoverageDiagnostic(
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+            output,
+        )?.let { return it }
         repositoryOperationShapeDiagnostic(context, output)?.let { return it }
         val admittedCommands = run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }?.toSet().orEmpty()
         if (output.verificationCommands.toSet() != admittedCommands) return "Execution plan verification differs from admitted commands."
@@ -336,6 +337,25 @@ class RepositoryAnalysisService(
         fun loadPrompt(): String = requireNotNull(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
         ).bufferedReader().use { it.readText() }
+    }
+}
+
+internal fun repositoryAcceptanceCoverageDiagnostic(
+    acceptedCriteria: List<String>,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val required = acceptedCriteria.associateBy(::canonicalAuthorityText)
+    if (required.isEmpty()) return "The workflow has no accepted criteria to compile."
+    if (required.size != acceptedCriteria.size) return "The workflow has ambiguous accepted criteria."
+    val actual = output.operations.flatMap { it.acceptanceCriteria }
+    val actualKeys = actual.mapTo(hashSetOf(), ::canonicalAuthorityText)
+    val missing = required.filterKeys { it !in actualKeys }.values
+    val unexpected = actual.filter { canonicalAuthorityText(it) !in required }.distinct()
+    if (missing.isEmpty() && unexpected.isEmpty()) return null
+    return buildString {
+        append("Execution operations must cover the exact acceptance criteria.")
+        if (missing.isNotEmpty()) append(" Missing: ").append(missing.joinToString(" | "))
+        if (unexpected.isNotEmpty()) append(" Unexpected: ").append(unexpected.joinToString(" | "))
     }
 }
 

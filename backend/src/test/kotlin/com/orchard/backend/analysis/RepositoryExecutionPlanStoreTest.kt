@@ -18,6 +18,32 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `repository acceptance coverage normalizes punctuation and reports exact gaps`() {
+        val accepted = listOf("Use platform-default sans.", "Keep machine-readable output.")
+        val content = plan(1, 1, "a".repeat(40)).content.copy(
+            operations = listOf(
+                ExecutionPlanOperation(
+                    1,
+                    PLAN_OPERATION_MODIFY,
+                    "src/Main.kt",
+                    "main",
+                    "Update it.",
+                    listOf("Use platform\u2011default sans.", "Keep machine\u2011readable output."),
+                )
+            ),
+        )
+
+        assertNull(repositoryAcceptanceCoverageDiagnostic(accepted, content))
+        assertEquals(
+            "Execution operations must cover the exact acceptance criteria. Missing: Keep machine-readable output. Unexpected: Invent behavior.",
+            repositoryAcceptanceCoverageDiagnostic(
+                accepted,
+                content.copy(operations = content.operations.map { it.copy(acceptanceCriteria = listOf("Use platform-default sans.", "Invent behavior.")) }),
+            ),
+        )
+    }
+
+    @Test
     fun `repository analysis decoding diagnostics preserve bounded root cause`() {
         val generation = com.orchard.backend.vector.ModelGeneration("{}", 1, 1)
 
