@@ -327,7 +327,7 @@ class RepositoryAnalysisService(
             DISPOSITION_COMPLETE,
             DISPOSITION_CONFLICTING,
         )
-        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, scopeCoverage, operations, verificationCommands, unresolvedQuestions)"
+        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, unresolvedQuestions)"
 
         fun loadPrompt(): String = requireNotNull(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
@@ -345,7 +345,6 @@ internal fun repositoryScopeCoverageDiagnostic(
 ): String? {
     val required = acceptedScope.toSet()
     if (required.isEmpty()) return "The workflow has no accepted implementation scope to compile."
-    if (output.coveredScope.toSet() != required) return "Execution plan does not cover the exact accepted implementation scope."
     if (output.scopeCoverage.size != required.size || output.scopeCoverage.map { it.scope }.toSet() != required) {
         return "Execution plan scope coverage does not map every accepted scope clause exactly once."
     }

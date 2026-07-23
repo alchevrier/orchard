@@ -18,8 +18,8 @@ class RepositoryExecutionPlanStoreTest {
 
         assert(prompt.contains("A valid response has exactly this shape:"))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
-        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
-        assert(prompt.contains("Copy requiredScope exactly and completely into coveredScope"))
+        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
+        assert(prompt.contains("copying scope exactly without paraphrasing, omission, or invention"))
         assert(prompt.contains("or from a path introduced by a CREATE operation"))
         assert(prompt.contains("A VERIFY-only mapping is invalid."))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
