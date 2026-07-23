@@ -117,11 +117,51 @@ class RepositoryAnalysisService(
 
     init {
         planStore.load()
+        attemptStore.load()
+        bootstrapLegacyAttemptBlocks()
     }
 
     fun plans(): List<RepositoryExecutionPlan> = planStore.load()
 
     fun attempts(): List<RepositoryAnalysisAttempt> = attemptStore.load()
+
+    private fun bootstrapLegacyAttemptBlocks() {
+        val plans = planStore.load()
+        val attempts = attemptStore.load()
+        workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
+            .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
+            .filter { run ->
+                val baseRevision = workspaceGateway.currentRevision(requireNotNull(run.context.workspaceReservation).path)
+                    ?: return@filter false
+                plans.none { it.runId == run.runId && it.baseRevision == baseRevision } &&
+                    attempts.none { it.runId == run.runId && it.baseRevision == baseRevision }
+            }
+            .forEach { run ->
+                val baseRevision = workspaceGateway.currentRevision(requireNotNull(run.context.workspaceReservation).path)
+                    ?: return@forEach
+                val repeated = workspace.modelExecutions(run.context.workItemId)
+                    .filter {
+                        it.workflowStepId == DefaultModelExecutionProfiles.broadRepositoryAnalysis.id &&
+                            it.outputHash != null
+                    }
+                    .groupBy { Triple(it.promptHash, it.outputHash, it.schemaValid) }
+                    .values
+                    .filter { it.size >= LEGACY_IDENTICAL_OUTCOME_BLOCK_THRESHOLD }
+                    .maxByOrNull { executions -> executions.maxOf { it.executionId } }
+                    ?: return@forEach
+                attemptStore.appendNext { attemptId ->
+                    RepositoryAnalysisAttempt(
+                        attemptId = attemptId,
+                        runId = run.runId,
+                        baseRevision = baseRevision,
+                        state = ANALYSIS_ATTEMPT_BLOCKED,
+                        resultStatus = RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                        diagnostic = "Automatic analysis blocked after repeated identical historical model outcomes produced no admissible execution plan.",
+                        promptHash = repeated.maxBy { it.executionId }.promptHash,
+                    )
+                }
+            }
+    }
 
     fun currentPlan(runId: Long): RepositoryExecutionPlan? {
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.singleOrNull { it.runId == runId } ?: return null
@@ -533,6 +573,7 @@ class RepositoryAnalysisService(
             DISPOSITION_CONFLICTING,
         )
         const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, unresolvedQuestions)"
+        const val LEGACY_IDENTICAL_OUTCOME_BLOCK_THRESHOLD = 2
 
         fun loadPrompt(): String = requireNotNull(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")

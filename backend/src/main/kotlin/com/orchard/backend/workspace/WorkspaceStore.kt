@@ -890,6 +890,11 @@ class WorkspaceStore(
         modelCapabilityProfiles(modelExperienceEvents, authoritativeModelSatisfaction())
 
     @Synchronized
+    fun modelExecutions(workItemId: Int? = null): List<ModelExecutionObservation> =
+        modelExperienceEvents.mapNotNull { it.execution }
+            .filter { workItemId == null || it.workItemId == workItemId }
+
+    @Synchronized
     fun circuitSynthesisContext(scopeId: Int): CircuitSynthesisContext? {
         val scope = committedEntity(scopeId)
             ?.takeIf { it.type in setOf(ENTITY_EPIC, ENTITY_STORY) }

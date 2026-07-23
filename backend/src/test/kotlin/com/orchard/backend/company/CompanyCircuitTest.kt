@@ -28,6 +28,7 @@ import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.ArchitectureComponent
@@ -48,6 +49,7 @@ import com.orchard.backend.workspace.FileWorkflowMemoryStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
 import com.orchard.backend.workspace.GENESIS_READY
 import com.orchard.backend.workspace.MESSAGE_READY
+import com.orchard.backend.workspace.ModelExecutionObservationDraft
 import com.orchard.backend.workspace.PROJECT_GREENFIELD_LOCAL
 import com.orchard.backend.workspace.ProjectGenesisFirstOutcomeStatus
 import com.orchard.backend.workspace.ProjectGenesisStatus
@@ -168,6 +170,54 @@ class CompanyCircuitTest {
             listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, ANALYSIS_ATTEMPT_BLOCKED),
             attempts.load().map { it.state },
         )
+    }
+
+    @Test
+    fun `legacy repeated repository analysis outcomes bootstrap a durable block`() = runTest {
+        val state = createTempDirectory("orchard-company-legacy-analysis-state-")
+        val projects = createTempDirectory("orchard-company-legacy-analysis-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace)
+        val model = RejectingAnalysisModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+        repeat(2) {
+            workspace.recordModelExecution(
+                ModelExecutionObservationDraft(
+                    profile = DefaultModelExecutionProfiles.broadRepositoryAnalysis,
+                    binding = model.bindingProfile(),
+                    workflowStepId = DefaultModelExecutionProfiles.broadRepositoryAnalysis.id,
+                    workItemId = run.context.workItemId,
+                    envelopeHash = "a".repeat(64),
+                    promptHash = "b".repeat(64),
+                    outputHash = "c".repeat(64),
+                    inputTokens = 100,
+                    outputTokens = 10,
+                    latencyMillis = 1,
+                    schemaValid = true,
+                )
+            )
+        }
+        val attempts = TransientRepositoryAnalysisAttemptStore()
+
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            attemptStore = attempts,
+        )
+
+        assertEquals(emptyList(), analysis.eligibleRunIds())
+        assertEquals(RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED, analysis.tick(run.runId).status)
+        assertEquals(0, model.analysisCallCount)
+        assertEquals(ANALYSIS_ATTEMPT_BLOCKED, attempts.load().single().state)
+        assertEquals("b".repeat(64), attempts.load().single().promptHash)
     }
 
     @Test
