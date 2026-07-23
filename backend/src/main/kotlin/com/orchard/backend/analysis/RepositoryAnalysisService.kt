@@ -205,8 +205,7 @@ class RepositoryAnalysisService(
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.MODEL_FAILED, run.runId, diagnostic = error.message.orEmpty())
         }
         val boundedGeneration = generation.takeIf {
-            it.promptTokens <= profile.inputBudgetTokens && it.completionTokens <= profile.outputBudgetTokens &&
-                estimateModelTokens(it.text) <= profile.outputBudgetTokens
+            repositoryAnalysisGenerationWithinBudget(it, profile.inputBudgetTokens, profile.outputBudgetTokens)
         }
         val decodedOutput = boundedGeneration?.let {
             runCatching { json.decodeFromString<RepositoryAnalysisPlanContent>(it.text) }
@@ -339,6 +338,12 @@ class RepositoryAnalysisService(
         ).bufferedReader().use { it.readText() }
     }
 }
+
+internal fun repositoryAnalysisGenerationWithinBudget(
+    generation: ModelGeneration,
+    inputBudgetTokens: Int,
+    outputBudgetTokens: Int,
+): Boolean = generation.promptTokens <= inputBudgetTokens && generation.completionTokens <= outputBudgetTokens
 
 internal fun repositoryAnalysisDecodeDiagnostic(generation: ModelGeneration?, error: Throwable?): String = when {
     generation == null -> "The analysis model output exceeded the admitted token budget."

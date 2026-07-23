@@ -9,6 +9,15 @@ import kotlin.test.assertNull
 
 class RepositoryExecutionPlanStoreTest {
     @Test
+    fun `repository analysis trusts measured generation tokens instead of utf8 byte size`() {
+        val generation = com.orchard.backend.vector.ModelGeneration("x".repeat(10_000), 18_343, 2_722)
+
+        assert(repositoryAnalysisGenerationWithinBudget(generation, 96_000, 8_000))
+        assert(!repositoryAnalysisGenerationWithinBudget(generation.copy(completionTokens = 8_001), 96_000, 8_000))
+        assert(!repositoryAnalysisGenerationWithinBudget(generation.copy(promptTokens = 96_001), 96_000, 8_000))
+    }
+
+    @Test
     fun `repository analysis decoding diagnostics preserve bounded root cause`() {
         val generation = com.orchard.backend.vector.ModelGeneration("{}", 1, 1)
 
