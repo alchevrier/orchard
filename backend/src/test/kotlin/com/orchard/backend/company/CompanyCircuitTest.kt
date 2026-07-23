@@ -10,6 +10,9 @@ import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.analysis.compactRepositoryContextToBudget
 import com.orchard.backend.analysis.TransientRepositoryExecutionPlanStore
+import com.orchard.backend.analysis.TransientRepositoryAnalysisAttemptStore
+import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_BLOCKED
+import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
 import com.orchard.backend.analysis.RepositoryEvidenceCitation
 import com.orchard.backend.agent.CODING_FILE_WRITE
 import com.orchard.backend.agent.CodingFileOperation
@@ -127,6 +130,44 @@ class CompanyCircuitTest {
         assertEquals(context.files.map { it.path }, compacted.files.map { it.path })
         assertEquals(listOf(declarations.first()), compacted.files.first().matchedDeclarations)
         assertEquals(0, compacted.omittedFileCount)
+    }
+
+    @Test
+    fun `deterministic repository analysis rejection requires explicit retry`() = runTest {
+        val state = createTempDirectory("orchard-company-analysis-retry-state-")
+        val projects = createTempDirectory("orchard-company-analysis-retry-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace)
+        val model = RejectingAnalysisModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val attempts = TransientRepositoryAnalysisAttemptStore()
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            attemptStore = attempts,
+        )
+        val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
+
+        assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, analysis.tick(runId).status)
+        assertEquals(emptyList(), analysis.eligibleRunIds())
+        assertEquals(RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED, analysis.tick(runId).status)
+        assertEquals(1, model.analysisCallCount)
+        assertEquals(RepositoryAnalysisTickStatus.RETRY_AUTHORIZED, analysis.authorizeRetry(runId).status)
+        assertEquals(listOf(runId), analysis.eligibleRunIds())
+        assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, analysis.tick(runId).status)
+        assertEquals(emptyList(), analysis.eligibleRunIds())
+        assertEquals(2, model.analysisCallCount)
+        assertEquals(
+            listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, ANALYSIS_ATTEMPT_BLOCKED),
+            attempts.load().map { it.state },
+        )
     }
 
     @Test
@@ -459,6 +500,32 @@ class CompanyCircuitTest {
             contextWindowTokens = 100_000,
             capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
         )
+    }
+
+    private class RejectingAnalysisModel : ModelProvider {
+        var analysisCallCount = 0
+            private set
+
+        override suspend fun triage(prompt: String): String = "{}"
+
+        override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = "{}"
+
+        override fun bindingProfile() = ModelBindingProfile(
+            bindingId = "test:rejecting-analysis",
+            provider = "test",
+            model = "rejecting-analysis",
+            contextWindowTokens = 100_000,
+            capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+
+        override suspend fun executeRepositoryAnalysis(
+            prompt: String,
+            maxOutputTokens: Int,
+            contextWindowTokens: Int,
+        ): ModelGeneration {
+            analysisCallCount++
+            return ModelGeneration("{}", 1, 1)
+        }
     }
 
     private class ScenarioStaffModel : ModelProvider {

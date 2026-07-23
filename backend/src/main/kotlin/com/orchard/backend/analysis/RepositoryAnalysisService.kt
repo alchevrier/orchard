@@ -47,6 +47,8 @@ enum class RepositoryAnalysisTickStatus {
     MODEL_FAILED,
     INVALID_ANALYSIS,
     STORAGE_UNAVAILABLE,
+    ATTEMPT_BLOCKED,
+    RETRY_AUTHORIZED,
 }
 
 @Serializable
@@ -109,6 +111,7 @@ class RepositoryAnalysisService(
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
     private val systemPrompt: String = loadPrompt(),
     private val companyControl: CompanyControlService? = null,
+    private val attemptStore: RepositoryAnalysisAttemptStore = TransientRepositoryAnalysisAttemptStore(),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
@@ -117,6 +120,8 @@ class RepositoryAnalysisService(
     }
 
     fun plans(): List<RepositoryExecutionPlan> = planStore.load()
+
+    fun attempts(): List<RepositoryAnalysisAttempt> = attemptStore.load()
 
     fun currentPlan(runId: Long): RepositoryExecutionPlan? {
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.singleOrNull { it.runId == runId } ?: return null
@@ -143,6 +148,9 @@ class RepositoryAnalysisService(
             .filter { candidate ->
                 val workspacePath = requireNotNull(candidate.context.workspaceReservation).path
                 val currentRevision = workspaceGateway.currentRevision(workspacePath)
+                if (currentRevision != null && attemptStore.isBlocked(candidate.runId, currentRevision)) {
+                    return@filter false
+                }
                 val staticCandidates = plans.filter {
                     it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate)
                 }
@@ -170,6 +178,54 @@ class RepositoryAnalysisService(
         }
     }
 
+    fun authorizeRetry(runId: Long): RepositoryAnalysisTickResult {
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
+            .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
+            .singleOrNull { it.runId == runId }
+            ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, runId)
+        val workspacePath = requireNotNull(run.context.workspaceReservation).path
+        val baseRevision = workspaceGateway.currentRevision(workspacePath)
+            ?: return RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+                runId,
+                diagnostic = "The reserved repository revision is unavailable.",
+            )
+        val blocked = attemptStore.blockedAttempt(runId, baseRevision)
+            ?: return RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.IDLE,
+                runId,
+                diagnostic = "The repository analysis run has no blocked attempt to retry.",
+            )
+        return runCatching {
+            attemptStore.appendNext { attemptId ->
+                RepositoryAnalysisAttempt(
+                    attemptId = attemptId,
+                    runId = runId,
+                    baseRevision = baseRevision,
+                    state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                    resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
+                    diagnostic = "A human explicitly authorized one successor repository analysis attempt.",
+                    promptHash = blocked.promptHash,
+                )
+            }
+        }.fold(
+            onSuccess = {
+                RepositoryAnalysisTickResult(
+                    RepositoryAnalysisTickStatus.RETRY_AUTHORIZED,
+                    runId,
+                    diagnostic = it.diagnostic,
+                )
+            },
+            onFailure = {
+                RepositoryAnalysisTickResult(
+                    RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE,
+                    runId,
+                    diagnostic = it.message.orEmpty(),
+                )
+            },
+        )
+    }
+
     private suspend fun analyze(runId: Long): RepositoryAnalysisTickResult {
         val plans = planStore.load()
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
@@ -183,6 +239,13 @@ class RepositoryAnalysisService(
                 run.runId,
                 diagnostic = "The reserved repository revision is unavailable.",
             )
+        attemptStore.blockedAttempt(run.runId, baseRevision)?.let { blocked ->
+            return RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED,
+                run.runId,
+                diagnostic = blocked.diagnostic,
+            )
+        }
         val context = runCatching {
             workspaceGateway.collectAnalysisContext(
                 workspacePath,
@@ -263,7 +326,13 @@ class RepositoryAnalysisService(
         } catch (error: Exception) {
             recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence)
                 ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
-            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.MODEL_FAILED, run.runId, diagnostic = error.message.orEmpty())
+            return blockAttempt(
+                run.runId,
+                baseRevision,
+                prompt,
+                RepositoryAnalysisTickStatus.MODEL_FAILED,
+                error.message.orEmpty().ifBlank { "The repository analysis model failed." },
+            )
         }
         val boundedGeneration = generation.takeIf {
             repositoryAnalysisGenerationWithinBudget(it, profile.inputBudgetTokens, profile.outputBudgetTokens)
@@ -275,23 +344,33 @@ class RepositoryAnalysisService(
         val execution = recordExecution(
             profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence
         ) ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
-        if (output == null) return RepositoryAnalysisTickResult(
-            RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
+        if (output == null) return blockAttempt(
             run.runId,
-            diagnostic = repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
+            baseRevision,
+            prompt,
+            RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
+            repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
         )
         repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
-            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, run.runId, diagnostic = it)
+            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
         if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
-            return RepositoryAnalysisTickResult(
-                RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED,
+            return blockAttempt(
                 run.runId,
-                diagnostic = output.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
+                baseRevision,
+                prompt,
+                RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED,
+                output.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
             )
         }
         val invalid = validateOutput(run, boundedContext, output)
-        if (invalid != null) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, run.runId, diagnostic = invalid)
+        if (invalid != null) return blockAttempt(
+            run.runId,
+            baseRevision,
+            prompt,
+            RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
+            invalid,
+        )
         if (workspaceGateway.currentRevision(workspacePath) != baseRevision) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.PLAN_STALE, run.runId, diagnostic = "Repository changed during analysis.")
         }
@@ -376,6 +455,35 @@ class RepositoryAnalysisService(
             schemaValid = schemaValid,
             resourceAdmission = admission,
         )
+    )
+
+    private fun blockAttempt(
+        runId: Long,
+        baseRevision: String,
+        prompt: String,
+        status: RepositoryAnalysisTickStatus,
+        diagnostic: String,
+    ): RepositoryAnalysisTickResult = runCatching {
+        attemptStore.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = runId,
+                baseRevision = baseRevision,
+                state = ANALYSIS_ATTEMPT_BLOCKED,
+                resultStatus = status.name,
+                diagnostic = diagnostic,
+                promptHash = sha256(prompt),
+            )
+        }
+    }.fold(
+        onSuccess = { RepositoryAnalysisTickResult(status, runId, diagnostic = diagnostic) },
+        onFailure = {
+            RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE,
+                runId,
+                diagnostic = it.message.orEmpty(),
+            )
+        },
     )
 
     private fun analysisQuery(run: WorkflowRunView): String = buildString {

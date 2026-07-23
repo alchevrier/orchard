@@ -14,6 +14,7 @@ import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
+import com.orchard.backend.analysis.FileRepositoryAnalysisAttemptStore
 import com.orchard.backend.analysis.FileRepositoryBaselineAnalysisStore
 import com.orchard.backend.analysis.FileRepositoryIntelligenceGraphStore
 import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
@@ -220,6 +221,7 @@ fun main() {
         codingWorkspaceGateway,
         resourceController,
         companyControl = companyControl,
+        attemptStore = FileRepositoryAnalysisAttemptStore(OrchardPaths.WORKSPACE_DIR),
     )
     val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
     val standardsPolicy = StandardsPolicyService(
@@ -494,6 +496,29 @@ fun Application.workspaceApi(
             }
             call.respond(repositoryAnalysis.plans())
         }
+        get("/api/repository-analysis/attempts") {
+            if (repositoryAnalysis == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(repositoryAnalysis.attempts())
+        }
+        post("/api/repository-analysis/runs/{runId}/retry") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (repositoryAnalysis == null || runId == null || runId <= 0) {
+                call.respond(if (runId == null || runId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = repositoryAnalysis.authorizeRetry(runId)
+            val status = when (result.status) {
+                RepositoryAnalysisTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
+                RepositoryAnalysisTickStatus.IDLE -> HttpStatusCode.Conflict
+                RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+                RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+                else -> HttpStatusCode.Conflict
+            }
+            call.respond(status, result)
+        }
         post("/api/repository-analysis/tick") {
             if (repositoryAnalysis == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable)
@@ -507,8 +532,10 @@ fun Application.workspaceApi(
                 RepositoryAnalysisTickStatus.PLAN_CREATED -> HttpStatusCode.Created
                 RepositoryAnalysisTickStatus.IDLE -> HttpStatusCode.OK
                 RepositoryAnalysisTickStatus.BUSY,
+                RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED,
                 RepositoryAnalysisTickStatus.PLAN_STALE,
                 RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED -> HttpStatusCode.Conflict
+                RepositoryAnalysisTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
                 RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
                 RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED -> HttpStatusCode.UnprocessableEntity
                 RepositoryAnalysisTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests

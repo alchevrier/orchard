@@ -10,8 +10,56 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class RepositoryExecutionPlanStoreTest {
+    @Test
+    fun `repository analysis attempt block requires durable explicit retry`() {
+        val directory = createTempDirectory("orchard-analysis-attempts-")
+        val store = FileRepositoryAnalysisAttemptStore(directory)
+        val revision = "a".repeat(40)
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                11,
+                revision,
+                ANALYSIS_ATTEMPT_BLOCKED,
+                RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                "The plan omitted required selector coverage.",
+                "b".repeat(64),
+            )
+        }
+
+        assertTrue(FileRepositoryAnalysisAttemptStore(directory).isBlocked(11, revision))
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                11,
+                revision,
+                ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                "RETRY_AUTHORIZED",
+                "A human explicitly authorized one successor attempt.",
+            )
+        }
+
+        val restored = FileRepositoryAnalysisAttemptStore(directory)
+        assertFalse(restored.isBlocked(11, revision))
+        assertEquals(listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED), restored.load().map { it.state })
+        assertFailsWith<IllegalArgumentException> {
+            store.appendNext { attemptId ->
+                RepositoryAnalysisAttempt(
+                    attemptId,
+                    11,
+                    revision,
+                    ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                    "RETRY_AUTHORIZED",
+                    "Duplicate authorization.",
+                )
+            }
+        }
+    }
+
     @Test
     fun `repository analysis trusts measured generation tokens instead of utf8 byte size`() {
         val generation = com.orchard.backend.vector.ModelGeneration("x".repeat(10_000), 18_343, 2_722)

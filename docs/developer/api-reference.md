@@ -56,9 +56,13 @@ Work definitions may include `repositoryEvidenceSelectors`. Each selector binds 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/repository-analysis/plans` | List repository execution plans |
+| `GET` | `/api/repository-analysis/attempts` | List durable terminal analysis blocks and retry authorizations |
 | `POST` | `/api/repository-analysis/tick` | Run one analysis reconciliation tick |
+| `POST` | `/api/repository-analysis/runs/{runId}/retry` | Authorize one successor attempt for a blocked analysis run |
 | `GET` | `/api/coding-worker/executions` | List coding execution records |
 | `POST` | `/api/coding-worker/tick` | Run one coding reconciliation tick |
+
+Deterministic analysis rejection and model failure append a blocked attempt tied to the run and pinned repository revision. Blocked runs are excluded from automatic reconciliation until the retry endpoint appends explicit successor authority; each unsuccessful successor blocks again without deleting prior attempts.
 
 ## Standards, Campaigns, and Resolution
 
