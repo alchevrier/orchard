@@ -138,8 +138,20 @@ class RepositoryExecutionPlanStoreTest {
 
         assertNull(repositoryScopeCoverageDiagnostic(scope, content))
         assertEquals(
-            "Execution plan scope coverage does not map every accepted scope clause exactly once.",
+            "Execution plan scope coverage must map every accepted scope clause exactly once. Missing: Add regression coverage.",
             repositoryScopeCoverageDiagnostic(scope, content.copy(scopeCoverage = content.scopeCoverage.take(1))),
+        )
+        assertEquals(
+            "Execution plan scope coverage must map every accepted scope clause exactly once. Duplicated: Inspect the owner. Unexpected: Invent another scope.",
+            repositoryScopeCoverageDiagnostic(
+                scope,
+                content.copy(scopeCoverage = listOf(
+                    content.scopeCoverage.first(),
+                    content.scopeCoverage.first(),
+                    content.scopeCoverage.last().copy(scope = "Invent another scope."),
+                    content.scopeCoverage.last(),
+                )),
+            ),
         )
         assertEquals(
             "Scope coverage 1 does not cite pinned evidence or a planned creation.",

@@ -345,8 +345,17 @@ internal fun repositoryScopeCoverageDiagnostic(
 ): String? {
     val required = acceptedScope.toSet()
     if (required.isEmpty()) return "The workflow has no accepted implementation scope to compile."
-    if (output.scopeCoverage.size != required.size || output.scopeCoverage.map { it.scope }.toSet() != required) {
-        return "Execution plan scope coverage does not map every accepted scope clause exactly once."
+    val scopeCounts = output.scopeCoverage.groupingBy { it.scope }.eachCount()
+    val missing = acceptedScope.filter { scopeCounts[it] == null }
+    val duplicated = acceptedScope.filter { (scopeCounts[it] ?: 0) > 1 }
+    val unexpected = scopeCounts.keys.filter { it !in required }
+    if (missing.isNotEmpty() || duplicated.isNotEmpty() || unexpected.isNotEmpty()) {
+        return buildString {
+            append("Execution plan scope coverage must map every accepted scope clause exactly once.")
+            if (missing.isNotEmpty()) append(" Missing: ").append(missing.joinToString(" | "))
+            if (duplicated.isNotEmpty()) append(" Duplicated: ").append(duplicated.joinToString(" | "))
+            if (unexpected.isNotEmpty()) append(" Unexpected: ").append(unexpected.joinToString(" | "))
+        }
     }
     val evidencePaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val operations = output.operations.associateBy { it.order }
