@@ -134,7 +134,7 @@ class RepositoryAnalysisService(
             .singleOrNull { candidate ->
                 candidate.runId == runId && run {
                 val currentRevision = workspaceGateway.currentRevision(requireNotNull(candidate.context.workspaceReservation).path)
-                plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision }
+                plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate) }
                 }
             } ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, runId)
         val workspacePath = requireNotNull(run.context.workspaceReservation).path
