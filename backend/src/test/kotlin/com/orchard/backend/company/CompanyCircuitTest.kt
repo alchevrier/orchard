@@ -3,6 +3,7 @@ package com.orchard.backend.company
 import com.orchard.backend.analysis.DISPOSITION_PARTIALLY_IMPLEMENTED
 import com.orchard.backend.analysis.DISPOSITION_SCAFFOLD_ONLY
 import com.orchard.backend.analysis.ExecutionPlanOperation
+import com.orchard.backend.analysis.ExecutionPlanScopeCoverage
 import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
 import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
 import com.orchard.backend.analysis.RepositoryAnalysisService
@@ -489,6 +490,9 @@ class CompanyCircuitTest {
                     preservedInvariants = listOf("Preserve the admitted local Gradle toolchain."),
                     nonGoals = listOf("Do not create a parallel build implementation."),
                     coveredScope = requiredScope,
+                    scopeCoverage = requiredScope.map {
+                        ExecutionPlanScopeCoverage(it, listOf("build.gradle.kts"), listOf(1))
+                    },
                     operations = listOf(
                         ExecutionPlanOperation(
                             1,

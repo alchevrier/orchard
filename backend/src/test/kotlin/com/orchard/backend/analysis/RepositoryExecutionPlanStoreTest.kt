@@ -18,8 +18,9 @@ class RepositoryExecutionPlanStoreTest {
 
         assert(prompt.contains("A valid response has exactly this shape:"))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
-        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, operations, verificationCommands, and unresolvedQuestions top-level keys."))
+        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
         assert(prompt.contains("Copy requiredScope exactly and completely into coveredScope"))
+        assert(prompt.contains("A VERIFY-only mapping is invalid."))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
@@ -120,6 +121,32 @@ class RepositoryExecutionPlanStoreTest {
                 valid.copy(evidence = valid.evidence.map { it.copy(contentHash = "d".repeat(64)) }),
             ),
         )
+    }
+
+    @Test
+    fun `repository scope coverage requires exact clauses pinned evidence and source operations`() {
+        val scope = listOf("Inspect the owner.", "Add regression coverage.")
+        val content = plan(1, 1, "a".repeat(40)).content.copy(
+            coveredScope = scope,
+            scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Main.kt"), listOf(1)) },
+        )
+
+        assertNull(repositoryScopeCoverageDiagnostic(scope, content))
+        assertEquals(
+            "Execution plan scope coverage does not map every accepted scope clause exactly once.",
+            repositoryScopeCoverageDiagnostic(scope, content.copy(scopeCoverage = content.scopeCoverage.take(1))),
+        )
+        assertEquals(
+            "Scope coverage 1 does not cite pinned repository evidence.",
+            repositoryScopeCoverageDiagnostic(
+                scope,
+                content.copy(scopeCoverage = content.scopeCoverage.map { it.copy(evidencePaths = listOf("src/Missing.kt")) }),
+            ),
+        )
+        val verifyOnly = content.copy(
+            operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
+        )
+        assertEquals("Scope coverage 1 has no concrete source operation.", repositoryScopeCoverageDiagnostic(scope, verifyOnly))
     }
 
     private fun plan(planId: Long, revision: Int, baseRevision: String): RepositoryExecutionPlan =

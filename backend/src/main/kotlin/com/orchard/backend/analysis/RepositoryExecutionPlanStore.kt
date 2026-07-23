@@ -47,6 +47,13 @@ data class ExecutionPlanOperation(
 )
 
 @Serializable
+data class ExecutionPlanScopeCoverage(
+    val scope: String,
+    val evidencePaths: List<String>,
+    val operationOrders: List<Int>,
+)
+
+@Serializable
 data class RepositoryAnalysisPlanContent(
     val disposition: String,
     val summary: String,
@@ -56,6 +63,8 @@ data class RepositoryAnalysisPlanContent(
     val nonGoals: List<String>,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val coveredScope: List<String> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val scopeCoverage: List<ExecutionPlanScopeCoverage> = emptyList(),
     val operations: List<ExecutionPlanOperation>,
     val verificationCommands: List<String>,
     val unresolvedQuestions: List<String> = emptyList(),
@@ -229,6 +238,10 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
     require(plan.content.operations.all {
         it.action in PLAN_OPERATIONS && validOperationPath(it) && it.instruction.isNotBlank() && it.acceptanceCriteria.isNotEmpty()
     }) { "Execution plan operation is invalid" }
+    require(plan.content.scopeCoverage.all { coverage ->
+        coverage.scope.isNotBlank() && coverage.evidencePaths.isNotEmpty() && coverage.evidencePaths.all(::validPath) &&
+            coverage.operationOrders.isNotEmpty() && coverage.operationOrders.all { it > 0 }
+    }) { "Execution plan scope coverage is invalid" }
     if (plan.content.disposition == DISPOSITION_COMPLETE) require(plan.content.operations.all { it.action == PLAN_OPERATION_VERIFY })
     else require(plan.content.operations.any { it.action != PLAN_OPERATION_VERIFY }) { "Executable plan has no source operation" }
     require(plan.provenance.executionProfileId.isNotBlank() && plan.provenance.bindingFingerprint.matches(SHA256)) {

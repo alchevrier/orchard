@@ -261,9 +261,7 @@ class RepositoryAnalysisService(
     ): String? {
         if (output.disposition !in DISPOSITIONS || output.summary.isBlank() || output.evidence.isEmpty()) return "Analysis identity is incomplete."
         repositoryEvidenceDiagnostic(context, output)?.let { return it }
-        val scope = run.workDefinition?.definition?.scope?.toSet().orEmpty()
-        if (scope.isEmpty()) return "The workflow has no accepted implementation scope to compile."
-        if (output.coveredScope.toSet() != scope) return "Execution plan does not cover the exact accepted implementation scope."
+        repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
         val criteria = run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }?.toSet().orEmpty()
         if (criteria.isEmpty()) return "The workflow has no accepted criteria to compile."
@@ -329,7 +327,7 @@ class RepositoryAnalysisService(
             DISPOSITION_COMPLETE,
             DISPOSITION_CONFLICTING,
         )
-        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, operations, verificationCommands, unresolvedQuestions)"
+        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, scopeCoverage, operations, verificationCommands, unresolvedQuestions)"
 
         fun loadPrompt(): String = requireNotNull(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
@@ -338,8 +336,34 @@ class RepositoryAnalysisService(
 }
 
 private fun RepositoryExecutionPlan.coversAcceptedScope(run: WorkflowRunView): Boolean {
-    val acceptedScope = run.workDefinition?.definition?.scope?.toSet().orEmpty()
-    return acceptedScope.isNotEmpty() && content.coveredScope.toSet() == acceptedScope
+    return repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), content) == null
+}
+
+internal fun repositoryScopeCoverageDiagnostic(
+    acceptedScope: List<String>,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val required = acceptedScope.toSet()
+    if (required.isEmpty()) return "The workflow has no accepted implementation scope to compile."
+    if (output.coveredScope.toSet() != required) return "Execution plan does not cover the exact accepted implementation scope."
+    if (output.scopeCoverage.size != required.size || output.scopeCoverage.map { it.scope }.toSet() != required) {
+        return "Execution plan scope coverage does not map every accepted scope clause exactly once."
+    }
+    val evidencePaths = output.evidence.mapTo(hashSetOf()) { it.path }
+    val operations = output.operations.associateBy { it.order }
+    output.scopeCoverage.forEachIndexed { index, coverage ->
+        if (coverage.evidencePaths.isEmpty() || coverage.evidencePaths.any { it !in evidencePaths }) {
+            return "Scope coverage ${index + 1} does not cite pinned repository evidence."
+        }
+        val coveredOperations = coverage.operationOrders.mapNotNull(operations::get)
+        if (coveredOperations.size != coverage.operationOrders.size) {
+            return "Scope coverage ${index + 1} references an unavailable operation."
+        }
+        if (coveredOperations.none { it.action != PLAN_OPERATION_VERIFY }) {
+            return "Scope coverage ${index + 1} has no concrete source operation."
+        }
+    }
+    return null
 }
 
 internal fun repositoryEvidenceDiagnostic(
