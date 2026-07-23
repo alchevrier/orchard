@@ -204,17 +204,21 @@ class RepositoryAnalysisService(
                 ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.MODEL_FAILED, run.runId, diagnostic = error.message.orEmpty())
         }
-        val output = generation.takeIf {
+        val boundedGeneration = generation.takeIf {
             it.promptTokens <= profile.inputBudgetTokens && it.completionTokens <= profile.outputBudgetTokens &&
                 estimateModelTokens(it.text) <= profile.outputBudgetTokens
-        }?.let { runCatching { json.decodeFromString<RepositoryAnalysisPlanContent>(it.text) }.getOrNull() }
+        }
+        val decodedOutput = boundedGeneration?.let {
+            runCatching { json.decodeFromString<RepositoryAnalysisPlanContent>(it.text) }
+        }
+        val output = decodedOutput?.getOrNull()
         val execution = recordExecution(
             profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence
         ) ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
         if (output == null) return RepositoryAnalysisTickResult(
             RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
             run.runId,
-            diagnostic = "The analysis model did not return valid strict JSON.",
+            diagnostic = repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
         )
         repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, run.runId, diagnostic = it)
@@ -334,6 +338,12 @@ class RepositoryAnalysisService(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
         ).bufferedReader().use { it.readText() }
     }
+}
+
+internal fun repositoryAnalysisDecodeDiagnostic(generation: ModelGeneration?, error: Throwable?): String = when {
+    generation == null -> "The analysis model output exceeded the admitted token budget."
+    error == null -> "The analysis model did not return valid strict JSON."
+    else -> "The analysis model did not return valid strict JSON: ${error.message.orEmpty().replace(Regex("\\s+"), " ").take(512)}"
 }
 
 internal fun repositoryAnalysisIdentityDiagnostic(

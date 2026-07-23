@@ -9,6 +9,22 @@ import kotlin.test.assertNull
 
 class RepositoryExecutionPlanStoreTest {
     @Test
+    fun `repository analysis decoding diagnostics preserve bounded root cause`() {
+        val generation = com.orchard.backend.vector.ModelGeneration("{}", 1, 1)
+
+        assertEquals(
+            "The analysis model output exceeded the admitted token budget.",
+            repositoryAnalysisDecodeDiagnostic(null, null),
+        )
+        val diagnostic = repositoryAnalysisDecodeDiagnostic(
+            generation,
+            IllegalArgumentException("Missing required field\noperations" + "x".repeat(600)),
+        )
+        assert(diagnostic.startsWith("The analysis model did not return valid strict JSON: Missing required field operations"))
+        assert(diagnostic.length <= 570)
+    }
+
+    @Test
     fun `repository analyst prompt includes a complete strict json example`() {
         val prompt = requireNotNull(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream(
