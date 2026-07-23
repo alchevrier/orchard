@@ -84,6 +84,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("from the highest-ranked supplied test owner for test or regression scope"))
         assert(prompt.contains("A listed test path belongs to the scope clause requiring tests or regression coverage"))
         assert(prompt.contains("Never omit a requiredSourceOperationPaths value"))
+        assert(prompt.contains("requiredScopeSourcePaths resolves the exact repository paths for each accepted scope clause"))
+        assert(prompt.contains("copy paths to evidencePaths exactly, with no missing, additional, or substituted path"))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
         assert(prompt.contains("for each path in evidencePaths, include a CREATE, MODIFY, or DELETE operation whose path is that same string"))
         assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this source-path requirement"))
@@ -333,6 +335,17 @@ class RepositoryExecutionPlanStoreTest {
             requiredRepositorySourceOperationPaths(scope, context),
         )
         assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, context, complete))
+        assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, context, complete))
+        assertEquals(
+            "Scope coverage 2 paths differ from deterministic scope authority.",
+            repositoryRequiredScopeSourcePathsDiagnostic(
+                scope,
+                context,
+                complete.copy(scopeCoverage = complete.scopeCoverage.map {
+                    if (it.scope == scope[1]) it.copy(evidencePaths = listOf(context.files[0].path)) else it
+                }),
+            ),
+        )
         assertEquals(
             "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, context, complete.copy(evidence = complete.evidence.take(1))),

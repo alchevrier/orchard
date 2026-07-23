@@ -61,6 +61,12 @@ private data class RequiredRepositoryEvidence(
 )
 
 @Serializable
+private data class RequiredScopeSourcePaths(
+    val scope: String,
+    val paths: List<String>,
+)
+
+@Serializable
 private data class RepositoryAnalysisTaskContext(
     val runId: Long,
     val title: String,
@@ -86,6 +92,7 @@ private data class RepositoryAnalysisEnvelope(
     val requiredEvidence: List<RequiredRepositoryEvidence>,
     val requiredScope: List<String>,
     val requiredSourceOperationPaths: List<String>,
+    val requiredScopeSourcePaths: List<RequiredScopeSourcePaths>,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -201,6 +208,7 @@ class RepositoryAnalysisService(
             candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.scope.orEmpty(),
             requiredRepositorySourceOperationPaths(run.workDefinition?.definition?.scope.orEmpty(), candidate),
+            requiredRepositoryScopeSourcePaths(run.workDefinition?.definition?.scope.orEmpty(), candidate),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
@@ -294,6 +302,11 @@ class RepositoryAnalysisService(
         output: RepositoryAnalysisPlanContent,
     ): String? {
         repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
+        repositoryRequiredScopeSourcePathsDiagnostic(
+            run.workDefinition?.definition?.scope.orEmpty(),
+            context,
+            output,
+        )?.let { return it }
         repositoryUniversalScopeCoverageDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
             context,
@@ -541,6 +554,36 @@ internal fun requiredRepositorySourceOperationPaths(
         emptyList()
     }
     return (typographyPaths + testPaths).distinct().sorted()
+}
+
+private fun requiredRepositoryScopeSourcePaths(
+    acceptedScope: List<String>,
+    context: CodingRepositoryContext,
+): List<RequiredScopeSourcePaths> {
+    val requiredPaths = requiredRepositorySourceOperationPaths(acceptedScope, context)
+    val testPaths = requiredPaths.filter(::isTestSourcePath)
+    val implementationPaths = requiredPaths.filterNot(::isTestSourcePath)
+    if (implementationPaths.isEmpty()) return emptyList()
+    return acceptedScope.map { scope ->
+        RequiredScopeSourcePaths(scope, if (requiresTestSource(scope)) testPaths else implementationPaths)
+    }
+}
+
+internal fun repositoryRequiredScopeSourcePathsDiagnostic(
+    acceptedScope: List<String>,
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val required = requiredRepositoryScopeSourcePaths(acceptedScope, context)
+    if (required.isEmpty()) return null
+    val actual = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
+    required.forEachIndexed { index, requirement ->
+        val coverage = actual[canonicalAuthorityText(requirement.scope)] ?: return@forEachIndexed
+        if (coverage.evidencePaths.toSet() != requirement.paths.toSet()) {
+            return "Scope coverage ${index + 1} paths differ from deterministic scope authority."
+        }
+    }
+    return null
 }
 
 private fun commonPathPrefixLength(first: String, second: String): Int = first
