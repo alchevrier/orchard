@@ -8,6 +8,10 @@ const val DEFINITION_NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
 const val DEFINITION_NEEDS_INVESTIGATION = "NEEDS_INVESTIGATION"
 const val DEFINITION_NEEDS_SPLIT = "NEEDS_SPLIT"
 const val DEFINITION_READY = "READY"
+const val REPOSITORY_EVIDENCE_ALL_MATCHES = "ALL_MATCHES"
+const val REPOSITORY_EVIDENCE_AFFINE_TEST = "AFFINE_TEST"
+const val REPOSITORY_EVIDENCE_MATCH_ANY = "ANY"
+const val REPOSITORY_EVIDENCE_MATCH_ALL = "ALL"
 
 @Serializable
 @OptIn(ExperimentalSerializationApi::class)
@@ -21,6 +25,7 @@ data class SystemWorkflow(
 )
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class WorkDefinitionSubmission(
     val requestedOutcome: String,
     val currentBehavior: String,
@@ -33,6 +38,19 @@ data class WorkDefinitionSubmission(
     val proposedSplitTitles: List<String> = emptyList(),
     val reproduction: String = "",
     val regressionCriterion: String = "",
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val repositoryEvidenceSelectors: List<RepositoryEvidenceSelector> = emptyList(),
+)
+
+@Serializable
+data class RepositoryEvidenceSelector(
+    val selectorId: String,
+    val scopeIndexes: List<Int>,
+    val pathGlobs: List<String>,
+    val contentLiterals: List<String> = emptyList(),
+    val contentMatch: String = REPOSITORY_EVIDENCE_MATCH_ANY,
+    val selection: String = REPOSITORY_EVIDENCE_ALL_MATCHES,
+    val affinitySelectorId: String = "",
 )
 
 @Serializable

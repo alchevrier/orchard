@@ -49,6 +49,8 @@ The server installs `ContentNegotiation` with `kotlinx.serialization`. Decoding 
 | `POST` | `/api/workflow-runs/{runId}/criterion-judgments` | Submit a human criterion judgment |
 | `POST` | `/api/workflow-runs/{runId}/cancel` | Cancel a run |
 
+Work definitions may include `repositoryEvidenceSelectors`. Each selector binds stable `scopeIndexes` to repository-relative `pathGlobs` and optional exact `contentLiterals`. `ALL_MATCHES` requires every matching file; `AFFINE_TEST` selects the matching test path with the strongest common path prefix to its `affinitySelectorId`. Empty selector lists are omitted so historical definition hashes remain unchanged.
+
 ## Repository Analysis and Coding
 
 | Method | Path | Purpose |

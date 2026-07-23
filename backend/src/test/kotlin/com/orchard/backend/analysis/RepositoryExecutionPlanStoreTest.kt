@@ -2,6 +2,8 @@ package com.orchard.backend.analysis
 
 import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
+import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
+import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import java.nio.file.Files
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -77,15 +79,15 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("Every evidencePath in implementation scopeCoverage must also be targeted by a CREATE, MODIFY, or DELETE operation"))
         assert(prompt.contains("every referenced order must exist"))
         assert(prompt.contains("Treat universal scope words such as all, every, and across as exhaustive"))
-        assert(prompt.contains("every supplied source file containing an explicit FontFamily declaration"))
+        assert(prompt.contains("typed repository evidence selectors evaluated against complete supplied source"))
         assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
         assert(prompt.contains("matchedDeclarations selected from its complete source before content excerpting"))
         assert(prompt.contains("do not claim an owner or surface is absent when matchedDeclarations identifies it"))
         assert(prompt.contains("requiredSourcePathGroups is deterministic authority"))
-        assert(prompt.contains("TEST group contains the highest-ranked supplied test owner"))
+        assert(prompt.contains("Group IDs are selector IDs"))
         assert(prompt.contains("Never omit a grouped path"))
-        assert(prompt.contains("requiredScopeSourcePathGroupIds is index-aligned with requiredScope"))
-        assert(prompt.contains("copy that group's paths to the matching scopeCoverage evidencePaths exactly"))
+        assert(prompt.contains("each value is a list of selector IDs"))
+        assert(prompt.contains("copy that exact union to the matching scopeCoverage evidencePaths"))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
         assert(prompt.contains("for each path in evidencePaths, include a CREATE, MODIFY, or DELETE operation whose path is that same string"))
         assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this source-path requirement"))
@@ -297,20 +299,35 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
-    fun `universal typography scope requires every explicit font family owner and a test operation`() {
+    fun `repository selectors require every matched owner and an affine test operation`() {
         val context = CodingRepositoryContext(
             listOf(
-                CodingContextFile("frontend/src/main/Theme.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
-                CodingContextFile("frontend/src/main/Inbox.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
+                CodingContextFile("frontend/src/main/Theme.kt", "[excerpt without declaration]", matchedEvidenceSelectorIds = listOf("owners")),
+                CodingContextFile("frontend/src/main/Inbox.kt", "[excerpt without declaration]", matchedEvidenceSelectorIds = listOf("owners")),
                 CodingContextFile("frontend/src/main/Body.kt", "Text(\"Body\")"),
                 CodingContextFile(
                     "backend/src/test/AnalysisTest.kt",
                     "val fixture = \"FontFamily.Serif\"",
-                    containsExplicitFontFamily = true,
+                    matchedEvidenceSelectorIds = listOf("tests"),
                 ),
-                CodingContextFile("frontend/src/test/TypographyTest.kt", "class TypographyTest"),
+                CodingContextFile("frontend/src/test/TypographyTest.kt", "class TypographyTest", matchedEvidenceSelectorIds = listOf("tests")),
             ),
             omittedFileCount = 0,
+        )
+        val selectors = listOf(
+            RepositoryEvidenceSelector(
+                selectorId = "owners",
+                scopeIndexes = listOf(0),
+                pathGlobs = listOf("frontend/src/main/*.kt"),
+                contentLiterals = listOf("PlatformTypography"),
+            ),
+            RepositoryEvidenceSelector(
+                selectorId = "tests",
+                scopeIndexes = listOf(1),
+                pathGlobs = listOf("**/src/test/*.kt"),
+                selection = REPOSITORY_EVIDENCE_AFFINE_TEST,
+                affinitySelectorId = "owners",
+            ),
         )
         val scope = listOf("Inspect typography across all surfaces.", "Add focused regression coverage.")
         val complete = plan(1, 1, "a".repeat(40)).content.copy(
@@ -336,14 +353,23 @@ class RepositoryExecutionPlanStoreTest {
                 "frontend/src/main/Theme.kt",
                 "frontend/src/test/TypographyTest.kt",
             ),
-            requiredRepositorySourceOperationPaths(scope, context),
+            requiredRepositorySourceOperationPaths(selectors, context),
         )
-        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, context, complete))
-        assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, context, complete))
+        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete))
+        assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, complete))
+        assertNull(repositoryEvidenceSelectionDiagnostic(selectors, context))
+        assertEquals(
+            "Repository evidence selectors matched no required paths: owners, tests.",
+            repositoryEvidenceSelectionDiagnostic(
+                selectors,
+                context.copy(files = context.files.map { it.copy(matchedEvidenceSelectorIds = emptyList()) }),
+            ),
+        )
         assertEquals(
             "Scope coverage 2 paths differ from deterministic scope authority.",
             repositoryRequiredScopeSourcePathsDiagnostic(
                 scope,
+                selectors,
                 context,
                 complete.copy(scopeCoverage = complete.scopeCoverage.map {
                     if (it.scope == scope[1]) it.copy(evidencePaths = listOf(context.files[0].path)) else it
@@ -352,11 +378,11 @@ class RepositoryExecutionPlanStoreTest {
         )
         assertEquals(
             "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
-            repositoryUniversalScopeCoverageDiagnostic(scope, context, complete.copy(evidence = complete.evidence.take(1))),
+            repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(evidence = complete.evidence.take(1))),
         )
         assertEquals(
             "Required source operation paths omit source operations: frontend/src/main/Inbox.kt.",
-            repositoryUniversalScopeCoverageDiagnostic(scope, context, complete.copy(operations = complete.operations.filter { it.order != 2 })),
+            repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(operations = complete.operations.filter { it.order != 2 })),
         )
         assertEquals(
             "Scope coverage 2 requires a test source operation.",

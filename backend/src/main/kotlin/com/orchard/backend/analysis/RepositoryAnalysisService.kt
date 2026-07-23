@@ -23,6 +23,8 @@ import com.orchard.backend.workspace.RUN_STATE_CONTEXT_READY
 import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_BLOCKED
 import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.WorkflowRunView
+import com.orchard.backend.workspace.RepositoryEvidenceSelector
+import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.WorkspaceStore
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
@@ -93,7 +95,7 @@ private data class RepositoryAnalysisEnvelope(
     val requiredEvidence: List<RequiredRepositoryEvidence>,
     val requiredScope: List<String>,
     val requiredSourcePathGroups: List<RequiredSourcePathGroup>,
-    val requiredScopeSourcePathGroupIds: List<String>,
+    val requiredScopeSourcePathGroupIds: List<List<String>>,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -121,7 +123,8 @@ class RepositoryAnalysisService(
         val staticCandidates = planStore.load().filter { it.runId == runId && it.coversAcceptedScope(run) }
         if (staticCandidates.isEmpty()) return null
         val workspacePath = run.context.workspaceReservation?.path ?: return null
-        val context = runCatching { workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run)) }.getOrNull() ?: return null
+        val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
+        val context = runCatching { workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run), selectors) }.getOrNull() ?: return null
         return staticCandidates
             .filter { it.coversAcceptedScope(run, context) }
             .maxByOrNull { it.revision }
@@ -145,7 +148,11 @@ class RepositoryAnalysisService(
                 }
                 if (staticCandidates.isEmpty()) return@filter true
                 val context = runCatching {
-                    workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(candidate))
+                    workspaceGateway.collectAnalysisContext(
+                        workspacePath,
+                        analysisQuery(candidate),
+                        candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+                    )
                 }.getOrNull() ?: return@filter true
                 staticCandidates.none { it.coversAcceptedScope(candidate, context) }
             }
@@ -177,12 +184,22 @@ class RepositoryAnalysisService(
                 diagnostic = "The reserved repository revision is unavailable.",
             )
         val context = runCatching {
-            workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run))
+            workspaceGateway.collectAnalysisContext(
+                workspacePath,
+                analysisQuery(run),
+                run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+            )
         }.getOrElse {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
         if (context.files.isEmpty()) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = "No repository evidence was selected.")
+        }
+        repositoryEvidenceSelectionDiagnostic(
+            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+            context,
+        )?.let { diagnostic ->
+            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = diagnostic)
         }
         if (plans.any { it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) }) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, run.runId)
@@ -208,13 +225,16 @@ class RepositoryAnalysisService(
             OUTPUT_SCHEMA,
             candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.scope.orEmpty(),
-            requiredRepositorySourcePathGroups(run.workDefinition?.definition?.scope.orEmpty(), candidate),
-            requiredRepositoryScopeSourcePathGroupIds(run.workDefinition?.definition?.scope.orEmpty(), candidate),
+            requiredRepositorySourcePathGroups(run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(), candidate),
+            requiredRepositoryScopeSourcePathGroupIds(
+                run.workDefinition?.definition?.scope.orEmpty(),
+                run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+            ),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
         val requiredSourcePaths = requiredRepositorySourceOperationPaths(
-            run.workDefinition?.definition?.scope.orEmpty(),
+            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
         ).toSet()
         val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens, requiredSourcePaths) { candidate ->
@@ -309,11 +329,13 @@ class RepositoryAnalysisService(
         repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
         repositoryRequiredScopeSourcePathsDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
+            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
             output,
         )?.let { return it }
         repositoryUniversalScopeCoverageDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
+            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
             output,
         )?.let { return it }
@@ -460,6 +482,7 @@ private fun RepositoryExecutionPlan.coversAcceptedScope(
     context: CodingRepositoryContext,
 ): Boolean = coversAcceptedScope(run) && repositoryUniversalScopeCoverageDiagnostic(
     run.workDefinition?.definition?.scope.orEmpty(),
+    run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
     context,
     content,
 ) == null
@@ -511,10 +534,11 @@ internal fun repositoryScopeCoverageDiagnostic(
 
 internal fun repositoryUniversalScopeCoverageDiagnostic(
     acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val requiredPaths = requiredRepositorySourceOperationPaths(acceptedScope, context).toSortedSet()
+    val requiredPaths = requiredRepositorySourceOperationPaths(selectors, context).toSortedSet()
     if (requiredPaths.isEmpty()) return null
     val citedPaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val missingEvidence = requiredPaths - citedPaths
@@ -532,71 +556,67 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
 }
 
 internal fun requiredRepositorySourceOperationPaths(
-    acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
-): List<String> {
-    val requiresExhaustiveTypography = acceptedScope.any { scope ->
-        val normalized = canonicalAuthorityText(scope).lowercase()
-        "typography" in normalized && UNIVERSAL_SCOPE_WORDS.any { it in normalized.split(' ') }
-    }
-    val typographyPaths = if (requiresExhaustiveTypography) {
-        context.files.asSequence()
-            .filterNot { isTestSourcePath(it.path) }
-            .filter { it.containsExplicitFontFamily || EXPLICIT_FONT_FAMILY.containsMatchIn(it.content) }
-            .map { it.path }
-            .toList()
-    } else {
-        emptyList()
-    }
-    val testPaths = if (acceptedScope.any(::requiresTestSource)) {
-        listOfNotNull(
-            context.files.filter { isTestSourcePath(it.path) }
-                .maxByOrNull { candidate ->
-                    typographyPaths.maxOfOrNull { owner -> commonPathPrefixLength(candidate.path, owner) } ?: 0
-                }
-                ?.path
-        )
-    } else {
-        emptyList()
-    }
-    return (typographyPaths + testPaths).distinct().sorted()
-}
+): List<String> = requiredRepositoryPathsBySelector(selectors, context).values.flatten().distinct().sorted()
 
 private fun requiredRepositorySourcePathGroups(
-    acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
-): List<RequiredSourcePathGroup> {
-    val requiredPaths = requiredRepositorySourceOperationPaths(acceptedScope, context)
-    val testPaths = requiredPaths.filter(::isTestSourcePath)
-    val implementationPaths = requiredPaths.filterNot(::isTestSourcePath)
-    return listOf(
-        RequiredSourcePathGroup(SOURCE_PATH_GROUP_IMPLEMENTATION, implementationPaths),
-        RequiredSourcePathGroup(SOURCE_PATH_GROUP_TEST, testPaths),
-    ).filter { it.paths.isNotEmpty() }
-}
+): List<RequiredSourcePathGroup> = requiredRepositoryPathsBySelector(selectors, context)
+    .map { (id, paths) -> RequiredSourcePathGroup(id, paths) }
 
 private fun requiredRepositoryScopeSourcePathGroupIds(
     acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
+): List<List<String>> = acceptedScope.indices.map { scopeIndex ->
+    selectors.filter { scopeIndex in it.scopeIndexes }.map { it.selectorId }
+}
+
+private fun requiredRepositoryPathsBySelector(
+    selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
-): List<String> {
-    if (requiredRepositorySourceOperationPaths(acceptedScope, context).none { !isTestSourcePath(it) }) return emptyList()
-    return acceptedScope.map { scope ->
-        if (requiresTestSource(scope)) SOURCE_PATH_GROUP_TEST else SOURCE_PATH_GROUP_IMPLEMENTATION
+): Map<String, List<String>> {
+    val direct = selectors.associate { selector ->
+        selector.selectorId to context.files.filter { selector.selectorId in it.matchedEvidenceSelectorIds }.map { it.path }
+    }
+    return selectors.associate { selector ->
+        val paths = if (selector.selection == REPOSITORY_EVIDENCE_AFFINE_TEST) {
+            val owners = direct[selector.affinitySelectorId].orEmpty()
+            listOfNotNull(direct[selector.selectorId].orEmpty().maxByOrNull { candidate ->
+                owners.maxOfOrNull { owner -> commonPathPrefixLength(candidate, owner) } ?: 0
+            })
+        } else {
+            direct[selector.selectorId].orEmpty()
+        }
+        selector.selectorId to paths.distinct().sorted()
+    }
+}
+
+internal fun repositoryEvidenceSelectionDiagnostic(
+    selectors: List<RepositoryEvidenceSelector>,
+    context: CodingRepositoryContext,
+): String? {
+    val selected = requiredRepositoryPathsBySelector(selectors, context)
+    val unmatched = selectors.filter { selected[it.selectorId].isNullOrEmpty() }.map { it.selectorId }
+    return unmatched.takeIf { it.isNotEmpty() }?.let {
+        "Repository evidence selectors matched no required paths: ${it.joinToString(", ")}."
     }
 }
 
 internal fun repositoryRequiredScopeSourcePathsDiagnostic(
     acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val groups = requiredRepositorySourcePathGroups(acceptedScope, context).associate { it.id to it.paths }
-    val groupIds = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, context)
-    if (groupIds.isEmpty()) return null
+    val groups = requiredRepositorySourcePathGroups(selectors, context).associate { it.id to it.paths }
+    val groupIds = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, selectors)
+    if (selectors.isEmpty()) return null
     val actual = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
     acceptedScope.forEachIndexed { index, scope ->
         val coverage = actual[canonicalAuthorityText(scope)] ?: return@forEachIndexed
-        val requiredPaths = groups[groupIds[index]].orEmpty()
+        val requiredPaths = groupIds[index].flatMap { groups[it].orEmpty() }.toSet()
         if (coverage.evidencePaths.toSet() != requiredPaths.toSet()) {
             return "Scope coverage ${index + 1} paths differ from deterministic scope authority."
         }
@@ -631,10 +651,6 @@ private fun isTestSourcePath(path: String): Boolean {
     return "/test/" in normalized || normalized.substringAfterLast('/').contains("test.")
 }
 
-private val UNIVERSAL_SCOPE_WORDS = setOf("all", "every", "across")
-private val EXPLICIT_FONT_FAMILY = Regex("\\bFontFamily\\s*\\.")
-private const val SOURCE_PATH_GROUP_IMPLEMENTATION = "IMPLEMENTATION"
-private const val SOURCE_PATH_GROUP_TEST = "TEST"
 
 private val VALID_ANALYSIS_DISPOSITIONS = setOf(
     DISPOSITION_ABSENT,

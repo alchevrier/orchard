@@ -1901,6 +1901,18 @@ data class WorkDefinitionSubmissionRequest(
     val proposedSplitTitles: List<String> = emptyList(),
     val reproduction: String = "",
     val regressionCriterion: String = "",
+    val repositoryEvidenceSelectors: List<RepositoryEvidenceSelectorRequest> = emptyList(),
+)
+
+@Serializable
+data class RepositoryEvidenceSelectorRequest(
+    val selectorId: String,
+    val scopeIndexes: List<Int>,
+    val pathGlobs: List<String>,
+    val contentLiterals: List<String> = emptyList(),
+    val contentMatch: String = "ANY",
+    val selection: String = "ALL_MATCHES",
+    val affinitySelectorId: String = "",
 )
 
 @Serializable

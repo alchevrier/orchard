@@ -214,7 +214,7 @@ class DefinitionIntelligenceService(
             workflowStepVersion = step.version,
             allowedActions = listOf("PROPOSE_DEFINITION", "REVISE_DEFINITION"),
             forbiddenActions = listOf("ACCEPT_DEFINITION", "SIGNAL_READY", "CHANGE_SCOPE_SILENTLY"),
-            requiredOutputSchema = "work-definition-proposal-v1",
+            requiredOutputSchema = "work-definition-proposal-v2",
             context = context,
         )
         val envelopeJson = json.encodeToString(envelope)

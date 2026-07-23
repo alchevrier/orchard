@@ -28,6 +28,8 @@ import com.orchard.backend.workspace.StagedPlanNodeSubmission
 import com.orchard.backend.workspace.StagedPlanStageSubmission
 import com.orchard.backend.workspace.stagedPlanHash
 import com.orchard.backend.workspace.WorkDefinitionSubmission
+import com.orchard.backend.workspace.RepositoryEvidenceSelector
+import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.WorkspaceStore
 import java.nio.file.Files
 import java.nio.file.Path
@@ -300,6 +302,12 @@ class CodingWorkerTest {
         val context = LocalCodingWorkspaceGateway().collectAnalysisContext(
             repository.toString(),
             "Remove serif and review monospace typography.",
+            listOf(RepositoryEvidenceSelector(
+                selectorId = "font-owners",
+                scopeIndexes = listOf(0),
+                pathGlobs = listOf("src/*.kt"),
+                contentLiterals = listOf("FontFamily."),
+            )),
         )
         val excerpt = context.files.single { it.path == "src/Main.kt" }.content
         val secondaryExcerpt = context.files.single { it.path == "src/Secondary.kt" }.content
@@ -311,7 +319,7 @@ class CodingWorkerTest {
         assertTrue(excerpt.contains("FontFamily.Monospace"))
         assertTrue(secondaryExcerpt.contains("FontFamily.Monospace"))
         assertTrue(context.files.single { it.path == "src/Main.kt" }.matchedDeclarations.any { "FontFamily.Serif" in it })
-        assertTrue(context.files.single { it.path == "src/Main.kt" }.containsExplicitFontFamily)
+        assertEquals(listOf("font-owners"), context.files.single { it.path == "src/Main.kt" }.matchedEvidenceSelectorIds)
     }
 
     @Test
@@ -323,11 +331,12 @@ class CodingWorkerTest {
                 "fun projectTypographySettingsDelivery$index() = \"project typography settings delivery regression\"\n",
             )
         }
-        val ownerPaths = (1..4).map { index -> "src/Surface$index.kt" }.onEachIndexed { index, path ->
+        Files.createDirectories(repository.resolve("src/main/ui"))
+        val ownerPaths = (1..4).map { index -> "src/main/ui/Surface$index.kt" }.onEachIndexed { index, path ->
             Files.writeString(repository.resolve(path), "val surface$index = FontFamily.Monospace\n")
         }
-        val testPath = "src/test/TypographyRegressionTest.kt"
-        Files.createDirectories(repository.resolve("src/test"))
+        val testPath = "src/test/ui/TypographyRegressionTest.kt"
+        Files.createDirectories(repository.resolve("src/test/ui"))
         Files.writeString(repository.resolve(testPath), "class TypographyRegressionTest\n")
         run(repository, "git", "add", ".")
         run(repository, "git", "commit", "-m", "Add ranked analysis context")
@@ -335,13 +344,28 @@ class CodingWorkerTest {
         val context = LocalCodingWorkspaceGateway().collectAnalysisContext(
             repository.toString(),
             "Inspect typography across all surfaces and add regression tests.",
+            listOf(
+                RepositoryEvidenceSelector(
+                    selectorId = "owners",
+                    scopeIndexes = listOf(0),
+                    pathGlobs = listOf("src/main/**/*.kt"),
+                    contentLiterals = listOf("FontFamily.Monospace"),
+                ),
+                RepositoryEvidenceSelector(
+                    selectorId = "tests",
+                    scopeIndexes = listOf(0),
+                    pathGlobs = listOf("src/test/**/*.kt"),
+                    selection = REPOSITORY_EVIDENCE_AFFINE_TEST,
+                    affinitySelectorId = "owners",
+                ),
+            ),
         )
 
         assertTrue(ownerPaths.all { path -> context.files.any { it.path == path } })
         assertTrue(context.files.any { it.path == testPath })
         assertEquals(
             (ownerPaths + testPath).sorted(),
-            context.files.filter { it.containsExplicitFontFamily || it.path == testPath }.map { it.path }.sorted(),
+            context.files.filter { it.matchedEvidenceSelectorIds.isNotEmpty() }.map { it.path }.sorted(),
         )
     }
 

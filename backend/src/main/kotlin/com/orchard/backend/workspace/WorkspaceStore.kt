@@ -1,6 +1,7 @@
 package com.orchard.backend.workspace
 
 import com.orchard.backend.api.DocumentIntent
+import java.nio.file.FileSystems
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -2930,6 +2931,16 @@ class WorkspaceStore(
         proposedSplitTitles = submission.proposedSplitTitles.map(String::trim),
         reproduction = submission.reproduction.trim(),
         regressionCriterion = submission.regressionCriterion.trim(),
+        repositoryEvidenceSelectors = submission.repositoryEvidenceSelectors.map { selector ->
+            selector.copy(
+                selectorId = selector.selectorId.trim(),
+                pathGlobs = selector.pathGlobs.map(String::trim),
+                contentLiterals = selector.contentLiterals.map(String::trim),
+                contentMatch = selector.contentMatch.trim(),
+                selection = selector.selection.trim(),
+                affinitySelectorId = selector.affinitySelectorId.trim(),
+            )
+        },
     )
 
     private fun validDefinitionSize(definition: WorkDefinitionSubmission): Boolean {
@@ -2952,7 +2963,37 @@ class WorkspaceStore(
             definition.acceptanceCriteria.size <= MAX_DEFINITION_ENTRIES &&
             definition.acceptanceCriteria.all {
                 it.description.length <= MAX_DEFINITION_TEXT && it.verification.length <= MAX_DEFINITION_TEXT
-            }
+            } && validRepositoryEvidenceSelectors(definition)
+    }
+
+    private fun validRepositoryEvidenceSelectors(definition: WorkDefinitionSubmission): Boolean {
+        val selectors = definition.repositoryEvidenceSelectors
+        if (selectors.size > MAX_DEFINITION_ENTRIES || selectors.map { it.selectorId }.distinct().size != selectors.size) return false
+        val byId = selectors.associateBy { it.selectorId }
+        return selectors.all { selector ->
+            selector.selectorId.isNotBlank() && selector.selectorId.length <= MAX_SELECTOR_ID &&
+                selector.scopeIndexes.isNotEmpty() && selector.scopeIndexes.distinct().size == selector.scopeIndexes.size &&
+                selector.scopeIndexes.all { it in definition.scope.indices } &&
+                selector.pathGlobs.isNotEmpty() && selector.pathGlobs.size <= MAX_DEFINITION_ENTRIES &&
+                selector.pathGlobs.all(::validRepositoryGlob) &&
+                selector.contentLiterals.size <= MAX_DEFINITION_ENTRIES &&
+                selector.contentLiterals.all { it.isNotBlank() && it.length <= MAX_SELECTOR_LITERAL } &&
+                selector.contentMatch in setOf(REPOSITORY_EVIDENCE_MATCH_ANY, REPOSITORY_EVIDENCE_MATCH_ALL) &&
+                selector.selection in setOf(REPOSITORY_EVIDENCE_ALL_MATCHES, REPOSITORY_EVIDENCE_AFFINE_TEST) &&
+                if (selector.selection == REPOSITORY_EVIDENCE_AFFINE_TEST) {
+                    selector.affinitySelectorId != selector.selectorId &&
+                        byId[selector.affinitySelectorId]?.selection == REPOSITORY_EVIDENCE_ALL_MATCHES
+                } else {
+                    selector.affinitySelectorId.isEmpty()
+                }
+        }
+    }
+
+    private fun validRepositoryGlob(value: String): Boolean {
+        val segments = value.replace('\\', '/').split('/')
+        return value.isNotBlank() && value.length <= MAX_SELECTOR_GLOB && !value.startsWith('/') &&
+            segments.none { it == ".." || it.isEmpty() } &&
+            runCatching { FileSystems.getDefault().getPathMatcher("glob:$value") }.isSuccess
     }
 
     private fun definitionRevisionFields(before: WorkDefinitionSubmission, after: WorkDefinitionSubmission): Int =
@@ -2968,6 +3009,7 @@ class WorkspaceStore(
             before.proposedSplitTitles != after.proposedSplitTitles,
             before.reproduction != after.reproduction,
             before.regressionCriterion != after.regressionCriterion,
+            before.repositoryEvidenceSelectors != after.repositoryEvidenceSelectors,
         ).count { it }
 
     private fun circuitRevisionFields(before: StagedDeliveryPlanSubmission, after: StagedDeliveryPlan): Int {
@@ -3521,6 +3563,9 @@ class WorkspaceStore(
         const val MAX_COMMAND_LENGTH = 2048
         const val MAX_DEFINITION_ENTRIES = 16
         const val MAX_DEFINITION_TEXT = 4096
+        const val MAX_SELECTOR_ID = 128
+        const val MAX_SELECTOR_GLOB = 512
+        const val MAX_SELECTOR_LITERAL = 512
         const val MAX_PLAN_TEXT = 256
         const val MAX_PLAN_STAGES = 16
         const val MAX_PLAN_NODES = 26

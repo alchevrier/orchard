@@ -1,8 +1,11 @@
 package com.orchard.backend.agent
 
+import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_MATCH_ALL
+import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.FileSystems
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -24,7 +27,7 @@ data class CodingContextFile(
     val content: String,
     val contentHash: String = sha256Content(content),
     val matchedDeclarations: List<String> = emptyList(),
-    val containsExplicitFontFamily: Boolean = false,
+    val matchedEvidenceSelectorIds: List<String> = emptyList(),
 )
 
 @Serializable
@@ -68,6 +71,11 @@ data class VerificationObservation(
 interface CodingWorkspaceGateway {
     fun collectContext(workspacePath: String, query: String): CodingRepositoryContext
     fun collectAnalysisContext(workspacePath: String, query: String): CodingRepositoryContext = collectContext(workspacePath, query)
+    fun collectAnalysisContext(
+        workspacePath: String,
+        query: String,
+        selectors: List<RepositoryEvidenceSelector>,
+    ): CodingRepositoryContext = collectAnalysisContext(workspacePath, query)
     fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext = collectContext(workspacePath, query)
     fun collectIntelligenceContext(workspacePath: String, repositoryRevision: String, paths: List<String>): CodingRepositoryContext =
         collectAnalysisContext(workspacePath, paths.joinToString(" "))
@@ -90,6 +98,19 @@ class LocalCodingWorkspaceGateway(
 
     override fun collectAnalysisContext(workspacePath: String, query: String): CodingRepositoryContext =
         collectContext(workspacePath, query, MAX_ANALYSIS_CONTEXT_FILES, MAX_ANALYSIS_CONTEXT_BYTES, MAX_ANALYSIS_CONTEXT_FILE_BYTES)
+
+    override fun collectAnalysisContext(
+        workspacePath: String,
+        query: String,
+        selectors: List<RepositoryEvidenceSelector>,
+    ): CodingRepositoryContext = collectContext(
+        workspacePath,
+        query,
+        MAX_ANALYSIS_CONTEXT_FILES,
+        MAX_ANALYSIS_CONTEXT_BYTES,
+        MAX_ANALYSIS_CONTEXT_FILE_BYTES,
+        selectors = selectors,
+    )
 
     override fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext =
         collectContext(
@@ -162,6 +183,7 @@ class LocalCodingWorkspaceGateway(
         maxBytes: Int,
         maxFileBytes: Int,
         includePath: (String) -> Boolean = { true },
+        selectors: List<RepositoryEvidenceSelector> = emptyList(),
     ): CodingRepositoryContext {
         val root = validatedRoot(workspacePath)
         requireGitWorkspace(root)
@@ -174,6 +196,9 @@ class LocalCodingWorkspaceGateway(
             .filter { Files.isRegularFile(it) && !Files.isSymbolicLink(it) }
             .toList()
         val queryTokens = tokens(query)
+        val selectorMatchers = selectors.associateWith { selector ->
+            selector.pathGlobs.map { FileSystems.getDefault().getPathMatcher("glob:$it") }
+        }
         val ranked = tracked.mapNotNull { path ->
             val size = runCatching { Files.size(path) }.getOrNull() ?: return@mapNotNull null
             if (size > MAX_CONTEXT_SOURCE_BYTES) return@mapNotNull null
@@ -182,11 +207,16 @@ class LocalCodingWorkspaceGateway(
             val source = bytes.toString(Charsets.UTF_8)
             val content = focusedContextExcerpt(source, queryTokens, maxFileBytes)
             val relative = root.relativize(path).toString().replace('\\', '/')
+            val selectorIds = selectorMatchers.mapNotNull { (selector, matchers) ->
+                selector.selectorId.takeIf {
+                    matchers.any { it.matches(Path.of(relative)) } && selectorMatchesSource(selector, source)
+                }
+            }
             val lowerPath = relative.lowercase()
             val lowerContent = source.lowercase()
             val score = queryTokens.sumOf { token ->
                 (if (lowerPath.contains(token)) 20 else 0) + (if (lowerContent.contains(token)) 1 else 0)
-            } + foundationScore(relative) + ownershipScore(relative, source, queryTokens)
+            } + foundationScore(relative) + ownershipScore(relative, queryTokens, selectorIds)
             RankedContextFile(
                 score,
                 relative,
@@ -195,7 +225,7 @@ class LocalCodingWorkspaceGateway(
                     content,
                     sha256Content(source),
                     matchedSourceDeclarations(source, queryTokens),
-                    EXPLICIT_FONT_FAMILY.containsMatchIn(source),
+                    selectorIds,
                 ),
             )
         }.sortedWith(compareByDescending<RankedContextFile> { it.score }.thenBy { it.path })
@@ -512,11 +542,17 @@ class LocalCodingWorkspaceGateway(
         return if (name in FOUNDATION_FILES || path.startsWith("docs/")) 10 else 0
     }
 
-    private fun ownershipScore(path: String, source: String, queryTokens: Set<String>): Int {
-        val typographyOwner = "typography" in queryTokens && EXPLICIT_FONT_FAMILY.containsMatchIn(source)
+    private fun ownershipScore(path: String, queryTokens: Set<String>, selectorIds: List<String>): Int {
+        val selectedOwner = selectorIds.isNotEmpty()
         val testOwner = queryTokens.any { it == "test" || it == "tests" || it == "regression" } && isTestSourcePath(path)
-        return (if (typographyOwner) OWNERSHIP_SCORE_BONUS else 0) +
+        return (if (selectedOwner) OWNERSHIP_SCORE_BONUS else 0) +
             (if (testOwner) OWNERSHIP_SCORE_BONUS else 0)
+    }
+
+    private fun selectorMatchesSource(selector: RepositoryEvidenceSelector, source: String): Boolean = when {
+        selector.contentLiterals.isEmpty() -> true
+        selector.contentMatch == REPOSITORY_EVIDENCE_MATCH_ALL -> selector.contentLiterals.all(source::contains)
+        else -> selector.contentLiterals.any(source::contains)
     }
 
     private fun isTestSourcePath(path: String): Boolean {
@@ -669,7 +705,6 @@ private const val DECLARATION_MATCH_BONUS = 2
 private const val MAX_MATCHED_DECLARATIONS = 64
 private const val MAX_DECLARATION_CHARS = 512
 private val SOURCE_DECLARATION = Regex("\\b(class|interface|object|fun|val|var|typealias)\\b")
-private val EXPLICIT_FONT_FAMILY = Regex("\\bFontFamily\\s*\\.")
 private data class ExcerptMatch(
     val index: Int,
     val score: Int,

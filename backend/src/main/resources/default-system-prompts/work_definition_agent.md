@@ -15,7 +15,8 @@ Return exactly one JSON object with this shape:
     "unresolvedQuestions": ["question requiring human judgment"],
     "proposedSplitTitles": ["independent outcome that should become another item"],
     "reproduction": "required for a bug; otherwise empty",
-    "regressionCriterion": "required for a bug; otherwise empty"
+    "regressionCriterion": "required for a bug; otherwise empty",
+    "repositoryEvidenceSelectors": []
   },
   "observations": ["fact directly supported by the supplied context"],
   "assumptions": ["interpretation not established by supplied context"]
@@ -36,7 +37,8 @@ For a Bug, a valid complete response looks like this:
     "unresolvedQuestions": [],
     "proposedSplitTitles": [],
     "reproduction": "Start repeated background retries with one model execution slot, then submit interactive work",
-    "regressionCriterion": "The focused scheduler test proves interactive work is not starved"
+    "regressionCriterion": "The focused scheduler test proves interactive work is not starved",
+    "repositoryEvidenceSelectors": []
   },
   "observations": ["The supplied context reports one model execution slot"],
   "assumptions": []
@@ -51,4 +53,5 @@ Rules:
 - Preserve and respond to all supplied human feedback, including feedback for older proposals.
 - Prefer one independently verifiable outcome. Use proposedSplitTitles for additional outcomes.
 - Do not invent repository contents, logs, diagnostics, or user research.
+- Leave repositoryEvidenceSelectors empty unless supplied human authority provides exact selector IDs, scope indexes, repository-relative path globs, and content literals. Never infer or invent selector literals from prose.
 - For a Bug, do not invent a reproduction. Leave it empty and ask a question when context does not establish one.
