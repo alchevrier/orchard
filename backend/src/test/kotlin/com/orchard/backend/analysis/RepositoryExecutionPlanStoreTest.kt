@@ -71,8 +71,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
         assert(prompt.contains("copying scope exactly without paraphrasing, omission, or invention"))
-        assert(prompt.contains("or from a path introduced by a CREATE operation"))
-        assert(prompt.contains("Every evidencePath in scopeCoverage must also be targeted by a CREATE, MODIFY, or DELETE operation"))
+        assert(prompt.contains("or from a path targeted by a CREATE, MODIFY, or DELETE operation"))
+        assert(prompt.contains("Every evidencePath in implementation scopeCoverage must also be targeted by a CREATE, MODIFY, or DELETE operation"))
         assert(prompt.contains("every referenced order must exist"))
         assert(prompt.contains("Treat universal scope words such as all, every, and across as exhaustive"))
         assert(prompt.contains("every supplied source file containing an explicit FontFamily declaration"))
@@ -232,7 +232,7 @@ class RepositoryExecutionPlanStoreTest {
             ),
         )
         assertEquals(
-            "Scope coverage 1 does not cite pinned evidence or a planned creation.",
+            "Scope coverage 1 does not cite pinned evidence or a concrete source operation.",
             repositoryScopeCoverageDiagnostic(
                 scope,
                 content.copy(scopeCoverage = content.scopeCoverage.map { it.copy(evidencePaths = listOf("src/Missing.kt")) }),
@@ -243,6 +243,11 @@ class RepositoryExecutionPlanStoreTest {
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_CREATE, "src/NewTest.kt", null, "Create it.", listOf("Behavior works."))),
         )
         assertNull(repositoryScopeCoverageDiagnostic(scope, createContent))
+        val modifiedWithoutDuplicateCitation = content.copy(
+            scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
+            operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/Other.kt", null, "Change it.", listOf("Behavior works."))),
+        )
+        assertNull(repositoryScopeCoverageDiagnostic(scope, modifiedWithoutDuplicateCitation))
         val verifyOnly = content.copy(
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )

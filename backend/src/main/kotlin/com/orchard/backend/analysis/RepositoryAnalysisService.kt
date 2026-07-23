@@ -406,11 +406,10 @@ internal fun repositoryScopeCoverageDiagnostic(
     }
     val evidencePaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val operations = output.operations.associateBy { it.order }
-    val createdPaths = output.operations.filter { it.action == PLAN_OPERATION_CREATE }.mapTo(hashSetOf()) { it.path }
     val sourceOperationPaths = output.operations.filter { it.action != PLAN_OPERATION_VERIFY }.mapTo(hashSetOf()) { it.path }
     output.scopeCoverage.forEachIndexed { index, coverage ->
-        if (coverage.evidencePaths.isEmpty() || coverage.evidencePaths.any { it !in evidencePaths && it !in createdPaths }) {
-            return "Scope coverage ${index + 1} does not cite pinned evidence or a planned creation."
+        if (coverage.evidencePaths.isEmpty() || coverage.evidencePaths.any { it !in evidencePaths && it !in sourceOperationPaths }) {
+            return "Scope coverage ${index + 1} does not cite pinned evidence or a concrete source operation."
         }
         if (coverage.operationOrders.any { it !in operations }) {
             return "Scope coverage ${index + 1} references an unavailable operation."
