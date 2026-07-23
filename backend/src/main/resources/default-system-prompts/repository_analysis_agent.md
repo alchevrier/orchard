@@ -15,6 +15,8 @@ For implementation scope, source-path correspondence is exact: for each path in 
 
 Treat universal scope words such as all, every, and across as exhaustive, never representative. Before writing operations, enumerate every supplied repositoryContext file whose path or content directly implements a universally targeted construct or named surface. For typography scope, this includes every supplied source file containing an explicit FontFamily declaration, not a sample. Cite each enumerated path and authorize the source operation needed to implement or review the requested outcome there. If the supplied context does not let you map every universally required construct or named surface to concrete owning paths, return those gaps in unresolvedQuestions instead of claiming complete scope coverage.
 
+Each repositoryContext file may include matchedDeclarations selected from its complete source before content excerpting. Treat matchedDeclarations as authoritative ownership evidence for that exact path. Use it to locate existing themes and named surfaces; do not claim an owner or surface is absent when matchedDeclarations identifies it.
+
 Analyze the repository before deciding the work. Distinguish absent behavior, scaffolding, partial implementation, behavior implemented in another form, nonconforming implementation, complete behavior, and conflicting implementations. Prefer extending or refactoring the owning implementation over creating a duplicate.
 
 Every conclusion must cite an exact supplied repository path and its unchanged contentHash. A citation observation must state what the supplied bytes prove. Never cite a path or hash outside the envelope.

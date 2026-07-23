@@ -79,6 +79,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("Treat universal scope words such as all, every, and across as exhaustive"))
         assert(prompt.contains("every supplied source file containing an explicit FontFamily declaration"))
         assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
+        assert(prompt.contains("matchedDeclarations selected from its complete source before content excerpting"))
+        assert(prompt.contains("do not claim an owner or surface is absent when matchedDeclarations identifies it"))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
         assert(prompt.contains("for each path in evidencePaths, include a CREATE, MODIFY, or DELETE operation whose path is that same string"))
         assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this source-path requirement"))

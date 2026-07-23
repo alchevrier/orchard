@@ -23,6 +23,7 @@ data class CodingContextFile(
     val path: String,
     val content: String,
     val contentHash: String = sha256Content(content),
+    val matchedDeclarations: List<String> = emptyList(),
 )
 
 @Serializable
@@ -185,15 +186,25 @@ class LocalCodingWorkspaceGateway(
             val score = queryTokens.sumOf { token ->
                 (if (lowerPath.contains(token)) 20 else 0) + (if (lowerContent.contains(token)) 1 else 0)
             } + foundationScore(relative)
-            Triple(score, relative, content)
-        }.sortedWith(compareByDescending<Triple<Int, String, String>> { it.first }.thenBy { it.second })
+            RankedContextFile(
+                score,
+                relative,
+                CodingContextFile(
+                    relative,
+                    content,
+                    sha256Content(source),
+                    matchedSourceDeclarations(source, queryTokens),
+                ),
+            )
+        }.sortedWith(compareByDescending<RankedContextFile> { it.score }.thenBy { it.path })
 
         var bytesUsed = 0
         val selected = mutableListOf<CodingContextFile>()
-        ranked.forEach { (_, relative, content) ->
-            val bytes = content.encodeToByteArray().size
+        ranked.forEach { rankedFile ->
+            val bytes = rankedFile.file.content.encodeToByteArray().size +
+                rankedFile.file.matchedDeclarations.sumOf { it.encodeToByteArray().size }
             if (selected.size < maxFiles && bytesUsed + bytes <= maxBytes) {
-                selected += CodingContextFile(relative, content)
+                selected += rankedFile.file
                 bytesUsed += bytes
             }
         }
@@ -508,6 +519,12 @@ class LocalCodingWorkspaceGateway(
 
     private data class ProcessResult(val exitCode: Int, val output: String)
 
+    private data class RankedContextFile(
+        val score: Int,
+        val path: String,
+        val file: CodingContextFile,
+    )
+
     private companion object {
         const val MAX_REPLACEMENTS = 32
         const val MAX_CONTEXT_FILES = 32
@@ -601,6 +618,32 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
     }
 }
 
+internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>): List<String> {
+    val matches = content.lineSequence().mapIndexedNotNull { index, line ->
+        val lower = line.lowercase()
+        if (!SOURCE_DECLARATION.containsMatchIn(lower)) return@mapIndexedNotNull null
+        val matchedTokens = queryTokens.filterTo(mutableSetOf(), lower::contains)
+        matchedTokens.size.takeIf { it > 0 }?.let {
+            SourceDeclarationMatch(index, line.trim().take(MAX_DECLARATION_CHARS), matchedTokens)
+        }
+    }.toList()
+    val tokenFrequency = matches.flatMap(SourceDeclarationMatch::matchedTokens)
+        .groupingBy(String::lowercase)
+        .eachCount()
+    val reserved = tokenFrequency.keys
+        .sortedWith(compareBy<String> { tokenFrequency.getValue(it) }.thenBy(String::lowercase))
+        .mapNotNull { token ->
+            matches.filter { token in it.matchedTokens }
+                .maxWithOrNull(compareBy<SourceDeclarationMatch> { it.matchedTokens.size }.thenByDescending { it.index })
+        }
+    return (reserved + matches.sortedWith(
+        compareByDescending<SourceDeclarationMatch> { it.matchedTokens.size }.thenBy { it.index }
+    )).distinctBy(SourceDeclarationMatch::index)
+        .take(MAX_MATCHED_DECLARATIONS)
+        .sortedBy(SourceDeclarationMatch::index)
+        .map(SourceDeclarationMatch::line)
+}
+
 private fun excerptSection(lines: List<String>, window: IntRange): String = buildString {
     append("[Orchard excerpt lines ${window.first + 1}-${window.last + 1} of ${lines.size}]\n")
     window.forEach { index -> append(lines[index]).append('\n') }
@@ -609,12 +652,19 @@ private fun excerptSection(lines: List<String>, window: IntRange): String = buil
 private const val MAX_EXCERPT_WINDOWS = 64
 private const val EXCERPT_CONTEXT_LINES = 3
 private const val DECLARATION_MATCH_BONUS = 2
+private const val MAX_MATCHED_DECLARATIONS = 64
+private const val MAX_DECLARATION_CHARS = 512
 private val SOURCE_DECLARATION = Regex("\\b(class|interface|object|fun|val|var|typealias)\\b")
 private data class ExcerptMatch(
     val index: Int,
     val score: Int,
     val matchedTokens: Set<String>,
     val declaration: Boolean,
+)
+private data class SourceDeclarationMatch(
+    val index: Int,
+    val line: String,
+    val matchedTokens: Set<String>,
 )
 
 internal fun sha256Content(value: String): String = MessageDigest.getInstance("SHA-256")

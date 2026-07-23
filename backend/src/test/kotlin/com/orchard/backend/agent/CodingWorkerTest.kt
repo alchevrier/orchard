@@ -310,6 +310,7 @@ class CodingWorkerTest {
         assertTrue(excerpt.contains("FontFamily.Serif"))
         assertTrue(excerpt.contains("FontFamily.Monospace"))
         assertTrue(secondaryExcerpt.contains("FontFamily.Monospace"))
+        assertTrue(context.files.single { it.path == "src/Main.kt" }.matchedDeclarations.any { "FontFamily.Serif" in it })
     }
 
     @Test
@@ -341,6 +342,9 @@ class CodingWorkerTest {
         assertTrue(excerpt.encodeToByteArray().size <= 2_048)
         assertTrue(excerpt.contains("private fun ModelSettingsDialog"))
         assertTrue(excerpt.contains("private fun DeliveryTimeline"))
+        val declarations = matchedSourceDeclarations(content, setOf("project", "settings", "delivery"))
+        assertTrue(declarations.any { "private fun ModelSettingsDialog" in it })
+        assertTrue(declarations.any { "private fun DeliveryTimeline" in it })
     }
 
     @Test
