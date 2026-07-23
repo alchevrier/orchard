@@ -107,6 +107,29 @@ class CompanyCircuitTest {
     }
 
     @Test
+    fun `repository analysis compacts declarations before required evidence`() {
+        val declarations = (1..8).map { index -> "private fun RequiredOwner$index() = Unit" }
+        val context = CodingRepositoryContext(
+            files = (1..2).map { index ->
+                CodingContextFile("src/Required$index.kt", "focused owner $index", matchedDeclarations = declarations)
+            },
+            omittedFileCount = 0,
+        )
+        val requiredPaths = context.files.mapTo(hashSetOf()) { it.path }
+        val oneDeclarationBudget = estimateModelTokens(Json.encodeToString(context.copy(
+            files = context.files.map { it.copy(matchedDeclarations = declarations.take(1)) },
+        )))
+
+        val compacted = requireNotNull(
+            compactRepositoryContextToBudget(context, oneDeclarationBudget, requiredPaths) { Json.encodeToString(it) }
+        )
+
+        assertEquals(context.files.map { it.path }, compacted.files.map { it.path })
+        assertEquals(listOf(declarations.first()), compacted.files.first().matchedDeclarations)
+        assertEquals(0, compacted.omittedFileCount)
+    }
+
+    @Test
     fun `company repairs failed work and audit violations before local promotion`() = runTest {
         val state = createTempDirectory("orchard-company-acceptance-state-")
         val projects = createTempDirectory("orchard-company-acceptance-projects-")

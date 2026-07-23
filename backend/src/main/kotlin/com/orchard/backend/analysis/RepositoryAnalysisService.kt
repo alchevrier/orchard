@@ -1,5 +1,6 @@
 package com.orchard.backend.analysis
 
+import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
@@ -698,15 +699,38 @@ internal fun compactRepositoryContextToBudget(
     val availablePaths = context.files.mapTo(hashSetOf()) { it.path }
     if (!availablePaths.containsAll(requiredPaths)) return null
     val optionalFiles = context.files.filter { it.path !in requiredPaths }
+    var declarationLimit = context.files.maxOfOrNull { it.matchedDeclarations.size } ?: 0
+    if (requiredPaths.isNotEmpty()) {
+        var lowerDeclarations = 0
+        var upperDeclarations = declarationLimit
+        var fittedDeclarationLimit: Int? = null
+        while (lowerDeclarations <= upperDeclarations) {
+            val candidateLimit = (lowerDeclarations + upperDeclarations) / 2
+            val candidate = compactRepositoryContext(
+                context,
+                requiredPaths,
+                optionalFiles = emptyList(),
+                declarationLimit = candidateLimit,
+            )
+            if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
+                fittedDeclarationLimit = candidateLimit
+                lowerDeclarations = candidateLimit + 1
+            } else {
+                upperDeclarations = candidateLimit - 1
+            }
+        }
+        declarationLimit = fittedDeclarationLimit ?: return null
+    }
     var lower = if (requiredPaths.isEmpty()) 1 else 0
     var upper = optionalFiles.size
     var best: CodingRepositoryContext? = null
     while (lower <= upper) {
         val retainedOptional = (lower + upper) / 2
-        val selectedPaths = requiredPaths + optionalFiles.take(retainedOptional).map { it.path }
-        val candidate = context.copy(
-            files = context.files.filter { it.path in selectedPaths },
-            omittedFileCount = context.omittedFileCount + context.files.size - selectedPaths.size,
+        val candidate = compactRepositoryContext(
+            context,
+            requiredPaths,
+            optionalFiles.take(retainedOptional),
+            declarationLimit,
         )
         if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
             best = candidate
@@ -716,4 +740,19 @@ internal fun compactRepositoryContextToBudget(
         }
     }
     return best
+}
+
+private fun compactRepositoryContext(
+    context: CodingRepositoryContext,
+    requiredPaths: Set<String>,
+    optionalFiles: List<CodingContextFile>,
+    declarationLimit: Int,
+): CodingRepositoryContext {
+    val selectedPaths = requiredPaths + optionalFiles.map { it.path }
+    return context.copy(
+        files = context.files.filter { it.path in selectedPaths }.map { file ->
+            file.copy(matchedDeclarations = file.matchedDeclarations.take(declarationLimit))
+        },
+        omittedFileCount = context.omittedFileCount + context.files.size - selectedPaths.size,
+    )
 }

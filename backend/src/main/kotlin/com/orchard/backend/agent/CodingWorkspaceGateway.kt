@@ -655,7 +655,6 @@ internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>
         compareByDescending<SourceDeclarationMatch> { it.matchedTokens.size }.thenBy { it.index }
     )).distinctBy(SourceDeclarationMatch::index)
         .take(MAX_MATCHED_DECLARATIONS)
-        .sortedBy(SourceDeclarationMatch::index)
         .map(SourceDeclarationMatch::line)
 }
 
