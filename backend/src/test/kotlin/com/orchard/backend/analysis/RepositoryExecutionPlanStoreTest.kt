@@ -20,6 +20,7 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
         assert(prompt.contains("Copy requiredScope exactly and completely into coveredScope"))
+        assert(prompt.contains("A planned CREATE path is not repository evidence"))
         assert(prompt.contains("A VERIFY-only mapping is invalid."))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
