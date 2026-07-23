@@ -343,12 +343,13 @@ internal fun repositoryScopeCoverageDiagnostic(
     acceptedScope: List<String>,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val required = acceptedScope.toSet()
+    val required = acceptedScope.associateBy(::canonicalAuthorityText)
     if (required.isEmpty()) return "The workflow has no accepted implementation scope to compile."
-    val scopeCounts = output.scopeCoverage.groupingBy { it.scope }.eachCount()
-    val missing = acceptedScope.filter { scopeCounts[it] == null }
-    val duplicated = acceptedScope.filter { (scopeCounts[it] ?: 0) > 1 }
-    val unexpected = scopeCounts.keys.filter { it !in required }
+    if (required.size != acceptedScope.size) return "The workflow has ambiguous accepted implementation scope."
+    val scopeCounts = output.scopeCoverage.groupingBy { canonicalAuthorityText(it.scope) }.eachCount()
+    val missing = required.filterKeys { scopeCounts[it] == null }.values
+    val duplicated = required.filterKeys { (scopeCounts[it] ?: 0) > 1 }.values
+    val unexpected = output.scopeCoverage.map { it.scope }.filter { canonicalAuthorityText(it) !in required }
     if (missing.isNotEmpty() || duplicated.isNotEmpty() || unexpected.isNotEmpty()) {
         return buildString {
             append("Execution plan scope coverage must map every accepted scope clause exactly once.")
@@ -374,6 +375,12 @@ internal fun repositoryScopeCoverageDiagnostic(
     }
     return null
 }
+
+private fun canonicalAuthorityText(value: String): String = value
+    .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")
+    .replace('\u00a0', ' ')
+    .trim()
+    .replace(Regex("\\s+"), " ")
 
 internal fun repositoryEvidenceDiagnostic(
     context: CodingRepositoryContext,

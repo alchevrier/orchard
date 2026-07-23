@@ -137,6 +137,25 @@ class RepositoryExecutionPlanStoreTest {
         )
 
         assertNull(repositoryScopeCoverageDiagnostic(scope, content))
+        assertNull(
+            repositoryScopeCoverageDiagnostic(
+                scope,
+                content.copy(scopeCoverage = content.scopeCoverage.map {
+                    if (it.scope == "Add regression coverage.") it else it.copy(scope = "Inspect the owner.\u00a0")
+                }),
+            ),
+        )
+        val hyphenatedScope = listOf("Review machine-readable output.")
+        assertNull(
+            repositoryScopeCoverageDiagnostic(
+                hyphenatedScope,
+                content.copy(
+                    scopeCoverage = listOf(
+                        ExecutionPlanScopeCoverage("Review machine\u2011readable output.", listOf("src/Main.kt"), listOf(1))
+                    ),
+                ),
+            ),
+        )
         assertEquals(
             "Execution plan scope coverage must map every accepted scope clause exactly once. Missing: Add regression coverage.",
             repositoryScopeCoverageDiagnostic(scope, content.copy(scopeCoverage = content.scopeCoverage.take(1))),
