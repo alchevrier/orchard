@@ -19,6 +19,7 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("A valid response has exactly this shape:"))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, operations, verificationCommands, and unresolvedQuestions top-level keys."))
+        assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
     }
@@ -80,6 +81,31 @@ class RepositoryExecutionPlanStoreTest {
             repositoryOperationShapeDiagnostic(
                 context,
                 valid.copy(operations = valid.operations.map { it.copy(path = "src/Missing.kt") }),
+            ),
+        )
+    }
+
+    @Test
+    fun `repository evidence diagnostics identify unavailable paths and changed hashes`() {
+        val context = com.orchard.backend.agent.CodingRepositoryContext(
+            files = listOf(com.orchard.backend.agent.CodingContextFile("src/Main.kt", "fun main() = Unit", "c".repeat(64))),
+            omittedFileCount = 0,
+        )
+        val valid = plan(1, 1, "a".repeat(40)).content
+
+        assertNull(repositoryEvidenceDiagnostic(context, valid))
+        assertEquals(
+            "Repository evidence citation 1 uses unavailable path src/Missing.kt.",
+            repositoryEvidenceDiagnostic(
+                context,
+                valid.copy(evidence = valid.evidence.map { it.copy(path = "src/Missing.kt") }),
+            ),
+        )
+        assertEquals(
+            "Repository evidence citation 1 has the wrong content hash for src/Main.kt.",
+            repositoryEvidenceDiagnostic(
+                context,
+                valid.copy(evidence = valid.evidence.map { it.copy(contentHash = "d".repeat(64)) }),
             ),
         )
     }

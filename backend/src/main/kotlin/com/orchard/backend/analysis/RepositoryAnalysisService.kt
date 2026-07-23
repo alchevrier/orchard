@@ -55,6 +55,12 @@ data class RepositoryAnalysisTickResult(
 )
 
 @Serializable
+private data class RequiredRepositoryEvidence(
+    val path: String,
+    val contentHash: String,
+)
+
+@Serializable
 private data class RepositoryAnalysisEnvelope(
     val executionProfileId: String,
     val baseRevision: String,
@@ -62,6 +68,7 @@ private data class RepositoryAnalysisEnvelope(
     val repositoryContext: CodingRepositoryContext,
     val allowedDispositions: List<String>,
     val requiredOutputSchema: String,
+    val requiredEvidence: List<RequiredRepositoryEvidence>,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -160,6 +167,7 @@ class RepositoryAnalysisService(
             candidate,
             DISPOSITIONS,
             OUTPUT_SCHEMA,
+            candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
@@ -247,10 +255,7 @@ class RepositoryAnalysisService(
         output: RepositoryAnalysisPlanContent,
     ): String? {
         if (output.disposition !in DISPOSITIONS || output.summary.isBlank() || output.evidence.isEmpty()) return "Analysis identity is incomplete."
-        val files = context.files.associateBy { it.path }
-        if (output.evidence.any { citation -> files[citation.path]?.contentHash != citation.contentHash || citation.observation.isBlank() }) {
-            return "Analysis cites repository evidence that was not present in the pinned context."
-        }
+        repositoryEvidenceDiagnostic(context, output)?.let { return it }
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
         val criteria = run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }?.toSet().orEmpty()
         if (criteria.isEmpty()) return "The workflow has no accepted criteria to compile."
@@ -322,6 +327,22 @@ class RepositoryAnalysisService(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
         ).bufferedReader().use { it.readText() }
     }
+}
+
+internal fun repositoryEvidenceDiagnostic(
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val files = context.files.associateBy { it.path }
+    output.evidence.forEachIndexed { index, citation ->
+        val file = files[citation.path]
+            ?: return "Repository evidence citation ${index + 1} uses unavailable path ${citation.path}."
+        if (file.contentHash != citation.contentHash) {
+            return "Repository evidence citation ${index + 1} has the wrong content hash for ${citation.path}."
+        }
+        if (citation.observation.isBlank()) return "Repository evidence citation ${index + 1} has no observation."
+    }
+    return null
 }
 
 internal fun repositoryOperationShapeDiagnostic(
