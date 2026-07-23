@@ -216,8 +216,9 @@ class RepositoryAnalysisService(
             run.runId,
             diagnostic = "The analysis model did not return valid strict JSON.",
         )
-        val invalid = validateOutput(run, boundedContext, output)
-        if (invalid != null) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, run.runId, diagnostic = invalid)
+        repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
+            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, run.runId, diagnostic = it)
+        }
         if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
             return RepositoryAnalysisTickResult(
                 RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED,
@@ -225,6 +226,8 @@ class RepositoryAnalysisService(
                 diagnostic = output.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
             )
         }
+        val invalid = validateOutput(run, boundedContext, output)
+        if (invalid != null) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, run.runId, diagnostic = invalid)
         if (workspaceGateway.currentRevision(workspacePath) != baseRevision) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.PLAN_STALE, run.runId, diagnostic = "Repository changed during analysis.")
         }
@@ -259,8 +262,6 @@ class RepositoryAnalysisService(
         context: CodingRepositoryContext,
         output: RepositoryAnalysisPlanContent,
     ): String? {
-        if (output.disposition !in DISPOSITIONS || output.summary.isBlank() || output.evidence.isEmpty()) return "Analysis identity is incomplete."
-        repositoryEvidenceDiagnostic(context, output)?.let { return it }
         repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
         val criteria = run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }?.toSet().orEmpty()
@@ -335,6 +336,16 @@ class RepositoryAnalysisService(
     }
 }
 
+internal fun repositoryAnalysisIdentityDiagnostic(
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    if (output.disposition !in VALID_ANALYSIS_DISPOSITIONS || output.summary.isBlank() || output.evidence.isEmpty()) {
+        return "Analysis identity is incomplete."
+    }
+    return repositoryEvidenceDiagnostic(context, output)
+}
+
 private fun RepositoryExecutionPlan.coversAcceptedScope(run: WorkflowRunView): Boolean {
     return repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), content) == null
 }
@@ -385,6 +396,16 @@ private fun canonicalAuthorityText(value: String): String = value
 private fun requiresSourceOperation(scope: String): Boolean = canonicalAuthorityText(scope)
     .substringBefore(' ')
     .lowercase() !in setOf("inspect", "analyze", "audit")
+
+private val VALID_ANALYSIS_DISPOSITIONS = setOf(
+    DISPOSITION_ABSENT,
+    DISPOSITION_SCAFFOLD_ONLY,
+    DISPOSITION_PARTIALLY_IMPLEMENTED,
+    DISPOSITION_IMPLEMENTED_DIFFERENT_FORM,
+    DISPOSITION_IMPLEMENTED_NONCONFORMING,
+    DISPOSITION_COMPLETE,
+    DISPOSITION_CONFLICTING,
+)
 
 internal fun repositoryEvidenceDiagnostic(
     context: CodingRepositoryContext,

@@ -127,6 +127,11 @@ class RepositoryExecutionPlanStoreTest {
                 valid.copy(evidence = valid.evidence.map { it.copy(contentHash = "d".repeat(64)) }),
             ),
         )
+        assertNull(repositoryAnalysisIdentityDiagnostic(context, valid.copy(operations = emptyList())))
+        assertEquals(
+            "Analysis identity is incomplete.",
+            repositoryAnalysisIdentityDiagnostic(context, valid.copy(summary = "")),
+        )
     }
 
     @Test
