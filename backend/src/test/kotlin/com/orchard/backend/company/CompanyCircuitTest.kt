@@ -61,6 +61,9 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class CompanyCircuitTest {
     @Test
@@ -461,6 +464,10 @@ class CompanyCircuitTest {
                 Regex("\\\"path\\\":\\\"build\\.gradle\\.kts\\\",\\\"content\\\":.*?\\\"contentHash\\\":\\\"([0-9a-f]{64})\\\"")
                     .find(prompt)
             ).groupValues[1]
+            val envelope = Json.parseToJsonElement(
+                prompt.substringAfter("Authoritative repository analysis envelope:\n")
+            ).jsonObject
+            val requiredScope = requireNotNull(envelope["requiredScope"]).jsonArray.map { it.jsonPrimitive.content }
             val criterion = "The architect can observe one complete governed journey."
             val disposition = if (analysisCalls++ == 0) DISPOSITION_SCAFFOLD_ONLY else DISPOSITION_PARTIALLY_IMPLEMENTED
             val output = Json.encodeToString(
@@ -481,6 +488,7 @@ class CompanyCircuitTest {
                     reuse = listOf("build.gradle.kts"),
                     preservedInvariants = listOf("Preserve the admitted local Gradle toolchain."),
                     nonGoals = listOf("Do not create a parallel build implementation."),
+                    coveredScope = requiredScope,
                     operations = listOf(
                         ExecutionPlanOperation(
                             1,

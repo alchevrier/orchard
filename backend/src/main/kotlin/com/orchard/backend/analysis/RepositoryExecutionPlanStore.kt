@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package com.orchard.backend.analysis
 
 import com.orchard.backend.workspace.loadRecoverableJsonl
@@ -8,6 +10,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.time.Instant
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -51,6 +54,8 @@ data class RepositoryAnalysisPlanContent(
     val reuse: List<String>,
     val preservedInvariants: List<String>,
     val nonGoals: List<String>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val coveredScope: List<String> = emptyList(),
     val operations: List<ExecutionPlanOperation>,
     val verificationCommands: List<String>,
     val unresolvedQuestions: List<String> = emptyList(),
@@ -211,7 +216,6 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
     require(plan.planId == previous.size + 1L) { "Repository execution plan ID is not monotonic" }
     val priorRunPlans = previous.filter { it.runId == plan.runId }
     require(plan.revision == (priorRunPlans.maxOfOrNull { it.revision } ?: 0) + 1) { "Execution plan revision is not monotonic" }
-    require(priorRunPlans.none { it.baseRevision == plan.baseRevision }) { "The repository revision already has an execution plan" }
     require(plan.runId > 0 && plan.projectId > 0 && plan.baseRevision.matches(GIT_HASH)) { "Execution plan identity is invalid" }
     require(plan.content.disposition in DISPOSITIONS) { "Execution plan disposition is invalid" }
     require(plan.content.summary.isNotBlank() && plan.content.unresolvedQuestions.isEmpty()) { "Execution plan is unresolved" }

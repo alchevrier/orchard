@@ -18,28 +18,31 @@ class RepositoryExecutionPlanStoreTest {
 
         assert(prompt.contains("A valid response has exactly this shape:"))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
-        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, operations, verificationCommands, and unresolvedQuestions top-level keys."))
+        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, operations, verificationCommands, and unresolvedQuestions top-level keys."))
+        assert(prompt.contains("Copy requiredScope exactly and completely into coveredScope"))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
     }
 
     @Test
-    fun `execution plans recover immutable successor revisions`() {
+    fun `execution plans recover immutable successors including revised plans on one base`() {
         val directory = createTempDirectory("orchard-analysis-plans-")
         val store = FileRepositoryExecutionPlanStore(directory)
         val first = plan(1, 1, "a".repeat(40))
         val successor = plan(2, 2, "b".repeat(40))
+        val revisedSuccessor = plan(3, 3, "b".repeat(40))
 
         store.append(first)
         store.append(successor)
+        store.append(revisedSuccessor)
 
-        assertEquals(listOf(first, successor), FileRepositoryExecutionPlanStore(directory).load())
+        assertEquals(listOf(first, successor, revisedSuccessor), FileRepositoryExecutionPlanStore(directory).load())
         assertFailsWith<IllegalArgumentException> {
-            store.append(plan(3, 3, "b".repeat(40)))
+            store.append(plan(4, 3, "c".repeat(40)))
         }
-        assertEquals(2, FileRepositoryExecutionPlanStore(directory).load().size)
-        assertEquals(2, Files.readAllLines(directory.resolve("repository-analysis-plans.jsonl")).size)
+        assertEquals(3, FileRepositoryExecutionPlanStore(directory).load().size)
+        assertEquals(3, Files.readAllLines(directory.resolve("repository-analysis-plans.jsonl")).size)
     }
 
     @Test

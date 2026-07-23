@@ -69,6 +69,7 @@ private data class RepositoryAnalysisEnvelope(
     val allowedDispositions: List<String>,
     val requiredOutputSchema: String,
     val requiredEvidence: List<RequiredRepositoryEvidence>,
+    val requiredScope: List<String>,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -91,9 +92,12 @@ class RepositoryAnalysisService(
 
     fun plans(): List<RepositoryExecutionPlan> = planStore.load()
 
-    fun currentPlan(runId: Long): RepositoryExecutionPlan? = planStore.load()
-        .filter { it.runId == runId }
-        .maxByOrNull { it.revision }
+    fun currentPlan(runId: Long): RepositoryExecutionPlan? {
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.singleOrNull { it.runId == runId } ?: return null
+        return planStore.load()
+            .filter { it.runId == runId && it.coversAcceptedScope(run) }
+            .maxByOrNull { it.revision }
+    }
 
     suspend fun tick(): RepositoryAnalysisTickResult {
         val runId = eligibleRunIds().firstOrNull() ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE)
@@ -107,7 +111,7 @@ class RepositoryAnalysisService(
             .sortedBy { it.runId }
             .filter { candidate ->
                 val currentRevision = workspaceGateway.currentRevision(requireNotNull(candidate.context.workspaceReservation).path)
-                plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision }
+                plans.none { it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate) }
             }
             .map { it.runId }
             .toList()
@@ -168,6 +172,7 @@ class RepositoryAnalysisService(
             DISPOSITIONS,
             OUTPUT_SCHEMA,
             candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
+            run.workDefinition?.definition?.scope.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
@@ -256,6 +261,9 @@ class RepositoryAnalysisService(
     ): String? {
         if (output.disposition !in DISPOSITIONS || output.summary.isBlank() || output.evidence.isEmpty()) return "Analysis identity is incomplete."
         repositoryEvidenceDiagnostic(context, output)?.let { return it }
+        val scope = run.workDefinition?.definition?.scope?.toSet().orEmpty()
+        if (scope.isEmpty()) return "The workflow has no accepted implementation scope to compile."
+        if (output.coveredScope.toSet() != scope) return "Execution plan does not cover the exact accepted implementation scope."
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
         val criteria = run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }?.toSet().orEmpty()
         if (criteria.isEmpty()) return "The workflow has no accepted criteria to compile."
@@ -321,12 +329,17 @@ class RepositoryAnalysisService(
             DISPOSITION_COMPLETE,
             DISPOSITION_CONFLICTING,
         )
-        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, operations, verificationCommands, unresolvedQuestions)"
+        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, operations, verificationCommands, unresolvedQuestions)"
 
         fun loadPrompt(): String = requireNotNull(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
         ).bufferedReader().use { it.readText() }
     }
+}
+
+private fun RepositoryExecutionPlan.coversAcceptedScope(run: WorkflowRunView): Boolean {
+    val acceptedScope = run.workDefinition?.definition?.scope?.toSet().orEmpty()
+    return acceptedScope.isNotEmpty() && content.coveredScope.toSet() == acceptedScope
 }
 
 internal fun repositoryEvidenceDiagnostic(
