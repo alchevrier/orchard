@@ -20,7 +20,7 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, coveredScope, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
         assert(prompt.contains("Copy requiredScope exactly and completely into coveredScope"))
-        assert(prompt.contains("A planned CREATE path is not repository evidence"))
+        assert(prompt.contains("or from a path introduced by a CREATE operation"))
         assert(prompt.contains("A VERIFY-only mapping is invalid."))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
@@ -138,12 +138,17 @@ class RepositoryExecutionPlanStoreTest {
             repositoryScopeCoverageDiagnostic(scope, content.copy(scopeCoverage = content.scopeCoverage.take(1))),
         )
         assertEquals(
-            "Scope coverage 1 does not cite pinned repository evidence.",
+            "Scope coverage 1 does not cite pinned evidence or a planned creation.",
             repositoryScopeCoverageDiagnostic(
                 scope,
                 content.copy(scopeCoverage = content.scopeCoverage.map { it.copy(evidencePaths = listOf("src/Missing.kt")) }),
             ),
         )
+        val createContent = content.copy(
+            scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/NewTest.kt"), listOf(1)) },
+            operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_CREATE, "src/NewTest.kt", null, "Create it.", listOf("Behavior works."))),
+        )
+        assertNull(repositoryScopeCoverageDiagnostic(scope, createContent))
         val verifyOnly = content.copy(
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )

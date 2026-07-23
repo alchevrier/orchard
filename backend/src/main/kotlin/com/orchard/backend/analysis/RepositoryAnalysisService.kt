@@ -351,9 +351,10 @@ internal fun repositoryScopeCoverageDiagnostic(
     }
     val evidencePaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val operations = output.operations.associateBy { it.order }
+    val createdPaths = output.operations.filter { it.action == PLAN_OPERATION_CREATE }.mapTo(hashSetOf()) { it.path }
     output.scopeCoverage.forEachIndexed { index, coverage ->
-        if (coverage.evidencePaths.isEmpty() || coverage.evidencePaths.any { it !in evidencePaths }) {
-            return "Scope coverage ${index + 1} does not cite pinned repository evidence."
+        if (coverage.evidencePaths.isEmpty() || coverage.evidencePaths.any { it !in evidencePaths && it !in createdPaths }) {
+            return "Scope coverage ${index + 1} does not cite pinned evidence or a planned creation."
         }
         val coveredOperations = coverage.operationOrders.mapNotNull(operations::get)
         if (coveredOperations.size != coverage.operationOrders.size) {
