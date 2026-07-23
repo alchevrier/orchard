@@ -8,6 +8,20 @@ import kotlin.test.assertFailsWith
 
 class RepositoryExecutionPlanStoreTest {
     @Test
+    fun `repository analyst prompt includes a complete strict json example`() {
+        val prompt = requireNotNull(
+            RepositoryAnalysisService::class.java.classLoader.getResourceAsStream(
+                "default-system-prompts/repository_analysis_agent.md"
+            )
+        ).bufferedReader().use { it.readText() }
+
+        assert(prompt.contains("A valid response has exactly this shape:"))
+        assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
+        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, operations, verificationCommands, and unresolvedQuestions top-level keys."))
+        assert(prompt.contains("Copy acceptance-criterion descriptions and verification strings exactly; do not paraphrase them."))
+    }
+
+    @Test
     fun `execution plans recover immutable successor revisions`() {
         val directory = createTempDirectory("orchard-analysis-plans-")
         val store = FileRepositoryExecutionPlanStore(directory)
