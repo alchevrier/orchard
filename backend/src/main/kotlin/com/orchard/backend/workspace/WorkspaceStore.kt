@@ -3181,10 +3181,24 @@ class WorkspaceStore(
             ENTITY_TASK, ENTITY_BUG -> workflowRuns.lastOrNull { it.context.workItemId == workItem.id }
                 ?.let { runState(it.runId) == RUN_STATE_DONE } == true
             ENTITY_STORY -> directPlanChildren(workItem).takeIf { it.isNotEmpty() }
-                ?.all { planNodeComplete(it.id) } == true
+                ?.all { planNodeSettled(it.id) } == true
             else -> false
         }
     }
+
+    private fun planNodeCancelled(workItemId: Int): Boolean {
+        val workItem = committedEntity(workItemId) ?: return false
+        return when (workItem.type) {
+            ENTITY_TASK, ENTITY_BUG -> workflowRuns.lastOrNull { it.context.workItemId == workItem.id }
+                ?.let { runState(it.runId) == RUN_STATE_CANCELLED } == true
+            ENTITY_STORY -> directPlanChildren(workItem).takeIf { it.isNotEmpty() }
+                ?.all { planNodeCancelled(it.id) } == true
+            else -> false
+        }
+    }
+
+    private fun planNodeSettled(workItemId: Int): Boolean =
+        planNodeComplete(workItemId) || planNodeCancelled(workItemId)
 
     private fun stagedPlanBlockReason(workItem: WorkspaceEntity): String? {
         val story = committedEntity(workItem.parentId, ENTITY_STORY) ?: return null
@@ -3305,6 +3319,7 @@ class WorkspaceStore(
                 val blockReason = stagedPlanNodeBlockReason(plan, node)
                 when {
                     planNodeComplete(node.workItemId) -> StagedPlanNodeView(node, PLAN_NODE_DONE)
+                    planNodeCancelled(node.workItemId) -> StagedPlanNodeView(node, PLAN_NODE_CANCELLED)
                     planNodeStarted(node.workItemId) -> StagedPlanNodeView(node, PLAN_NODE_RUNNING)
                     blockReason != null -> StagedPlanNodeView(node, PLAN_NODE_BLOCKED_DEPENDENCY, blockReason)
                     workItem?.type in setOf(ENTITY_TASK, ENTITY_BUG) &&
@@ -3353,6 +3368,7 @@ class WorkspaceStore(
                 workItem?.type in setOf(ENTITY_TASK, ENTITY_BUG) &&
                     stagedPlanNodeBlockReason(plan, node) == null &&
                     !planNodeStarted(node.workItemId) &&
+                    !planNodeCancelled(node.workItemId) &&
                     workDefinitions.lastOrNull { it.workItemId == node.workItemId }?.assessment?.status == DEFINITION_READY &&
                     circuitDispatches.none { it.planId == plan.planId && it.nodeId == node.nodeId }
             }

@@ -18,6 +18,7 @@ const val PLAN_NODE_BLOCKED_DEFINITION = "BLOCKED_DEFINITION"
 const val PLAN_NODE_ELIGIBLE = "ELIGIBLE"
 const val PLAN_NODE_RUNNING = "RUNNING"
 const val PLAN_NODE_DONE = "DONE"
+const val PLAN_NODE_CANCELLED = "CANCELLED"
 
 @Serializable
 data class StagedPlanArtifact(
