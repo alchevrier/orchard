@@ -1,5 +1,7 @@
 package com.orchard.backend.analysis
 
+import com.orchard.backend.agent.CodingContextFile
+import com.orchard.backend.agent.CodingRepositoryContext
 import java.nio.file.Files
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -197,7 +199,14 @@ class RepositoryExecutionPlanStoreTest {
         val scope = listOf("Inspect the owner.", "Add regression coverage.")
         val content = plan(1, 1, "a".repeat(40)).content.copy(
             coveredScope = scope,
-            scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Main.kt"), listOf(1)) },
+            scopeCoverage = listOf(
+                ExecutionPlanScopeCoverage(scope[0], listOf("src/Main.kt"), listOf(1)),
+                ExecutionPlanScopeCoverage(scope[1], listOf("src/MainTest.kt"), listOf(2)),
+            ),
+            operations = listOf(
+                ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/Main.kt", null, "Change it.", listOf("Behavior works.")),
+                ExecutionPlanOperation(2, PLAN_OPERATION_MODIFY, "src/MainTest.kt", null, "Test it.", listOf("Behavior works.")),
+            ),
         )
 
         assertNull(repositoryScopeCoverageDiagnostic(scope, content))
@@ -249,11 +258,13 @@ class RepositoryExecutionPlanStoreTest {
         )
         assertNull(repositoryScopeCoverageDiagnostic(scope, createContent))
         val modifiedWithoutDuplicateCitation = content.copy(
-            scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
-            operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/Other.kt", null, "Change it.", listOf("Behavior works."))),
+            scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/OtherTest.kt"), listOf(1)) },
+            operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/OtherTest.kt", null, "Change it.", listOf("Behavior works."))),
         )
         assertNull(repositoryScopeCoverageDiagnostic(scope, modifiedWithoutDuplicateCitation))
         val verifyOnly = content.copy(
+            evidence = content.evidence + RepositoryEvidenceCitation("src/MainTest.kt", null, "Test owner.", "d".repeat(64)),
+            scopeCoverage = content.scopeCoverage.map { it.copy(operationOrders = listOf(1)) },
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )
         assertEquals(
@@ -273,6 +284,56 @@ class RepositoryExecutionPlanStoreTest {
                 listOf("Inspect the owners."),
                 unmatchedEvidence.copy(
                     scopeCoverage = listOf(ExecutionPlanScopeCoverage("Inspect the owners.", listOf("src/Other.kt"), listOf(1))),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `universal typography scope requires every explicit font family owner and a test operation`() {
+        val context = CodingRepositoryContext(
+            listOf(
+                CodingContextFile("frontend/src/main/Theme.kt", "val heading = FontFamily.Serif"),
+                CodingContextFile("frontend/src/main/Inbox.kt", "val hash = FontFamily.Monospace"),
+                CodingContextFile("frontend/src/main/Body.kt", "Text(\"Body\")"),
+            ),
+            omittedFileCount = 0,
+        )
+        val scope = listOf("Inspect typography across all surfaces.", "Add focused regression coverage.")
+        val complete = plan(1, 1, "a".repeat(40)).content.copy(
+            evidence = context.files.take(2).map {
+                RepositoryEvidenceCitation(it.path, null, "Explicit typography owner.", it.contentHash)
+            },
+            scopeCoverage = listOf(
+                ExecutionPlanScopeCoverage(scope[0], context.files.take(2).map { it.path }, listOf(1, 2)),
+                ExecutionPlanScopeCoverage(scope[1], listOf("frontend/src/test/TypographyTest.kt"), listOf(3, 4)),
+            ),
+            operations = listOf(
+                ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, context.files[0].path, null, "Use native typography.", listOf("Behavior works.")),
+                ExecutionPlanOperation(2, PLAN_OPERATION_MODIFY, context.files[1].path, null, "Review monospace.", listOf("Behavior works.")),
+                ExecutionPlanOperation(3, PLAN_OPERATION_CREATE, "frontend/src/test/TypographyTest.kt", null, "Add coverage.", listOf("Behavior works.")),
+                ExecutionPlanOperation(4, PLAN_OPERATION_VERIFY, ".", null, "Verify visually.", listOf("Behavior works.")),
+            ),
+        )
+
+        assertNull(repositoryScopeCoverageDiagnostic(scope, complete))
+        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, context, complete))
+        assertEquals(
+            "Universal typography scope omits explicit FontFamily evidence: frontend/src/main/Inbox.kt.",
+            repositoryUniversalScopeCoverageDiagnostic(scope, context, complete.copy(evidence = complete.evidence.take(1))),
+        )
+        assertEquals(
+            "Universal typography scope omits explicit FontFamily source operations: frontend/src/main/Inbox.kt.",
+            repositoryUniversalScopeCoverageDiagnostic(scope, context, complete.copy(operations = complete.operations.filter { it.order != 2 })),
+        )
+        assertEquals(
+            "Scope coverage 2 requires a test source operation.",
+            repositoryScopeCoverageDiagnostic(
+                scope,
+                complete.copy(
+                    scopeCoverage = complete.scopeCoverage.map {
+                        if (it.scope == scope[1]) it.copy(evidencePaths = listOf(context.files[0].path), operationOrders = listOf(1, 4)) else it
+                    },
                 ),
             ),
         )

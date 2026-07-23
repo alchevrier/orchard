@@ -281,6 +281,11 @@ class RepositoryAnalysisService(
         output: RepositoryAnalysisPlanContent,
     ): String? {
         repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
+        repositoryUniversalScopeCoverageDiagnostic(
+            run.workDefinition?.definition?.scope.orEmpty(),
+            context,
+            output,
+        )?.let { return it }
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
         repositoryAcceptanceCoverageDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
@@ -448,9 +453,46 @@ internal fun repositoryScopeCoverageDiagnostic(
         if (coverage.operationOrders.any { it !in operations }) {
             return "Scope coverage ${index + 1} references an unavailable operation."
         }
-        if (requiresSourceOperation(coverage.scope) && coverage.evidencePaths.any { it !in sourceOperationPaths }) {
-            return "Scope coverage ${index + 1} cites a path without a corresponding source operation."
+        if (requiresSourceOperation(coverage.scope)) {
+            val linkedSourcePaths = coverage.operationOrders.asSequence()
+                .mapNotNull(operations::get)
+                .filter { it.action != PLAN_OPERATION_VERIFY }
+                .mapTo(hashSetOf()) { it.path }
+            if (coverage.evidencePaths.any { it !in linkedSourcePaths }) {
+                return "Scope coverage ${index + 1} cites a path without a corresponding source operation."
+            }
+            if (requiresTestSource(coverage.scope) && linkedSourcePaths.none(::isTestSourcePath)) {
+                return "Scope coverage ${index + 1} requires a test source operation."
+            }
         }
+    }
+    return null
+}
+
+internal fun repositoryUniversalScopeCoverageDiagnostic(
+    acceptedScope: List<String>,
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val requiresExhaustiveTypography = acceptedScope.any { scope ->
+        val normalized = canonicalAuthorityText(scope).lowercase()
+        "typography" in normalized && UNIVERSAL_SCOPE_WORDS.any { it in normalized.split(' ') }
+    }
+    if (!requiresExhaustiveTypography) return null
+    val requiredPaths = context.files.asSequence()
+        .filter { EXPLICIT_FONT_FAMILY.containsMatchIn(it.content) }
+        .mapTo(sortedSetOf()) { it.path }
+    val citedPaths = output.evidence.mapTo(hashSetOf()) { it.path }
+    val missingEvidence = requiredPaths - citedPaths
+    if (missingEvidence.isNotEmpty()) {
+        return "Universal typography scope omits explicit FontFamily evidence: ${missingEvidence.joinToString(", ")}."
+    }
+    val sourceOperationPaths = output.operations.asSequence()
+        .filter { it.action != PLAN_OPERATION_VERIFY }
+        .mapTo(hashSetOf()) { it.path }
+    val missingOperations = requiredPaths - sourceOperationPaths
+    if (missingOperations.isNotEmpty()) {
+        return "Universal typography scope omits explicit FontFamily source operations: ${missingOperations.joinToString(", ")}."
     }
     return null
 }
@@ -464,6 +506,19 @@ private fun canonicalAuthorityText(value: String): String = value
 private fun requiresSourceOperation(scope: String): Boolean = canonicalAuthorityText(scope)
     .substringBefore(' ')
     .lowercase() !in setOf("inspect", "analyze", "audit")
+
+private fun requiresTestSource(scope: String): Boolean {
+    val normalized = canonicalAuthorityText(scope).lowercase()
+    return normalized.substringBefore(' ') == "add" && ("test" in normalized || "regression" in normalized)
+}
+
+private fun isTestSourcePath(path: String): Boolean {
+    val normalized = path.replace('\\', '/').lowercase()
+    return "/test/" in normalized || normalized.substringAfterLast('/').contains("test.")
+}
+
+private val UNIVERSAL_SCOPE_WORDS = setOf("all", "every", "across")
+private val EXPLICIT_FONT_FAMILY = Regex("\\bFontFamily\\s*\\.")
 
 private val VALID_ANALYSIS_DISPOSITIONS = setOf(
     DISPOSITION_ABSENT,
