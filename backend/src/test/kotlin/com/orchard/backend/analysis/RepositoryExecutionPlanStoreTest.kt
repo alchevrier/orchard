@@ -26,6 +26,7 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("Treat universal scope words such as all, every, and across as exhaustive"))
         assert(prompt.contains("every supplied source file containing an explicit FontFamily declaration"))
         assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
+        assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
@@ -188,7 +189,7 @@ class RepositoryExecutionPlanStoreTest {
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )
         assertEquals(
-            "Scope coverage 1 cites a path without a corresponding source operation.",
+            "Scope coverage 2 cites a path without a corresponding source operation.",
             repositoryScopeCoverageDiagnostic(scope, verifyOnly),
         )
         val unmatchedEvidence = content.copy(
@@ -196,8 +197,16 @@ class RepositoryExecutionPlanStoreTest {
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
         )
         assertEquals(
-            "Scope coverage 1 cites a path without a corresponding source operation.",
+            "Scope coverage 2 cites a path without a corresponding source operation.",
             repositoryScopeCoverageDiagnostic(scope, unmatchedEvidence),
+        )
+        assertNull(
+            repositoryScopeCoverageDiagnostic(
+                listOf("Inspect the owners."),
+                unmatchedEvidence.copy(
+                    scopeCoverage = listOf(ExecutionPlanScopeCoverage("Inspect the owners.", listOf("src/Other.kt"), listOf(1))),
+                ),
+            ),
         )
     }
 

@@ -369,7 +369,7 @@ internal fun repositoryScopeCoverageDiagnostic(
         if (coverage.operationOrders.any { it !in operations }) {
             return "Scope coverage ${index + 1} references an unavailable operation."
         }
-        if (coverage.evidencePaths.any { it !in sourceOperationPaths }) {
+        if (requiresSourceOperation(coverage.scope) && coverage.evidencePaths.any { it !in sourceOperationPaths }) {
             return "Scope coverage ${index + 1} cites a path without a corresponding source operation."
         }
     }
@@ -381,6 +381,10 @@ private fun canonicalAuthorityText(value: String): String = value
     .replace('\u00a0', ' ')
     .trim()
     .replace(Regex("\\s+"), " ")
+
+private fun requiresSourceOperation(scope: String): Boolean = canonicalAuthorityText(scope)
+    .substringBefore(' ')
+    .lowercase() !in setOf("inspect", "analyze", "audit")
 
 internal fun repositoryEvidenceDiagnostic(
     context: CodingRepositoryContext,
