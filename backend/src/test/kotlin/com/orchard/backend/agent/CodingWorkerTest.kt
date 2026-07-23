@@ -255,6 +255,59 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `workspace gateway applies bounded exact replacements to a large file`() {
+        val repository = initializedRepository()
+        val source = repository.resolve("src/Main.kt")
+        Files.writeString(source, "// " + "context".repeat(10_000) + "\nfun answer() = 1\n")
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add large source")
+
+        val candidate = LocalCodingWorkspaceGateway().applyAndCommit(
+            repository.toString(),
+            CodingPatchProposal(
+                summary = "Update the bounded implementation.",
+                operations = listOf(CodingFileOperation(
+                    action = CODING_FILE_REPLACE,
+                    path = "src/Main.kt",
+                    replacements = listOf(CodingTextReplacement("fun answer() = 1", "fun answer() = 42")),
+                )),
+            ),
+            executionId = 10,
+        )
+
+        assertEquals(listOf("src/Main.kt"), candidate.changedPaths)
+        assertTrue(Files.readString(source).endsWith("fun answer() = 42\n"))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
+    fun `workspace gateway rejects ambiguous replacements without mutation`() {
+        val repository = initializedRepository()
+        val source = repository.resolve("src/Main.kt")
+        Files.writeString(source, "fun answer() = 1\nfun answer() = 1\n")
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add ambiguous source")
+
+        assertFailsWith<IllegalArgumentException> {
+            LocalCodingWorkspaceGateway().applyAndCommit(
+                repository.toString(),
+                CodingPatchProposal(
+                    summary = "Attempt an ambiguous replacement.",
+                    operations = listOf(CodingFileOperation(
+                        action = CODING_FILE_REPLACE,
+                        path = "src/Main.kt",
+                        replacements = listOf(CodingTextReplacement("fun answer() = 1", "fun answer() = 42")),
+                    )),
+                ),
+                executionId = 11,
+            )
+        }
+
+        assertEquals("fun answer() = 1\nfun answer() = 1\n", Files.readString(source))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
     fun `workspace gateway rejects paths outside the reservation before mutation`() {
         val repository = initializedRepository()
         val gateway = LocalCodingWorkspaceGateway()

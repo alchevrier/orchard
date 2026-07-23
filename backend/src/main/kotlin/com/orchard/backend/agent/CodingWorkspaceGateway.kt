@@ -16,6 +16,7 @@ import kotlinx.serialization.Serializable
 
 const val CODING_FILE_WRITE = "WRITE"
 const val CODING_FILE_DELETE = "DELETE"
+const val CODING_FILE_REPLACE = "REPLACE"
 
 @Serializable
 data class CodingContextFile(
@@ -35,6 +36,13 @@ data class CodingFileOperation(
     val action: String,
     val path: String,
     val content: String? = null,
+    val replacements: List<CodingTextReplacement> = emptyList(),
+)
+
+@Serializable
+data class CodingTextReplacement(
+    val old: String,
+    val new: String,
 )
 
 @Serializable
@@ -218,27 +226,53 @@ class LocalCodingWorkspaceGateway(
             "Coding proposal operation count is invalid"
         }
         val normalized = proposal.operations.map { operation ->
-            val target = validatedRelative(root, operation.path, mustExist = operation.action == CODING_FILE_DELETE)
+            val target = validatedRelative(
+                root,
+                operation.path,
+                mustExist = operation.action in setOf(CODING_FILE_DELETE, CODING_FILE_REPLACE),
+            )
             val relative = root.relativize(target).toString().replace('\\', '/')
             operation.copy(path = relative) to target
         }
         require(normalized.map { it.first.path }.distinct().size == normalized.size) {
             "Coding proposal contains duplicate paths"
         }
-        val totalBytes = normalized.sumOf { (operation, _) -> operation.content?.encodeToByteArray()?.size ?: 0 }
+        val totalBytes = normalized.sumOf { (operation, _) ->
+            (operation.content?.encodeToByteArray()?.size ?: 0) + operation.replacements.sumOf { replacement ->
+                replacement.old.encodeToByteArray().size + replacement.new.encodeToByteArray().size
+            }
+        }
         require(totalBytes <= MAX_PATCH_BYTES) { "Coding proposal exceeds the patch byte limit" }
         normalized.forEach { (operation, target) ->
-            require(operation.action in setOf(CODING_FILE_WRITE, CODING_FILE_DELETE)) {
+            require(operation.action in setOf(CODING_FILE_WRITE, CODING_FILE_DELETE, CODING_FILE_REPLACE)) {
                 "Unsupported coding file operation ${operation.action}"
             }
-            if (operation.action == CODING_FILE_WRITE) {
-                require(operation.content != null) { "WRITE operation requires content" }
-                require(!Files.exists(target) || Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
-                    "WRITE target must be a regular file"
+            when (operation.action) {
+                CODING_FILE_WRITE -> {
+                    require(operation.content != null && operation.replacements.isEmpty()) {
+                        "WRITE operation requires content without replacements"
+                    }
+                    require(!Files.exists(target) || Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
+                        "WRITE target must be a regular file"
+                    }
                 }
-            } else {
-                require(operation.content == null && Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
-                    "DELETE target must be an existing regular file without content"
+                CODING_FILE_REPLACE -> {
+                    require(operation.content == null && operation.replacements.size in 1..MAX_REPLACEMENTS) {
+                        "REPLACE operation requires bounded replacements without complete content"
+                    }
+                    require(Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
+                        "REPLACE target must be an existing regular file"
+                    }
+                    var candidate = Files.readString(target, Charsets.UTF_8)
+                    operation.replacements.forEach { replacement ->
+                        require(replacement.old.isNotEmpty() && candidate.indexOf(replacement.old) == candidate.lastIndexOf(replacement.old)) {
+                            "REPLACE old text must occur exactly once"
+                        }
+                        candidate = candidate.replaceFirst(replacement.old, replacement.new)
+                    }
+                }
+                else -> require(operation.content == null && operation.replacements.isEmpty() && Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
+                    "DELETE target must be an existing regular file without content or replacements"
                 }
             }
         }
@@ -247,10 +281,21 @@ class LocalCodingWorkspaceGateway(
         }
         try {
             normalized.forEach { (operation, originalTarget) ->
-                val target = validatedRelative(root, operation.path, mustExist = operation.action == CODING_FILE_DELETE)
+                val target = validatedRelative(
+                    root,
+                    operation.path,
+                    mustExist = operation.action in setOf(CODING_FILE_DELETE, CODING_FILE_REPLACE),
+                )
                 require(target == originalTarget) { "Coding path changed before mutation" }
                 when (operation.action) {
                     CODING_FILE_WRITE -> writeAtomically(target, requireNotNull(operation.content).toByteArray(Charsets.UTF_8))
+                    CODING_FILE_REPLACE -> {
+                        var content = Files.readString(target, Charsets.UTF_8)
+                        operation.replacements.forEach { replacement ->
+                            content = content.replaceFirst(replacement.old, replacement.new)
+                        }
+                        writeAtomically(target, content.toByteArray(Charsets.UTF_8))
+                    }
                     CODING_FILE_DELETE -> Files.delete(target)
                 }
             }
@@ -461,6 +506,7 @@ class LocalCodingWorkspaceGateway(
     private data class ProcessResult(val exitCode: Int, val output: String)
 
     private companion object {
+        const val MAX_REPLACEMENTS = 32
         const val MAX_CONTEXT_FILES = 32
         const val MAX_CONTEXT_FILE_BYTES = 64 * 1024L
         const val MAX_CONTEXT_BYTES = 256 * 1024

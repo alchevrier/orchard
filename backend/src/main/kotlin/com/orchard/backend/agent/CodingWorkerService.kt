@@ -207,7 +207,7 @@ class CodingWorkerService(
         val envelope = CodingWorkerModelEnvelope(
             executionProfile = profile,
             workflowStepId = CODING_WORKFLOW_STEP_ID,
-            allowedActions = listOf(CODING_FILE_WRITE, CODING_FILE_DELETE),
+            allowedActions = listOf(CODING_FILE_WRITE, CODING_FILE_REPLACE, CODING_FILE_DELETE),
             forbiddenActions = listOf("EXECUTE_COMMAND", "APPROVE_CRITERION", "COMPLETE_WORKFLOW", "PUSH", "MERGE"),
             requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
             run = run,
@@ -415,6 +415,7 @@ class CodingWorkerService(
         return proposal.operations.isNotEmpty() && proposal.operations.all { operation ->
             when (operation.action) {
                 CODING_FILE_WRITE -> authority[operation.path] in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY)
+                CODING_FILE_REPLACE -> authority[operation.path] == PLAN_OPERATION_MODIFY
                 CODING_FILE_DELETE -> authority[operation.path] == PLAN_OPERATION_DELETE
                 else -> false
             }
@@ -592,7 +593,7 @@ class CodingWorkerService(
 
     private companion object {
         const val CODING_WORKFLOW_STEP_ID = "DELIVER_CHANGE:CODING_PATCH"
-        const val CODING_PROPOSAL_SCHEMA = "coding-patch-proposal-v1"
+        const val CODING_PROPOSAL_SCHEMA = "coding-patch-proposal-v2"
         const val CODING_EVIDENCE_PRODUCER = "orchard-coding-worker-v1"
         const val DEFAULT_RETRY_BUDGET = 3
         const val MAX_RETRY_BUDGET = 10
