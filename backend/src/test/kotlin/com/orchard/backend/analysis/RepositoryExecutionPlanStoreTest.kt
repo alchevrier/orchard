@@ -78,6 +78,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("every supplied source file containing an explicit FontFamily declaration"))
         assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
+        assert(prompt.contains("never put a requiredScope value in acceptanceCriteria"))
+        assert(prompt.contains("verificationCommands may contain only exact values from requiredVerificationCommands"))
         assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
         assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
         assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
