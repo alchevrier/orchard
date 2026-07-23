@@ -553,14 +553,35 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
     val lines = content.split('\n')
     val matches = lines.indices.mapNotNull { index ->
         val lower = lines[index].lowercase()
-        queryTokens.count(lower::contains).takeIf { it > 0 }?.let { tokenScore ->
-            index to tokenScore + if (SOURCE_DECLARATION.containsMatchIn(lower)) DECLARATION_MATCH_BONUS else 0
+        val matchedTokens = queryTokens.filterTo(mutableSetOf(), lower::contains)
+        matchedTokens.size.takeIf { it > 0 }?.let { tokenScore ->
+            ExcerptMatch(
+                index,
+                tokenScore + if (SOURCE_DECLARATION.containsMatchIn(lower)) DECLARATION_MATCH_BONUS else 0,
+                matchedTokens,
+                SOURCE_DECLARATION.containsMatchIn(lower),
+            )
         }
-    }.sortedWith(compareByDescending<Pair<Int, Int>> { it.second }.thenBy { it.first })
+    }
+    val declarationMatches = matches.filter(ExcerptMatch::declaration)
+    val declarationTokenFrequency = declarationMatches
+        .flatMap(ExcerptMatch::matchedTokens)
+        .groupingBy(String::lowercase)
+        .eachCount()
+    val reservedDeclarations = declarationTokenFrequency.keys
+        .sortedWith(compareBy<String> { declarationTokenFrequency.getValue(it) }.thenBy(String::lowercase))
+        .mapNotNull { token ->
+            declarationMatches.filter { token in it.matchedTokens }
+                .maxWithOrNull(compareBy<ExcerptMatch> { it.score }.thenByDescending { it.index })
+        }
+        .distinctBy(ExcerptMatch::index)
+    val rankedMatches = (reservedDeclarations + matches.sortedWith(
+        compareByDescending<ExcerptMatch> { it.score }.thenBy { it.index }
+    )).distinctBy(ExcerptMatch::index)
         .take(MAX_EXCERPT_WINDOWS)
     var selectedBytes = 0
-    val windows = matches.map { (index, _) ->
-        (index - EXCERPT_CONTEXT_LINES).coerceAtLeast(0)..(index + EXCERPT_CONTEXT_LINES).coerceAtMost(lines.lastIndex)
+    val windows = rankedMatches.map { match ->
+        (match.index - EXCERPT_CONTEXT_LINES).coerceAtLeast(0)..(match.index + EXCERPT_CONTEXT_LINES).coerceAtMost(lines.lastIndex)
     }.fold(mutableListOf<IntRange>()) { selected, window ->
         if (selected.none { existing -> window.first <= existing.last && existing.first <= window.last }) {
             val sectionBytes = excerptSection(lines, window).encodeToByteArray().size
@@ -589,6 +610,12 @@ private const val MAX_EXCERPT_WINDOWS = 64
 private const val EXCERPT_CONTEXT_LINES = 3
 private const val DECLARATION_MATCH_BONUS = 2
 private val SOURCE_DECLARATION = Regex("\\b(class|interface|object|fun|val|var|typealias)\\b")
+private data class ExcerptMatch(
+    val index: Int,
+    val score: Int,
+    val matchedTokens: Set<String>,
+    val declaration: Boolean,
+)
 
 internal fun sha256Content(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8))

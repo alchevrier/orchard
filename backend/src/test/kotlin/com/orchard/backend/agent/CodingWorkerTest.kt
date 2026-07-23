@@ -327,6 +327,23 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `focused excerpts reserve rare surface owner declarations`() {
+        val content = buildString {
+            repeat(100) { appendLine("Text(\"project workspace usage $it\")") }
+            repeat(80) { appendLine("private fun ProjectPanel$it() = Unit") }
+            appendLine("private fun ModelSettingsDialog() = Unit")
+            appendLine("private fun DeliveryTimeline() = Unit")
+            repeat(100) { appendLine("Text(\"project workspace trailing $it\")") }
+        }
+
+        val excerpt = focusedContextExcerpt(content, setOf("project", "settings", "delivery"), 2_048)
+
+        assertTrue(excerpt.encodeToByteArray().size <= 2_048)
+        assertTrue(excerpt.contains("private fun ModelSettingsDialog"))
+        assertTrue(excerpt.contains("private fun DeliveryTimeline"))
+    }
+
+    @Test
     fun `workspace gateway rejects ambiguous replacements without mutation`() {
         val repository = initializedRepository()
         val source = repository.resolve("src/Main.kt")
