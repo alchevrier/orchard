@@ -264,6 +264,7 @@ fun main() {
         resourceController,
         companyControl = companyControl,
         repositoryAnalysis = repositoryAnalysis,
+        profileSettingsStore = modelProfileSettingsStore,
     )
     val companyAudit = CompanyAuditService(
         workspace,

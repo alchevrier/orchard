@@ -17,8 +17,12 @@ import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelExecutionProfile
 import com.orchard.backend.vector.ModelGeneration
+import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProfileResolver
+import com.orchard.backend.vector.ModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.TransientModelProfileSettingsStore
+import com.orchard.backend.vector.effectiveModelExecutionProfile
 import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.vector.modelBindingFingerprint
 import com.orchard.backend.workspace.CRITERION_HUMAN
@@ -87,6 +91,7 @@ class CodingWorkerService(
     private val retryBudget: Int = DEFAULT_RETRY_BUDGET,
     private val companyControl: CompanyControlService? = null,
     private val repositoryAnalysis: RepositoryAnalysisService? = null,
+    private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -139,7 +144,11 @@ class CodingWorkerService(
         if (executionPlan?.content?.disposition == DISPOSITION_COMPLETE) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_BLOCKED)
         }
-        val profile = DefaultModelExecutionProfiles.boundedCodingPatch
+        val defaultProfile = DefaultModelExecutionProfiles.boundedCodingPatch
+        val profileOverride = runCatching { profileSettingsStore.load() }.getOrElse {
+            return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
+        }.singleOrNull { it.profileId == defaultProfile.id }
+        val profile = effectiveModelExecutionProfile(defaultProfile, profileOverride)
         val assignment = companyControl?.let { company ->
             if (company.compileRules(run.context.projectId).status != CompanyMutationStatus.RECORDED) {
                 return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
@@ -156,7 +165,7 @@ class CodingWorkerService(
                 ?: return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
         }
         val modelProvider = assignment?.let { companyControl?.provider(it) }
-            ?: runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
+            ?: resolveProvider(profile, profileOverride)
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
         val binding = modelProvider.bindingProfile()
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
@@ -410,6 +419,13 @@ class CodingWorkerService(
                 else -> false
             }
         }
+    }
+
+    private fun resolveProvider(profile: ModelExecutionProfile, override: ModelProfileOverride?): ModelProvider? {
+        val eligible = override?.preferredBindingId?.let { preferred ->
+            modelProviders.filter { it.bindingProfile().bindingId == preferred }
+        } ?: modelProviders
+        return runCatching { ModelProfileResolver.resolve(profile, eligible) }.getOrNull()
     }
 
     private fun submitEvidence(

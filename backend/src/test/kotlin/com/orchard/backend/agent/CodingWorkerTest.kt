@@ -4,7 +4,9 @@ import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelGeneration
+import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.AcceptanceCriterion
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
@@ -49,6 +51,7 @@ class CodingWorkerTest {
         Files.writeString(gradle, "#!/bin/sh\nprintf 'verified %s\\n' \"$1\"\n")
         gradle.toFile().setExecutable(true)
         Files.writeString(repository.resolve("settings.gradle.kts"), "rootProject.name = \"worker-test\"\n")
+        Files.writeString(repository.resolve("src/Main.kt"), "// " + "context".repeat(4_000) + "\nfun answer() = 1\n")
         run(repository, "git", "add", ".")
         run(repository, "git", "commit", "-m", "Add verifier")
         val workspace = WorkspaceStore(
@@ -97,11 +100,21 @@ class CodingWorkerTest {
             "Return the required answer.",
             listOf(CodingFileOperation(CODING_FILE_WRITE, "src/Main.kt", "fun answer() = 42\n")),
         )
+        val model = FixedCodingModel(Json.encodeToString(proposal))
+        val profileSettings = TransientModelProfileSettingsStore().apply {
+            save(listOf(ModelProfileOverride(
+                profileId = "bounded-coding-patch-v1",
+                inputBudgetTokens = 80_000,
+                outputBudgetTokens = 8_000,
+                preferredBindingId = "test:coding-model",
+            )))
+        }
         val worker = CodingWorkerService(
             workspace,
-            listOf(FixedCodingModel(Json.encodeToString(proposal))),
+            listOf(model),
             TransientCodingWorkerStore(),
             LocalCodingWorkspaceGateway(),
+            profileSettingsStore = profileSettings,
         )
 
         val result = worker.tick()
@@ -116,6 +129,8 @@ class CodingWorkerTest {
         assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST", "ACCEPTANCE"), run.evidence.mapTo(hashSetOf()) { it.kind })
         assertTrue(run.evidence.all { it.passed })
         assertEquals("fun answer() = 42\n", Files.readString(Path.of(run.context.repository.path).resolve("src/Main.kt")))
+        assertEquals(8_000, model.maxOutputTokens)
+        assertEquals(88_000, model.contextWindowTokens)
     }
 
     @Test
@@ -534,6 +549,9 @@ class CodingWorkerTest {
     }
 
     private class FixedCodingModel(private val output: String) : ModelProvider {
+        var maxOutputTokens: Int? = null
+        var contextWindowTokens: Int? = null
+
         override suspend fun triage(prompt: String): String = error("Unsupported")
 
         override suspend fun plan(
@@ -555,6 +573,10 @@ class CodingWorkerTest {
             prompt: String,
             maxOutputTokens: Int,
             contextWindowTokens: Int,
-        ) = ModelGeneration(output, prompt.length, output.length)
+        ): ModelGeneration {
+            this.maxOutputTokens = maxOutputTokens
+            this.contextWindowTokens = contextWindowTokens
+            return ModelGeneration(output, prompt.length, output.length)
+        }
     }
 }
