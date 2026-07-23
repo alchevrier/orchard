@@ -50,10 +50,28 @@ class RepositoryExecutionPlanStoreTest {
 
         assertNull(repositoryOperationShapeDiagnostic(context, valid))
         assertEquals(
-            "Execution operation 1 cannot CREATE observed path src/Main.kt.",
+            "Execution operation 1 cannot CREATE existing path src/Main.kt.",
             repositoryOperationShapeDiagnostic(
                 context,
                 valid.copy(operations = valid.operations.map { it.copy(action = PLAN_OPERATION_CREATE) }),
+            ),
+        )
+        assertNull(
+            repositoryOperationShapeDiagnostic(
+                context,
+                valid.copy(operations = listOf(
+                    ExecutionPlanOperation(1, PLAN_OPERATION_CREATE, "src/New.kt", "new", "Create it.", listOf("Behavior works.")),
+                    ExecutionPlanOperation(2, PLAN_OPERATION_VERIFY, "src/New.kt", "new", "Verify it.", listOf("Behavior works.")),
+                )),
+            )
+        )
+        assertEquals(
+            "Execution operation 1 cannot VERIFY unavailable path src/New.kt.",
+            repositoryOperationShapeDiagnostic(
+                context,
+                valid.copy(operations = listOf(
+                    ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, "src/New.kt", "new", "Verify it.", listOf("Behavior works.")),
+                )),
             ),
         )
         assertEquals(

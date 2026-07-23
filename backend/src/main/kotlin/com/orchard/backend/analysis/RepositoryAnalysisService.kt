@@ -325,17 +325,23 @@ internal fun repositoryOperationShapeDiagnostic(
     output: RepositoryAnalysisPlanContent,
 ): String? {
     val observedPaths = context.files.mapTo(hashSetOf()) { it.path }
+    val createdPaths = hashSetOf<String>()
     output.operations.forEach { operation ->
         if (operation.action !in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE, PLAN_OPERATION_VERIFY)) {
             return "Execution operation ${operation.order} uses unsupported action ${operation.action}."
         }
         if (operation.instruction.isBlank()) return "Execution operation ${operation.order} has no instruction."
         if (operation.acceptanceCriteria.isEmpty()) return "Execution operation ${operation.order} has no acceptance criteria."
-        if (operation.action == PLAN_OPERATION_CREATE && operation.path in observedPaths) {
-            return "Execution operation ${operation.order} cannot CREATE observed path ${operation.path}."
+        if (operation.action == PLAN_OPERATION_CREATE) {
+            if (operation.path in observedPaths || !createdPaths.add(operation.path)) {
+                return "Execution operation ${operation.order} cannot CREATE existing path ${operation.path}."
+            }
         }
-        if (operation.action in setOf(PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE, PLAN_OPERATION_VERIFY) && operation.path !in observedPaths) {
+        if (operation.action in setOf(PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE) && operation.path !in observedPaths) {
             return "Execution operation ${operation.order} cannot ${operation.action} unobserved path ${operation.path}."
+        }
+        if (operation.action == PLAN_OPERATION_VERIFY && operation.path !in observedPaths && operation.path !in createdPaths) {
+            return "Execution operation ${operation.order} cannot VERIFY unavailable path ${operation.path}."
         }
     }
     return null
