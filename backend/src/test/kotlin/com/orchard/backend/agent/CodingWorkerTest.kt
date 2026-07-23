@@ -311,6 +311,7 @@ class CodingWorkerTest {
         assertTrue(excerpt.contains("FontFamily.Monospace"))
         assertTrue(secondaryExcerpt.contains("FontFamily.Monospace"))
         assertTrue(context.files.single { it.path == "src/Main.kt" }.matchedDeclarations.any { "FontFamily.Serif" in it })
+        assertTrue(context.files.single { it.path == "src/Main.kt" }.containsExplicitFontFamily)
     }
 
     @Test

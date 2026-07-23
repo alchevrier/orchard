@@ -24,6 +24,7 @@ data class CodingContextFile(
     val content: String,
     val contentHash: String = sha256Content(content),
     val matchedDeclarations: List<String> = emptyList(),
+    val containsExplicitFontFamily: Boolean = false,
 )
 
 @Serializable
@@ -194,6 +195,7 @@ class LocalCodingWorkspaceGateway(
                     content,
                     sha256Content(source),
                     matchedSourceDeclarations(source, queryTokens),
+                    EXPLICIT_FONT_FAMILY.containsMatchIn(source),
                 ),
             )
         }.sortedWith(compareByDescending<RankedContextFile> { it.score }.thenBy { it.path })
@@ -655,6 +657,7 @@ private const val DECLARATION_MATCH_BONUS = 2
 private const val MAX_MATCHED_DECLARATIONS = 64
 private const val MAX_DECLARATION_CHARS = 512
 private val SOURCE_DECLARATION = Regex("\\b(class|interface|object|fun|val|var|typealias)\\b")
+private val EXPLICIT_FONT_FAMILY = Regex("\\bFontFamily\\s*\\.")
 private data class ExcerptMatch(
     val index: Int,
     val score: Int,

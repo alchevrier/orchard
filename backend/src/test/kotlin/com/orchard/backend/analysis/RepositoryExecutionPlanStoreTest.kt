@@ -81,6 +81,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
         assert(prompt.contains("matchedDeclarations selected from its complete source before content excerpting"))
         assert(prompt.contains("do not claim an owner or surface is absent when matchedDeclarations identifies it"))
+        assert(prompt.contains("requiredSourceOperationPaths is deterministic authority derived from complete supplied source"))
+        assert(prompt.contains("Never omit a requiredSourceOperationPaths value"))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
         assert(prompt.contains("for each path in evidencePaths, include a CREATE, MODIFY, or DELETE operation whose path is that same string"))
         assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this source-path requirement"))
@@ -295,8 +297,8 @@ class RepositoryExecutionPlanStoreTest {
     fun `universal typography scope requires every explicit font family owner and a test operation`() {
         val context = CodingRepositoryContext(
             listOf(
-                CodingContextFile("frontend/src/main/Theme.kt", "val heading = FontFamily.Serif"),
-                CodingContextFile("frontend/src/main/Inbox.kt", "val hash = FontFamily.Monospace"),
+                CodingContextFile("frontend/src/main/Theme.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
+                CodingContextFile("frontend/src/main/Inbox.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
                 CodingContextFile("frontend/src/main/Body.kt", "Text(\"Body\")"),
             ),
             omittedFileCount = 0,
@@ -319,6 +321,10 @@ class RepositoryExecutionPlanStoreTest {
         )
 
         assertNull(repositoryScopeCoverageDiagnostic(scope, complete))
+        assertEquals(
+            listOf("frontend/src/main/Inbox.kt", "frontend/src/main/Theme.kt"),
+            requiredRepositorySourceOperationPaths(scope, context),
+        )
         assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, context, complete))
         assertEquals(
             "Universal typography scope omits explicit FontFamily evidence: frontend/src/main/Inbox.kt.",

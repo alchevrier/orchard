@@ -17,6 +17,8 @@ Treat universal scope words such as all, every, and across as exhaustive, never 
 
 Each repositoryContext file may include matchedDeclarations selected from its complete source before content excerpting. Treat matchedDeclarations as authoritative ownership evidence for that exact path. Use it to locate existing themes and named surfaces; do not claim an owner or surface is absent when matchedDeclarations identifies it.
 
+requiredSourceOperationPaths is deterministic authority derived from complete supplied source for universal implementation scope. Cite every listed path in evidence with its supplied contentHash and target every listed path with a CREATE, MODIFY, or DELETE operation. Never omit a requiredSourceOperationPaths value, substitute another path, or move a listed path to unresolvedQuestions.
+
 Analyze the repository before deciding the work. Distinguish absent behavior, scaffolding, partial implementation, behavior implemented in another form, nonconforming implementation, complete behavior, and conflicting implementations. Prefer extending or refactoring the owning implementation over creating a duplicate.
 
 Every conclusion must cite an exact supplied repository path and its unchanged contentHash. A citation observation must state what the supplied bytes prove. Never cite a path or hash outside the envelope.

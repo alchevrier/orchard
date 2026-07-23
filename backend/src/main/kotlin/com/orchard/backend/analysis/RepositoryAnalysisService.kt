@@ -85,6 +85,7 @@ private data class RepositoryAnalysisEnvelope(
     val requiredOutputSchema: String,
     val requiredEvidence: List<RequiredRepositoryEvidence>,
     val requiredScope: List<String>,
+    val requiredSourceOperationPaths: List<String>,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -188,6 +189,7 @@ class RepositoryAnalysisService(
             OUTPUT_SCHEMA,
             candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.scope.orEmpty(),
+            requiredRepositorySourceOperationPaths(run.workDefinition?.definition?.scope.orEmpty(), candidate),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
@@ -474,14 +476,8 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val requiresExhaustiveTypography = acceptedScope.any { scope ->
-        val normalized = canonicalAuthorityText(scope).lowercase()
-        "typography" in normalized && UNIVERSAL_SCOPE_WORDS.any { it in normalized.split(' ') }
-    }
-    if (!requiresExhaustiveTypography) return null
-    val requiredPaths = context.files.asSequence()
-        .filter { EXPLICIT_FONT_FAMILY.containsMatchIn(it.content) }
-        .mapTo(sortedSetOf()) { it.path }
+    val requiredPaths = requiredRepositorySourceOperationPaths(acceptedScope, context).toSortedSet()
+    if (requiredPaths.isEmpty()) return null
     val citedPaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val missingEvidence = requiredPaths - citedPaths
     if (missingEvidence.isNotEmpty()) {
@@ -495,6 +491,23 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
         return "Universal typography scope omits explicit FontFamily source operations: ${missingOperations.joinToString(", ")}."
     }
     return null
+}
+
+internal fun requiredRepositorySourceOperationPaths(
+    acceptedScope: List<String>,
+    context: CodingRepositoryContext,
+): List<String> {
+    val requiresExhaustiveTypography = acceptedScope.any { scope ->
+        val normalized = canonicalAuthorityText(scope).lowercase()
+        "typography" in normalized && UNIVERSAL_SCOPE_WORDS.any { it in normalized.split(' ') }
+    }
+    if (!requiresExhaustiveTypography) return emptyList()
+    return context.files.asSequence()
+        .filter { it.containsExplicitFontFamily || EXPLICIT_FONT_FAMILY.containsMatchIn(it.content) }
+        .map { it.path }
+        .distinct()
+        .sorted()
+        .toList()
 }
 
 private fun canonicalAuthorityText(value: String): String = value
