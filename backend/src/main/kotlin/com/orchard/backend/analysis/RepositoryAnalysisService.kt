@@ -378,7 +378,7 @@ internal fun repositoryOperationShapeDiagnostic(
         if (operation.action in setOf(PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE) && operation.path !in observedPaths) {
             return "Execution operation ${operation.order} cannot ${operation.action} unobserved path ${operation.path}."
         }
-        if (operation.action == PLAN_OPERATION_VERIFY && operation.path !in observedPaths && operation.path !in createdPaths) {
+        if (operation.action == PLAN_OPERATION_VERIFY && operation.path != "." && operation.path !in observedPaths && operation.path !in createdPaths) {
             return "Execution operation ${operation.order} cannot VERIFY unavailable path ${operation.path}."
         }
     }

@@ -227,7 +227,7 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
         "Execution plan operations must be ordered"
     }
     require(plan.content.operations.all {
-        it.action in PLAN_OPERATIONS && validPath(it.path) && it.instruction.isNotBlank() && it.acceptanceCriteria.isNotEmpty()
+        it.action in PLAN_OPERATIONS && validOperationPath(it) && it.instruction.isNotBlank() && it.acceptanceCriteria.isNotEmpty()
     }) { "Execution plan operation is invalid" }
     if (plan.content.disposition == DISPOSITION_COMPLETE) require(plan.content.operations.all { it.action == PLAN_OPERATION_VERIFY })
     else require(plan.content.operations.any { it.action != PLAN_OPERATION_VERIFY }) { "Executable plan has no source operation" }
@@ -241,6 +241,9 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
         "Execution plan authority hash is invalid"
     }
 }
+
+private fun validOperationPath(operation: ExecutionPlanOperation): Boolean =
+    (operation.action == PLAN_OPERATION_VERIFY && operation.path == ".") || validPath(operation.path)
 
 private fun validPath(path: String): Boolean = path.isNotBlank() && !path.startsWith('/') &&
     path.split('/').none { it.isBlank() || it == "." || it == ".." } && path != ".git" && !path.startsWith(".git/") &&

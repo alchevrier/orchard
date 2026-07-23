@@ -70,6 +70,15 @@ class RepositoryExecutionPlanStoreTest {
                 )),
             )
         )
+        assertNull(
+            repositoryOperationShapeDiagnostic(
+                context,
+                valid.copy(operations = listOf(
+                    ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/Main.kt", "main", "Change it.", listOf("Behavior works.")),
+                    ExecutionPlanOperation(2, PLAN_OPERATION_VERIFY, ".", null, "Verify the repository.", listOf("Behavior works.")),
+                )),
+            )
+        )
         assertEquals(
             "Execution operation 1 cannot VERIFY unavailable path src/New.kt.",
             repositoryOperationShapeDiagnostic(
