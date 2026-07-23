@@ -11,6 +11,7 @@ import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.RISK_HIGH
 import com.orchard.backend.company.ROLE_IMPLEMENTER
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
@@ -209,7 +210,7 @@ class CodingWorkerService(
         if (estimateModelTokens(prompt) > profile.inputBudgetTokens) {
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding context exceeds the model input budget.")
         }
-        val admission = resourceController.tryAcquire(modelProvider.resourceDemand(profile))
+        val admission = resourceController.acquire(modelProvider.resourceDemand(profile), ModelWorkPriority.DELIVERY)
         val lease = admission.lease
         if (lease == null) {
             val execution = recordModelExecution(profile, binding, run, envelopeJson, prompt, null, 0, false, admission.evidence)

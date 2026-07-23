@@ -1,6 +1,7 @@
 package com.orchard.backend.agent
 
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingEvidence
@@ -106,7 +107,7 @@ class CircuitIntelligenceService(
         if (estimateModelTokens(prompt) > profile.inputBudgetTokens) {
             return result(CircuitGenerationStatus.CONTEXT_BUDGET_EXCEEDED)
         }
-        val admission = resourceController.tryAcquire(provider.resourceDemand(profile))
+        val admission = resourceController.acquire(provider.resourceDemand(profile), ModelWorkPriority.INTERACTIVE)
         val lease = admission.lease ?: return result(
             if (admission.evidence.decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE) {
                 CircuitGenerationStatus.RESOURCE_TELEMETRY_UNAVAILABLE

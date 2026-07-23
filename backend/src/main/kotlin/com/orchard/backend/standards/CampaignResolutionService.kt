@@ -2,6 +2,7 @@ package com.orchard.backend.standards
 
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelProfileResolver
 import com.orchard.backend.vector.ModelProvider
@@ -297,7 +298,7 @@ class CampaignResolutionService(
         }
         val provider = runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return CampaignResolutionProposalResult(CampaignResolutionProposalStatus.NO_COMPATIBLE_MODEL)
-        val resourceAdmission = resourceController.tryAcquire(provider.resourceDemand(profile))
+        val resourceAdmission = resourceController.acquire(provider.resourceDemand(profile), ModelWorkPriority.DELIVERY)
         val lease = resourceAdmission.lease ?: return CampaignResolutionProposalResult(
             CampaignResolutionProposalStatus.RESOURCE_BLOCKED,
             diagnostic = resourceAdmission.evidence.reason,

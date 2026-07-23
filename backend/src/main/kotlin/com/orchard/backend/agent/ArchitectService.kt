@@ -3,6 +3,7 @@ package com.orchard.backend.agent
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
@@ -55,7 +56,7 @@ class ArchitectService(
     private suspend fun process(prompt: String): ArchitectResult {
         var actionType = classifyAction(prompt)
         var entityType = classifyEntityType(prompt, actionType)
-        val triageAdmission = resourceController.tryAcquire(modelProvider.architectResourceDemand())
+        val triageAdmission = resourceController.acquire(modelProvider.architectResourceDemand(), ModelWorkPriority.INTERACTIVE)
         val triageLease = triageAdmission.lease ?: return admissionFailure(triageAdmission.evidence.decision)
         val triageJson = try {
             triageLease.use { modelProvider.triage(prompt) }
@@ -85,7 +86,7 @@ class ArchitectService(
             return ArchitectResult(422, workspace.snapshot(MESSAGE_UNSUPPORTED_ACTION))
         }
 
-        val planAdmission = resourceController.tryAcquire(modelProvider.architectResourceDemand())
+        val planAdmission = resourceController.acquire(modelProvider.architectResourceDemand(), ModelWorkPriority.INTERACTIVE)
         val planLease = planAdmission.lease ?: return admissionFailure(planAdmission.evidence.decision)
         val planJson = try {
             planLease.use { modelProvider.plan(prompt, actionType, entityType, workspace) }

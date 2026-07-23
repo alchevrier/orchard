@@ -8,6 +8,7 @@ import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.RISK_HIGH
 import com.orchard.backend.company.ROLE_ANALYST_DESIGNER
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelGeneration
@@ -169,7 +170,7 @@ class RepositoryAnalysisService(
         val envelopeJson = json.encodeToString(envelope)
         val prompt = "$systemPrompt\n\nAuthoritative repository analysis envelope:\n$envelopeJson"
         val binding = provider.bindingProfile()
-        val admission = resourceController.tryAcquire(provider.resourceDemand(profile))
+        val admission = resourceController.acquire(provider.resourceDemand(profile), ModelWorkPriority.DELIVERY)
         val lease = admission.lease ?: return RepositoryAnalysisTickResult(
             RepositoryAnalysisTickStatus.RESOURCE_BLOCKED,
             run.runId,

@@ -8,6 +8,7 @@ import com.orchard.backend.analysis.TransientRepositoryObjectiveAssessmentStore
 import com.orchard.backend.analysis.newRepositoryObjectiveAssessment
 import com.orchard.backend.analysis.repositoryCapabilityClaimsError
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelProvider
@@ -235,7 +236,7 @@ class GenesisIntelligenceService(
         }
         val prompt = promptContext.prompt
         val suppliedRepositoryContext = promptContext.repositoryContext
-        val admission = resourceController.tryAcquire(modelProvider.resourceDemand(profile))
+        val admission = resourceController.acquire(modelProvider.resourceDemand(profile), ModelWorkPriority.INTERACTIVE)
         val lease = admission.lease ?: return GenesisProposalResult(
             if (admission.evidence.decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE) {
                 GenesisProposalStatus.RESOURCE_TELEMETRY_UNAVAILABLE

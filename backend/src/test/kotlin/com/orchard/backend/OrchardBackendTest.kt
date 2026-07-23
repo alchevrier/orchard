@@ -11,6 +11,7 @@ import com.orchard.backend.resource.MachineCapacityMonitor
 import com.orchard.backend.resource.MachineCapacitySnapshot
 import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.MachineUsagePolicy
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ModelResourceDemand
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.resource.TransientMachineUsagePolicyStore
@@ -94,7 +95,9 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
@@ -1018,6 +1021,83 @@ class MachineResourceControllerTest {
         assertEquals(ResourceAdmissionDecision.ADMITTED, first.evidence.decision)
         assertEquals(ResourceAdmissionDecision.LIVE_CAPACITY_EXCEEDED, second.evidence.decision)
         first.lease?.close()
+    }
+
+    @Test
+    fun waitingInteractiveAcquisitionPrecedesLaterBackgroundRetry() = runTest {
+        val controller = controller(MachineUsagePolicy(100, 0, 1), total = 2_000, available = 2_000)
+        val activeBackground = controller.tryAcquire(ModelResourceDemand(100, 1))
+        val acquisitionOrder = mutableListOf<String>()
+
+        val interactive = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.acquire(ModelResourceDemand(100, 1), ModelWorkPriority.INTERACTIVE).also {
+                acquisitionOrder += "interactive"
+            }
+        }
+        val backgroundRetry = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.acquire(ModelResourceDemand(100, 1), ModelWorkPriority.MAINTENANCE).also {
+                acquisitionOrder += "background"
+            }
+        }
+
+        assertFalse(interactive.isCompleted)
+        assertFalse(backgroundRetry.isCompleted)
+        activeBackground.lease?.close()
+
+        val interactiveAdmission = interactive.await()
+        assertEquals(ResourceAdmissionDecision.ADMITTED, interactiveAdmission.evidence.decision)
+        assertEquals(listOf("interactive"), acquisitionOrder)
+        assertFalse(backgroundRetry.isCompleted)
+
+        interactiveAdmission.lease?.close()
+        val backgroundAdmission = backgroundRetry.await()
+        assertEquals(ResourceAdmissionDecision.ADMITTED, backgroundAdmission.evidence.decision)
+        assertEquals(listOf("interactive", "background"), acquisitionOrder)
+        backgroundAdmission.lease?.close()
+    }
+
+    @Test
+    fun cancelledWaiterIsRemovedBeforeLeaseHandoff() = runTest {
+        val controller = controller(MachineUsagePolicy(100, 0, 1), total = 2_000, available = 2_000)
+        val activeBackground = controller.tryAcquire(ModelResourceDemand(100, 1))
+        val cancelledInteractive = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.acquire(ModelResourceDemand(100, 1), ModelWorkPriority.INTERACTIVE)
+        }
+        val waitingMaintenance = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.acquire(ModelResourceDemand(100, 1), ModelWorkPriority.MAINTENANCE)
+        }
+
+        assertEquals(1, controller.configuration().queuedInteractiveRequests)
+        assertEquals(1, controller.configuration().queuedMaintenanceRequests)
+        cancelledInteractive.cancelAndJoin()
+        assertEquals(0, controller.configuration().queuedInteractiveRequests)
+
+        activeBackground.lease?.close()
+        val maintenanceAdmission = waitingMaintenance.await()
+        assertEquals(ResourceAdmissionDecision.ADMITTED, maintenanceAdmission.evidence.decision)
+        maintenanceAdmission.lease?.close()
+    }
+
+    @Test
+    fun priorityAgingEventuallyAdmitsMaintenanceWork() = runTest {
+        val controller = controller(MachineUsagePolicy(100, 0, 1), total = 2_000, available = 2_000)
+        val activeLease = controller.tryAcquire(ModelResourceDemand(100, 1))
+        val maintenance = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.acquire(ModelResourceDemand(100, 1), ModelWorkPriority.MAINTENANCE)
+        }
+        val interactive = List(9) {
+            async(start = CoroutineStart.UNDISPATCHED) {
+                controller.acquire(ModelResourceDemand(100, 1), ModelWorkPriority.INTERACTIVE)
+            }
+        }
+
+        activeLease.lease?.close()
+        interactive.take(8).forEach { request -> request.await().lease?.close() }
+
+        assertEquals(0, controller.configuration().queuedMaintenanceRequests)
+        assertEquals(1, controller.configuration().queuedInteractiveRequests)
+        maintenance.await().lease?.close()
+        interactive.last().await().lease?.close()
     }
 
     @Test

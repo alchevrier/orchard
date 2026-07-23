@@ -7,6 +7,8 @@ import java.nio.file.Path
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -30,6 +32,12 @@ data class ModelResourceDemand(
     val memoryBytes: Long,
     val cpuUnits: Int = 1,
 )
+
+enum class ModelWorkPriority {
+    INTERACTIVE,
+    DELIVERY,
+    MAINTENANCE,
+}
 
 @Serializable
 data class ResourceAdmissionEvidence(
@@ -59,6 +67,9 @@ data class MachineResourceConfiguration(
     val reservedMemoryBytes: Long,
     val reservedCpuUnits: Int,
     val activeLeases: Int,
+    val queuedInteractiveRequests: Int = 0,
+    val queuedDeliveryRequests: Int = 0,
+    val queuedMaintenanceRequests: Int = 0,
     val lastAdmission: ResourceAdmissionEvidence? = null,
 )
 
@@ -239,12 +250,14 @@ class MachineResourceController(
     private var reservedCpuUnits = 0
     private var activeLeases = 0
     private var lastAdmission: ResourceAdmissionEvidence? = null
+    private var nextWaiterSequence = 0L
+    private val waiters = mutableListOf<PendingAdmission>()
 
     @Synchronized
     fun configuration(): MachineResourceConfiguration {
         val policy = policyStore.load()
         val capacity = monitor.snapshot()
-        return MachineResourceConfiguration(policy, capacity, reservedMemoryBytes, reservedCpuUnits, activeLeases, lastAdmission)
+        return current(policy, capacity)
     }
 
     @Synchronized
@@ -270,7 +283,40 @@ class MachineResourceController(
     }
 
     @Synchronized
-    fun tryAcquire(demand: ModelResourceDemand): ResourceAdmissionResult {
+    fun tryAcquire(demand: ModelResourceDemand): ResourceAdmissionResult = tryAcquireLocked(demand)
+
+    suspend fun acquire(
+        demand: ModelResourceDemand,
+        priority: ModelWorkPriority,
+    ): ResourceAdmissionResult {
+        val pending = synchronized(this) {
+            val immediate = tryAcquireLocked(demand)
+            if (immediate.lease != null || immediate.evidence.decision != ResourceAdmissionDecision.CONCURRENCY_EXCEEDED) {
+                return immediate
+            }
+            if (waiters.size >= MAX_QUEUED_REQUESTS) {
+                return denied(
+                    ResourceAdmissionDecision.CONCURRENCY_EXCEEDED,
+                    "Model execution queue is full",
+                    demand,
+                    immediate.evidence.policy,
+                    immediate.evidence.capacity,
+                )
+            }
+            PendingAdmission(demand, priority, nextWaiterSequence++).also(waiters::add)
+        }
+        return try {
+            pending.result.await()
+        } catch (exception: CancellationException) {
+            val granted = synchronized(this) {
+                if (waiters.remove(pending)) null else pending.admission
+            }
+            granted?.lease?.close()
+            throw exception
+        }
+    }
+
+    private fun tryAcquireLocked(demand: ModelResourceDemand): ResourceAdmissionResult {
         if (demand.memoryBytes < 0 || demand.cpuUnits <= 0) {
             return denied(ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE, "Provider resource demand is invalid", demand)
         }
@@ -310,11 +356,33 @@ class MachineResourceController(
         return ResourceAdmissionResult(ResourceLease(this, demand), evidence)
     }
 
-    @Synchronized
     private fun release(demand: ModelResourceDemand) {
-        reservedMemoryBytes = (reservedMemoryBytes - demand.memoryBytes).coerceAtLeast(0)
-        reservedCpuUnits = (reservedCpuUnits - demand.cpuUnits).coerceAtLeast(0)
-        activeLeases = (activeLeases - 1).coerceAtLeast(0)
+        val completed = synchronized(this) {
+            reservedMemoryBytes = (reservedMemoryBytes - demand.memoryBytes).coerceAtLeast(0)
+            reservedCpuUnits = (reservedCpuUnits - demand.cpuUnits).coerceAtLeast(0)
+            activeLeases = (activeLeases - 1).coerceAtLeast(0)
+            admitWaitersLocked()
+        }
+        completed.forEach { pending -> pending.result.complete(requireNotNull(pending.admission)) }
+    }
+
+    private fun admitWaitersLocked(): List<PendingAdmission> {
+        val completed = mutableListOf<PendingAdmission>()
+        while (waiters.isNotEmpty()) {
+            val pending = waiters.minWithOrNull(
+                compareBy<PendingAdmission>({ it.effectivePriority() }, { it.sequence })
+            ) ?: break
+            waiters.remove(pending)
+            val admission = tryAcquireLocked(pending.demand)
+            if (admission.evidence.decision == ResourceAdmissionDecision.CONCURRENCY_EXCEEDED) {
+                waiters += pending
+                break
+            }
+            waiters.forEach { it.bypasses++ }
+            pending.admission = admission
+            completed += pending
+        }
+        return completed
     }
 
     private fun denied(
@@ -347,7 +415,17 @@ class MachineResourceController(
     )
 
     private fun current(policy: MachineUsagePolicy, capacity: MachineCapacitySnapshot) =
-        MachineResourceConfiguration(policy, capacity, reservedMemoryBytes, reservedCpuUnits, activeLeases, lastAdmission)
+        MachineResourceConfiguration(
+            policy,
+            capacity,
+            reservedMemoryBytes,
+            reservedCpuUnits,
+            activeLeases,
+            waiters.count { it.priority == ModelWorkPriority.INTERACTIVE },
+            waiters.count { it.priority == ModelWorkPriority.DELIVERY },
+            waiters.count { it.priority == ModelWorkPriority.MAINTENANCE },
+            lastAdmission,
+        )
 
     private fun valid(policy: MachineUsagePolicy, capacity: MachineCapacitySnapshot): Boolean =
         policy.capacityPercent in 1..100 &&
@@ -361,7 +439,21 @@ class MachineResourceController(
 
     private fun saturatingAdd(left: Int, right: Int): Int = if (Int.MAX_VALUE - left < right) Int.MAX_VALUE else left + right
 
+    private data class PendingAdmission(
+        val demand: ModelResourceDemand,
+        val priority: ModelWorkPriority,
+        val sequence: Long,
+        val result: CompletableDeferred<ResourceAdmissionResult> = CompletableDeferred(),
+        var bypasses: Int = 0,
+        var admission: ResourceAdmissionResult? = null,
+    ) {
+        fun effectivePriority(): Int = (priority.ordinal - bypasses / BYPASSES_PER_PRIORITY_LEVEL).coerceAtLeast(0)
+    }
+
     companion object {
+        private const val MAX_QUEUED_REQUESTS = 64
+        private const val BYPASSES_PER_PRIORITY_LEVEL = 4
+
         fun unrestricted(): MachineResourceController = MachineResourceController(
             TransientMachineUsagePolicyStore(MachineUsagePolicy(100, 0, Int.MAX_VALUE)),
             object : MachineCapacityMonitor {

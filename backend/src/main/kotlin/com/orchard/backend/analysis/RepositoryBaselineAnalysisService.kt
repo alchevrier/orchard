@@ -4,6 +4,7 @@ import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelProfileResolver
 import com.orchard.backend.vector.ModelProvider
@@ -200,7 +201,10 @@ class RepositoryBaselineAnalysisService(
         val envelopeJson = json.encodeToString(envelopeFor(boundedContext))
         val prompt = prompt(envelopeJson)
         val promptTokens = estimateModelTokens(prompt)
-        val admission = resourceController.tryAcquire(provider.resourceDemand(profile, promptTokens))
+        val admission = resourceController.acquire(
+            provider.resourceDemand(profile, promptTokens),
+            ModelWorkPriority.MAINTENANCE,
+        )
         val lease = admission.lease ?: return RepositoryBaselineTickResult(
             RepositoryBaselineTickStatus.RESOURCE_BLOCKED,
             projectId,

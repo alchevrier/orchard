@@ -5,6 +5,7 @@ import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelProfileResolver
 import com.orchard.backend.vector.ModelProvider
@@ -321,7 +322,7 @@ class EngineeringStandardsService(
         if (estimateModelTokens(prompt) > profile.inputBudgetTokens) return ConformanceScanResult(ConformanceScanStatus.CONTEXT_BUDGET_EXCEEDED)
         val provider = runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return ConformanceScanResult(ConformanceScanStatus.NO_COMPATIBLE_MODEL)
-        val admission = resourceController.tryAcquire(provider.resourceDemand(profile))
+        val admission = resourceController.acquire(provider.resourceDemand(profile), ModelWorkPriority.MAINTENANCE)
         val lease = admission.lease ?: return ConformanceScanResult(ConformanceScanStatus.RESOURCE_BLOCKED, diagnostic = admission.evidence.reason)
         val generation = try {
             lease.use { provider.executeRepositoryAnalysis(prompt, profile.outputBudgetTokens, profile.inputBudgetTokens + profile.outputBudgetTokens) }

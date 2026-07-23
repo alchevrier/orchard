@@ -20,6 +20,7 @@ import com.orchard.backend.resource.MachineResourceConfiguration
 import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.MachineUsagePolicy
 import com.orchard.backend.resource.MachineUsagePolicyUpdateResult
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.workspace.COLLABORATOR_LOCAL_LLM
 import com.orchard.backend.workspace.DefinitionCollaborationStatus
@@ -222,7 +223,7 @@ class DefinitionIntelligenceService(
         if (estimatedInputTokens > profile.inputBudgetTokens) {
             return result(ProposalGenerationStatus.CONTEXT_BUDGET_EXCEEDED)
         }
-        val admission = resourceController.tryAcquire(modelProvider.resourceDemand(profile))
+        val admission = resourceController.acquire(modelProvider.resourceDemand(profile), ModelWorkPriority.INTERACTIVE)
         val lease = admission.lease ?: return result(
             if (admission.evidence.decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE) {
                 ProposalGenerationStatus.RESOURCE_TELEMETRY_UNAVAILABLE

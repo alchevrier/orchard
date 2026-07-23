@@ -5,6 +5,7 @@ import com.orchard.backend.agent.CodingWorkerService
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.estimateModelTokens
@@ -148,7 +149,7 @@ class CompanyAuditService(
             return CompanyAuditTickResult(CompanyAuditTickStatus.INVALID_JUDGMENT, run.runId, role, diagnostic = "Audit context exceeds the model input budget.")
         }
         val profile = DefaultModelExecutionProfiles.boundedIndependentAudit
-        val admission = resourceController.tryAcquire(provider.resourceDemand(profile))
+        val admission = resourceController.acquire(provider.resourceDemand(profile), ModelWorkPriority.DELIVERY)
         val lease = admission.lease ?: return CompanyAuditTickResult(CompanyAuditTickStatus.RESOURCE_BLOCKED, run.runId, role)
         val startedAt = System.nanoTime()
         val generation: ModelGeneration = runCatching {

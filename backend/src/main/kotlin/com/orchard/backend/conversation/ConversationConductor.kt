@@ -1,6 +1,7 @@
 package com.orchard.backend.conversation
 
 import com.orchard.backend.resource.MachineResourceController
+import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.company.AUDIT_CONFORMING
 import com.orchard.backend.company.CompanyProjectView
@@ -282,7 +283,10 @@ class ModelConversationInterpreter(
         }
         val promptTokens = estimateModelTokens(prompt)
         require(promptTokens <= profile.inputBudgetTokens) { "Conversation context budget exceeded" }
-        val admission = resourceController.tryAcquire(provider.resourceDemand(profile, promptTokens))
+        val admission = resourceController.acquire(
+            provider.resourceDemand(profile, promptTokens),
+            ModelWorkPriority.INTERACTIVE,
+        )
         val lease = admission.lease ?: error(buildString {
             if (admission.evidence.decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE) {
                 append("Conversation resource telemetry unavailable")
