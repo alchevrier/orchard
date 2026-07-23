@@ -5,6 +5,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 
 class RepositoryExecutionPlanStoreTest {
     @Test
@@ -37,6 +38,31 @@ class RepositoryExecutionPlanStoreTest {
         }
         assertEquals(2, FileRepositoryExecutionPlanStore(directory).load().size)
         assertEquals(2, Files.readAllLines(directory.resolve("repository-analysis-plans.jsonl")).size)
+    }
+
+    @Test
+    fun `repository operation diagnostics identify invalid path shape`() {
+        val context = com.orchard.backend.agent.CodingRepositoryContext(
+            files = listOf(com.orchard.backend.agent.CodingContextFile("src/Main.kt", "fun main() = Unit")),
+            omittedFileCount = 0,
+        )
+        val valid = plan(1, 1, "a".repeat(40)).content
+
+        assertNull(repositoryOperationShapeDiagnostic(context, valid))
+        assertEquals(
+            "Execution operation 1 cannot CREATE observed path src/Main.kt.",
+            repositoryOperationShapeDiagnostic(
+                context,
+                valid.copy(operations = valid.operations.map { it.copy(action = PLAN_OPERATION_CREATE) }),
+            ),
+        )
+        assertEquals(
+            "Execution operation 1 cannot MODIFY unobserved path src/Missing.kt.",
+            repositoryOperationShapeDiagnostic(
+                context,
+                valid.copy(operations = valid.operations.map { it.copy(path = "src/Missing.kt") }),
+            ),
+        )
     }
 
     private fun plan(planId: Long, revision: Int, baseRevision: String): RepositoryExecutionPlan =

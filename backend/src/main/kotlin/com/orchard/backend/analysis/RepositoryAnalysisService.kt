@@ -251,11 +251,7 @@ class RepositoryAnalysisService(
         val criteria = run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }?.toSet().orEmpty()
         if (criteria.isEmpty()) return "The workflow has no accepted criteria to compile."
         if (output.operations.flatMap { it.acceptanceCriteria }.toSet() != criteria) return "Execution operations do not cover the exact acceptance criteria."
-        if (output.operations.any { operation ->
-                operation.instruction.isBlank() || operation.acceptanceCriteria.isEmpty() ||
-                    (operation.action in setOf(PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE, PLAN_OPERATION_VERIFY) && operation.path !in files) ||
-                    (operation.action == PLAN_OPERATION_CREATE && operation.path in files)
-            }) return "Execution operations do not match the observed repository shape."
+        repositoryOperationShapeDiagnostic(context, output)?.let { return it }
         val admittedCommands = run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }?.toSet().orEmpty()
         if (output.verificationCommands.toSet() != admittedCommands) return "Execution plan verification differs from admitted commands."
         return null
@@ -322,6 +318,27 @@ class RepositoryAnalysisService(
             RepositoryAnalysisService::class.java.classLoader.getResourceAsStream("default-system-prompts/repository_analysis_agent.md")
         ).bufferedReader().use { it.readText() }
     }
+}
+
+internal fun repositoryOperationShapeDiagnostic(
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val observedPaths = context.files.mapTo(hashSetOf()) { it.path }
+    output.operations.forEach { operation ->
+        if (operation.action !in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE, PLAN_OPERATION_VERIFY)) {
+            return "Execution operation ${operation.order} uses unsupported action ${operation.action}."
+        }
+        if (operation.instruction.isBlank()) return "Execution operation ${operation.order} has no instruction."
+        if (operation.acceptanceCriteria.isEmpty()) return "Execution operation ${operation.order} has no acceptance criteria."
+        if (operation.action == PLAN_OPERATION_CREATE && operation.path in observedPaths) {
+            return "Execution operation ${operation.order} cannot CREATE observed path ${operation.path}."
+        }
+        if (operation.action in setOf(PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE, PLAN_OPERATION_VERIFY) && operation.path !in observedPaths) {
+            return "Execution operation ${operation.order} cannot ${operation.action} unobserved path ${operation.path}."
+        }
+    }
+    return null
 }
 
 internal fun compactRepositoryContextToBudget(
