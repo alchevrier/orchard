@@ -61,8 +61,8 @@ private data class RequiredRepositoryEvidence(
 )
 
 @Serializable
-private data class RequiredScopeSourcePaths(
-    val scope: String,
+private data class RequiredSourcePathGroup(
+    val id: String,
     val paths: List<String>,
 )
 
@@ -91,8 +91,8 @@ private data class RepositoryAnalysisEnvelope(
     val requiredOutputSchema: String,
     val requiredEvidence: List<RequiredRepositoryEvidence>,
     val requiredScope: List<String>,
-    val requiredSourceOperationPaths: List<String>,
-    val requiredScopeSourcePaths: List<RequiredScopeSourcePaths>,
+    val requiredSourcePathGroups: List<RequiredSourcePathGroup>,
+    val requiredScopeSourcePathGroupIds: List<String>,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -207,8 +207,8 @@ class RepositoryAnalysisService(
             OUTPUT_SCHEMA,
             candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.scope.orEmpty(),
-            requiredRepositorySourceOperationPaths(run.workDefinition?.definition?.scope.orEmpty(), candidate),
-            requiredRepositoryScopeSourcePaths(run.workDefinition?.definition?.scope.orEmpty(), candidate),
+            requiredRepositorySourcePathGroups(run.workDefinition?.definition?.scope.orEmpty(), candidate),
+            requiredRepositoryScopeSourcePathGroupIds(run.workDefinition?.definition?.scope.orEmpty(), candidate),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
@@ -561,16 +561,26 @@ internal fun requiredRepositorySourceOperationPaths(
     return (typographyPaths + testPaths).distinct().sorted()
 }
 
-private fun requiredRepositoryScopeSourcePaths(
+private fun requiredRepositorySourcePathGroups(
     acceptedScope: List<String>,
     context: CodingRepositoryContext,
-): List<RequiredScopeSourcePaths> {
+): List<RequiredSourcePathGroup> {
     val requiredPaths = requiredRepositorySourceOperationPaths(acceptedScope, context)
     val testPaths = requiredPaths.filter(::isTestSourcePath)
     val implementationPaths = requiredPaths.filterNot(::isTestSourcePath)
-    if (implementationPaths.isEmpty()) return emptyList()
+    return listOf(
+        RequiredSourcePathGroup(SOURCE_PATH_GROUP_IMPLEMENTATION, implementationPaths),
+        RequiredSourcePathGroup(SOURCE_PATH_GROUP_TEST, testPaths),
+    ).filter { it.paths.isNotEmpty() }
+}
+
+private fun requiredRepositoryScopeSourcePathGroupIds(
+    acceptedScope: List<String>,
+    context: CodingRepositoryContext,
+): List<String> {
+    if (requiredRepositorySourceOperationPaths(acceptedScope, context).none { !isTestSourcePath(it) }) return emptyList()
     return acceptedScope.map { scope ->
-        RequiredScopeSourcePaths(scope, if (requiresTestSource(scope)) testPaths else implementationPaths)
+        if (requiresTestSource(scope)) SOURCE_PATH_GROUP_TEST else SOURCE_PATH_GROUP_IMPLEMENTATION
     }
 }
 
@@ -579,12 +589,14 @@ internal fun repositoryRequiredScopeSourcePathsDiagnostic(
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val required = requiredRepositoryScopeSourcePaths(acceptedScope, context)
-    if (required.isEmpty()) return null
+    val groups = requiredRepositorySourcePathGroups(acceptedScope, context).associate { it.id to it.paths }
+    val groupIds = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, context)
+    if (groupIds.isEmpty()) return null
     val actual = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
-    required.forEachIndexed { index, requirement ->
-        val coverage = actual[canonicalAuthorityText(requirement.scope)] ?: return@forEachIndexed
-        if (coverage.evidencePaths.toSet() != requirement.paths.toSet()) {
+    acceptedScope.forEachIndexed { index, scope ->
+        val coverage = actual[canonicalAuthorityText(scope)] ?: return@forEachIndexed
+        val requiredPaths = groups[groupIds[index]].orEmpty()
+        if (coverage.evidencePaths.toSet() != requiredPaths.toSet()) {
             return "Scope coverage ${index + 1} paths differ from deterministic scope authority."
         }
     }
@@ -620,6 +632,8 @@ private fun isTestSourcePath(path: String): Boolean {
 
 private val UNIVERSAL_SCOPE_WORDS = setOf("all", "every", "across")
 private val EXPLICIT_FONT_FAMILY = Regex("\\bFontFamily\\s*\\.")
+private const val SOURCE_PATH_GROUP_IMPLEMENTATION = "IMPLEMENTATION"
+private const val SOURCE_PATH_GROUP_TEST = "TEST"
 
 private val VALID_ANALYSIS_DISPOSITIONS = setOf(
     DISPOSITION_ABSENT,
