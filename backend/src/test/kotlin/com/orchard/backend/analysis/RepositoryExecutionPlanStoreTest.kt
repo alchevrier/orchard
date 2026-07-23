@@ -45,6 +45,7 @@ class RepositoryExecutionPlanStoreTest {
 
         val restored = FileRepositoryAnalysisAttemptStore(directory)
         assertFalse(restored.isBlocked(11, revision))
+        assertEquals("The plan omitted required selector coverage.", restored.retryDiagnostic(11, revision))
         assertEquals(listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED), restored.load().map { it.state })
         assertFailsWith<IllegalArgumentException> {
             store.appendNext { attemptId ->

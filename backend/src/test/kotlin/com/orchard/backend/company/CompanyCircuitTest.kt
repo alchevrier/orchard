@@ -157,13 +157,15 @@ class CompanyCircuitTest {
         )
         val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
 
-        assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, analysis.tick(runId).status)
+        val first = analysis.tick(runId)
+        assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, first.status)
         assertEquals(emptyList(), analysis.eligibleRunIds())
         assertEquals(RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED, analysis.tick(runId).status)
         assertEquals(1, model.analysisCallCount)
         assertEquals(RepositoryAnalysisTickStatus.RETRY_AUTHORIZED, analysis.authorizeRetry(runId).status)
         assertEquals(listOf(runId), analysis.eligibleRunIds())
         assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, analysis.tick(runId).status)
+        assertTrue(model.analysisPrompts.last().contains(first.diagnostic))
         assertEquals(emptyList(), analysis.eligibleRunIds())
         assertEquals(2, model.analysisCallCount)
         assertEquals(
@@ -555,6 +557,7 @@ class CompanyCircuitTest {
     private class RejectingAnalysisModel : ModelProvider {
         var analysisCallCount = 0
             private set
+        val analysisPrompts = mutableListOf<String>()
 
         override suspend fun triage(prompt: String): String = "{}"
 
@@ -574,6 +577,7 @@ class CompanyCircuitTest {
             contextWindowTokens: Int,
         ): ModelGeneration {
             analysisCallCount++
+            analysisPrompts += prompt
             return ModelGeneration("{}", 1, 1)
         }
     }

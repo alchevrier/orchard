@@ -107,6 +107,12 @@ fun RepositoryAnalysisAttemptStore.blockedAttempt(runId: Long, baseRevision: Str
     load().lastOrNull { it.runId == runId && it.baseRevision == baseRevision }
         ?.takeIf { it.state == ANALYSIS_ATTEMPT_BLOCKED }
 
+fun RepositoryAnalysisAttemptStore.retryDiagnostic(runId: Long, baseRevision: String): String? {
+    val attempts = load().filter { it.runId == runId && it.baseRevision == baseRevision }
+    if (attempts.lastOrNull()?.state != ANALYSIS_ATTEMPT_RETRY_AUTHORIZED) return null
+    return attempts.dropLast(1).lastOrNull { it.state == ANALYSIS_ATTEMPT_BLOCKED }?.diagnostic
+}
+
 private fun validateRepositoryAnalysisAttempt(
     attempt: RepositoryAnalysisAttempt,
     previous: List<RepositoryAnalysisAttempt>,

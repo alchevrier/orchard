@@ -98,6 +98,7 @@ private data class RepositoryAnalysisEnvelope(
     val requiredScope: List<String>,
     val requiredSourcePathGroups: List<RequiredSourcePathGroup>,
     val requiredScopeSourcePathGroupIds: List<List<String>>,
+    val priorRejectedAnalysisDiagnostic: String?,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -333,6 +334,7 @@ class RepositoryAnalysisService(
                 run.workDefinition?.definition?.scope.orEmpty(),
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             ),
+            attemptStore.retryDiagnostic(run.runId, baseRevision),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
