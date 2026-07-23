@@ -359,8 +359,12 @@ internal fun repositoryScopeCoverageDiagnostic(
         if (coveredOperations.size != coverage.operationOrders.size) {
             return "Scope coverage ${index + 1} references an unavailable operation."
         }
-        if (coveredOperations.none { it.action != PLAN_OPERATION_VERIFY }) {
+        val sourceOperationPaths = coveredOperations.filter { it.action != PLAN_OPERATION_VERIFY }.mapTo(hashSetOf()) { it.path }
+        if (sourceOperationPaths.isEmpty()) {
             return "Scope coverage ${index + 1} has no concrete source operation."
+        }
+        if (coverage.evidencePaths.any { it !in sourceOperationPaths }) {
+            return "Scope coverage ${index + 1} cites a path without a corresponding source operation."
         }
     }
     return null
