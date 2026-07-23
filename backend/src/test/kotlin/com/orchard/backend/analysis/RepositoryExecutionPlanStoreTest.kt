@@ -81,7 +81,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
         assert(prompt.contains("matchedDeclarations selected from its complete source before content excerpting"))
         assert(prompt.contains("do not claim an owner or surface is absent when matchedDeclarations identifies it"))
-        assert(prompt.contains("requiredSourceOperationPaths is deterministic authority derived from complete supplied source"))
+        assert(prompt.contains("from the highest-ranked supplied test owner for test or regression scope"))
+        assert(prompt.contains("A listed test path belongs to the scope clause requiring tests or regression coverage"))
         assert(prompt.contains("Never omit a requiredSourceOperationPaths value"))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
         assert(prompt.contains("for each path in evidencePaths, include a CREATE, MODIFY, or DELETE operation whose path is that same string"))
@@ -300,12 +301,13 @@ class RepositoryExecutionPlanStoreTest {
                 CodingContextFile("frontend/src/main/Theme.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
                 CodingContextFile("frontend/src/main/Inbox.kt", "[excerpt without declaration]", containsExplicitFontFamily = true),
                 CodingContextFile("frontend/src/main/Body.kt", "Text(\"Body\")"),
+                CodingContextFile("frontend/src/test/TypographyTest.kt", "class TypographyTest"),
             ),
             omittedFileCount = 0,
         )
         val scope = listOf("Inspect typography across all surfaces.", "Add focused regression coverage.")
         val complete = plan(1, 1, "a".repeat(40)).content.copy(
-            evidence = context.files.take(2).map {
+            evidence = listOf(context.files[0], context.files[1], context.files[3]).map {
                 RepositoryEvidenceCitation(it.path, null, "Explicit typography owner.", it.contentHash)
             },
             scopeCoverage = listOf(
@@ -315,23 +317,27 @@ class RepositoryExecutionPlanStoreTest {
             operations = listOf(
                 ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, context.files[0].path, null, "Use native typography.", listOf("Behavior works.")),
                 ExecutionPlanOperation(2, PLAN_OPERATION_MODIFY, context.files[1].path, null, "Review monospace.", listOf("Behavior works.")),
-                ExecutionPlanOperation(3, PLAN_OPERATION_CREATE, "frontend/src/test/TypographyTest.kt", null, "Add coverage.", listOf("Behavior works.")),
+                ExecutionPlanOperation(3, PLAN_OPERATION_MODIFY, "frontend/src/test/TypographyTest.kt", null, "Add coverage.", listOf("Behavior works.")),
                 ExecutionPlanOperation(4, PLAN_OPERATION_VERIFY, ".", null, "Verify visually.", listOf("Behavior works.")),
             ),
         )
 
         assertNull(repositoryScopeCoverageDiagnostic(scope, complete))
         assertEquals(
-            listOf("frontend/src/main/Inbox.kt", "frontend/src/main/Theme.kt"),
+            listOf(
+                "frontend/src/main/Inbox.kt",
+                "frontend/src/main/Theme.kt",
+                "frontend/src/test/TypographyTest.kt",
+            ),
             requiredRepositorySourceOperationPaths(scope, context),
         )
         assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, context, complete))
         assertEquals(
-            "Universal typography scope omits explicit FontFamily evidence: frontend/src/main/Inbox.kt.",
+            "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, context, complete.copy(evidence = complete.evidence.take(1))),
         )
         assertEquals(
-            "Universal typography scope omits explicit FontFamily source operations: frontend/src/main/Inbox.kt.",
+            "Required source operation paths omit source operations: frontend/src/main/Inbox.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, context, complete.copy(operations = complete.operations.filter { it.order != 2 })),
         )
         assertEquals(

@@ -481,14 +481,14 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
     val citedPaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val missingEvidence = requiredPaths - citedPaths
     if (missingEvidence.isNotEmpty()) {
-        return "Universal typography scope omits explicit FontFamily evidence: ${missingEvidence.joinToString(", ")}."
+        return "Required source operation paths omit evidence: ${missingEvidence.joinToString(", ")}."
     }
     val sourceOperationPaths = output.operations.asSequence()
         .filter { it.action != PLAN_OPERATION_VERIFY }
         .mapTo(hashSetOf()) { it.path }
     val missingOperations = requiredPaths - sourceOperationPaths
     if (missingOperations.isNotEmpty()) {
-        return "Universal typography scope omits explicit FontFamily source operations: ${missingOperations.joinToString(", ")}."
+        return "Required source operation paths omit source operations: ${missingOperations.joinToString(", ")}."
     }
     return null
 }
@@ -501,13 +501,20 @@ internal fun requiredRepositorySourceOperationPaths(
         val normalized = canonicalAuthorityText(scope).lowercase()
         "typography" in normalized && UNIVERSAL_SCOPE_WORDS.any { it in normalized.split(' ') }
     }
-    if (!requiresExhaustiveTypography) return emptyList()
-    return context.files.asSequence()
-        .filter { it.containsExplicitFontFamily || EXPLICIT_FONT_FAMILY.containsMatchIn(it.content) }
-        .map { it.path }
-        .distinct()
-        .sorted()
-        .toList()
+    val typographyPaths = if (requiresExhaustiveTypography) {
+        context.files.asSequence()
+            .filter { it.containsExplicitFontFamily || EXPLICIT_FONT_FAMILY.containsMatchIn(it.content) }
+            .map { it.path }
+            .toList()
+    } else {
+        emptyList()
+    }
+    val testPaths = if (acceptedScope.any(::requiresTestSource)) {
+        listOfNotNull(context.files.firstOrNull { isTestSourcePath(it.path) }?.path)
+    } else {
+        emptyList()
+    }
+    return (typographyPaths + testPaths).distinct().sorted()
 }
 
 private fun canonicalAuthorityText(value: String): String = value
