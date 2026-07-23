@@ -553,30 +553,26 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
     val lines = content.split('\n')
     val matches = lines.indices.mapNotNull { index ->
         val lower = lines[index].lowercase()
-        queryTokens.count(lower::contains).takeIf { it > 0 }?.let { score -> index to score }
+        queryTokens.count(lower::contains).takeIf { it > 0 }?.let { tokenScore ->
+            index to tokenScore + if (SOURCE_DECLARATION.containsMatchIn(lower)) DECLARATION_MATCH_BONUS else 0
+        }
     }.sortedWith(compareByDescending<Pair<Int, Int>> { it.second }.thenBy { it.first })
         .take(MAX_EXCERPT_WINDOWS)
-        .map { it.first }
-        .sorted()
-    val windows = matches.map { index ->
+    var selectedBytes = 0
+    val windows = matches.map { (index, _) ->
         (index - EXCERPT_CONTEXT_LINES).coerceAtLeast(0)..(index + EXCERPT_CONTEXT_LINES).coerceAtMost(lines.lastIndex)
-    }.fold(mutableListOf<IntRange>()) { merged, window ->
-        val previous = merged.lastOrNull()
-        if (previous != null && window.first <= previous.last + 1) {
-            merged[merged.lastIndex] = previous.first..maxOf(previous.last, window.last)
-        } else {
-            merged += window
+    }.fold(mutableListOf<IntRange>()) { selected, window ->
+        if (selected.none { existing -> window.first <= existing.last && existing.first <= window.last }) {
+            val sectionBytes = excerptSection(lines, window).encodeToByteArray().size
+            if (selectedBytes + sectionBytes <= maxBytes) {
+                selected += window
+                selectedBytes += sectionBytes
+            }
         }
-        merged
+        selected
     }.ifEmpty { mutableListOf(0..minOf(lines.lastIndex, EXCERPT_CONTEXT_LINES * 2)) }
     val excerpt = StringBuilder()
-    windows.forEach { window ->
-        val section = buildString {
-            append("[Orchard excerpt lines ${window.first + 1}-${window.last + 1} of ${lines.size}]\n")
-            window.forEach { index -> append(lines[index]).append('\n') }
-        }
-        if ((excerpt.toString() + section).encodeToByteArray().size <= maxBytes) excerpt.append(section)
-    }
+    windows.sortedBy { it.first }.forEach { window -> excerpt.append(excerptSection(lines, window)) }
     return excerpt.toString().ifBlank {
         lines.asSequence().runningFold("") { result, line -> "$result$line\n" }
             .takeWhile { it.encodeToByteArray().size <= maxBytes }
@@ -584,8 +580,15 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
     }
 }
 
+private fun excerptSection(lines: List<String>, window: IntRange): String = buildString {
+    append("[Orchard excerpt lines ${window.first + 1}-${window.last + 1} of ${lines.size}]\n")
+    window.forEach { index -> append(lines[index]).append('\n') }
+}
+
 private const val MAX_EXCERPT_WINDOWS = 64
 private const val EXCERPT_CONTEXT_LINES = 3
+private const val DECLARATION_MATCH_BONUS = 2
+private val SOURCE_DECLARATION = Regex("\\b(class|interface|object|fun|val|var|typealias)\\b")
 
 internal fun sha256Content(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8))

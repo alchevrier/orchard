@@ -313,6 +313,20 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `focused excerpts retain late owning declarations over repeated early usages`() {
+        val content = buildString {
+            repeat(300) { appendLine("Text(fontFamily = FontFamily.Monospace) // usage $it") }
+            appendLine("private fun OrchardTheme(content: @Composable () -> Unit) = MaterialTheme(content = content)")
+            repeat(300) { appendLine("Text(fontFamily = FontFamily.Monospace) // trailing $it") }
+        }
+
+        val excerpt = focusedContextExcerpt(content, setOf("font", "family", "orchard", "theme"), 2_048)
+
+        assertTrue(excerpt.encodeToByteArray().size <= 2_048)
+        assertTrue(excerpt.contains("private fun OrchardTheme"))
+    }
+
+    @Test
     fun `workspace gateway rejects ambiguous replacements without mutation`() {
         val repository = initializedRepository()
         val source = repository.resolve("src/Main.kt")
