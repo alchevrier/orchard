@@ -819,16 +819,16 @@ internal fun repositoryRequiredScopeSourcePathsDiagnostic(
     val groupIds = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, selectors)
     if (selectors.isEmpty()) return null
     val actual = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
-    acceptedScope.forEachIndexed { index, scope ->
-        val coverage = actual[canonicalAuthorityText(scope)] ?: return@forEachIndexed
+    val mismatches = acceptedScope.mapIndexedNotNull { index, scope ->
+        val coverage = actual[canonicalAuthorityText(scope)] ?: return@mapIndexedNotNull null
         val requiredPaths = groupIds[index].flatMap { groups[it].orEmpty() }.toSet()
         if (coverage.evidencePaths.toSet() != requiredPaths.toSet()) {
             val expected = requiredPaths.sorted().joinToString(", ").ifBlank { "<none>" }
             val supplied = coverage.evidencePaths.distinct().sorted().joinToString(", ").ifBlank { "<none>" }
-            return "Scope coverage ${index + 1} paths differ from deterministic scope authority. Expected: $expected. Actual: $supplied."
-        }
+            "Scope coverage ${index + 1} paths differ from deterministic scope authority. Expected: $expected. Actual: $supplied."
+        } else null
     }
-    return null
+    return mismatches.takeIf { it.isNotEmpty() }?.joinToString("\n")
 }
 
 private fun commonPathPrefixLength(first: String, second: String): Int = first

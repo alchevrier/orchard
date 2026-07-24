@@ -501,6 +501,21 @@ class RepositoryExecutionPlanStoreTest {
                 "Actual: frontend/src/test/TypographyTest.kt.",
             repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, misplacedTest),
         )
+        val swappedScopePaths = complete.copy(scopeCoverage = complete.scopeCoverage.map {
+            when (it.scope) {
+                scope[0] -> it.copy(evidencePaths = listOf("frontend/src/test/TypographyTest.kt"))
+                scope[1] -> it.copy(evidencePaths = listOf("frontend/src/main/Theme.kt"))
+                else -> it
+            }
+        })
+        assertEquals(
+            "Scope coverage 1 paths differ from deterministic scope authority. " +
+                "Expected: frontend/src/main/Inbox.kt, frontend/src/main/Theme.kt. " +
+                "Actual: frontend/src/test/TypographyTest.kt.\n" +
+                "Scope coverage 2 paths differ from deterministic scope authority. " +
+                "Expected: frontend/src/test/TypographyTest.kt. Actual: frontend/src/main/Theme.kt.",
+            repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, swappedScopePaths),
+        )
         assertEquals(
             "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(evidence = complete.evidence.take(1))),
