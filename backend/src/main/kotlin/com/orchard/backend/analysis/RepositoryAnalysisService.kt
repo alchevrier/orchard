@@ -447,7 +447,13 @@ class RepositoryAnalysisService(
                 output.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
             )
         }
-        val invalid = validateOutput(run, boundedContext, output)
+        val compiledOutput = compileRepositoryScopeAuthority(
+            run.workDefinition?.definition?.scope.orEmpty(),
+            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+            boundedContext,
+            output,
+        )
+        val invalid = validateOutput(run, boundedContext, compiledOutput)
         if (invalid != null) return blockAttempt(
             run.runId,
             baseRevision,
@@ -467,7 +473,7 @@ class RepositoryAnalysisService(
                     revision = revision,
                     projectId = run.context.projectId,
                     baseRevision = baseRevision,
-                    content = output,
+                    content = compiledOutput,
                     provenance = AnalysisExecutionProvenance(
                         executionProfileId = profile.id,
                         bindingFingerprint = modelBindingFingerprint(binding),
@@ -829,6 +835,29 @@ internal fun repositoryRequiredScopeSourcePathsDiagnostic(
         } else null
     }
     return mismatches.takeIf { it.isNotEmpty() }?.joinToString("\n")
+}
+
+internal fun compileRepositoryScopeAuthority(
+    acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): RepositoryAnalysisPlanContent {
+    if (selectors.isEmpty() || repositoryScopeIdentityDiagnostic(acceptedScope, output) != null) return output
+    val pathsBySelector = requiredRepositoryPathsBySelector(selectors, context)
+    val selectorIdsByScope = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, selectors)
+    val coverageByScope = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
+    return output.copy(
+        scopeCoverage = acceptedScope.mapIndexed { index, scope ->
+            coverageByScope.getValue(canonicalAuthorityText(scope)).copy(
+                scope = scope,
+                evidencePaths = selectorIdsByScope[index]
+                    .flatMap { pathsBySelector[it].orEmpty() }
+                    .distinct()
+                    .sorted(),
+            )
+        },
+    )
 }
 
 private fun commonPathPrefixLength(first: String, second: String): Int = first

@@ -516,6 +516,17 @@ class RepositoryExecutionPlanStoreTest {
                 "Expected: frontend/src/test/TypographyTest.kt. Actual: frontend/src/main/Theme.kt.",
             repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, swappedScopePaths),
         )
+        val compiledScopeAuthority = compileRepositoryScopeAuthority(scope, selectors, context, swappedScopePaths)
+        assertEquals(scope, compiledScopeAuthority.scopeCoverage.map { it.scope })
+        assertEquals(
+            listOf(
+                listOf("frontend/src/main/Inbox.kt", "frontend/src/main/Theme.kt"),
+                listOf("frontend/src/test/TypographyTest.kt"),
+            ),
+            compiledScopeAuthority.scopeCoverage.map { it.evidencePaths },
+        )
+        assertEquals(swappedScopePaths.scopeCoverage.map { it.operationOrders }, compiledScopeAuthority.scopeCoverage.map { it.operationOrders })
+        assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, compiledScopeAuthority))
         assertEquals(
             "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(evidence = complete.evidence.take(1))),
