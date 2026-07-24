@@ -441,7 +441,8 @@ class RepositoryExecutionPlanStoreTest {
             ),
         )
         assertEquals(
-            "Scope coverage 2 paths differ from deterministic scope authority.",
+            "Scope coverage 2 paths differ from deterministic scope authority. " +
+                "Expected: frontend/src/test/TypographyTest.kt. Actual: frontend/src/main/Theme.kt.",
             repositoryRequiredScopeSourcePathsDiagnostic(
                 scope,
                 selectors,

@@ -811,7 +811,9 @@ internal fun repositoryRequiredScopeSourcePathsDiagnostic(
         val coverage = actual[canonicalAuthorityText(scope)] ?: return@forEachIndexed
         val requiredPaths = groupIds[index].flatMap { groups[it].orEmpty() }.toSet()
         if (coverage.evidencePaths.toSet() != requiredPaths.toSet()) {
-            return "Scope coverage ${index + 1} paths differ from deterministic scope authority."
+            val expected = requiredPaths.sorted().joinToString(", ").ifBlank { "<none>" }
+            val supplied = coverage.evidencePaths.distinct().sorted().joinToString(", ").ifBlank { "<none>" }
+            return "Scope coverage ${index + 1} paths differ from deterministic scope authority. Expected: $expected. Actual: $supplied."
         }
     }
     return null
