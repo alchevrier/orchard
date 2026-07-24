@@ -7,6 +7,7 @@ import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.vector.TransientModelProfileSettingsStore
+import com.orchard.backend.resource.ModelResourceDemand
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.AcceptanceCriterion
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
@@ -133,6 +134,7 @@ class CodingWorkerTest {
         assertEquals("fun answer() = 42\n", Files.readString(Path.of(run.context.repository.path).resolve("src/Main.kt")))
         assertEquals(8_000, model.maxOutputTokens)
         assertEquals(88_000, model.contextWindowTokens)
+        assertTrue(requireNotNull(model.resourceDemandInputTokens) in 1 until 80_000)
     }
 
     @Test
@@ -727,6 +729,7 @@ class CodingWorkerTest {
     private class FixedCodingModel(private val output: String) : ModelProvider {
         var maxOutputTokens: Int? = null
         var contextWindowTokens: Int? = null
+        var resourceDemandInputTokens: Int? = null
 
         override suspend fun triage(prompt: String): String = error("Unsupported")
 
@@ -744,6 +747,14 @@ class CodingWorkerTest {
             contextWindowTokens = 131_072,
             capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
         )
+
+        override fun resourceDemand(
+            profile: com.orchard.backend.vector.ModelExecutionProfile,
+            inputTokens: Int,
+        ): ModelResourceDemand {
+            resourceDemandInputTokens = inputTokens
+            return ModelResourceDemand(0, 1)
+        }
 
         override suspend fun executeCodingPatch(
             prompt: String,

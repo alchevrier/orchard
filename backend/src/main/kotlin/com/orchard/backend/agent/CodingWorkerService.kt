@@ -276,7 +276,10 @@ class CodingWorkerService(
         if (estimateModelTokens(prompt) > profile.inputBudgetTokens) {
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding context exceeds the model input budget.")
         }
-        val admission = resourceController.acquire(modelProvider.resourceDemand(profile), ModelWorkPriority.DELIVERY)
+        val admission = resourceController.acquire(
+            modelProvider.resourceDemand(profile, estimateModelTokens(prompt)),
+            ModelWorkPriority.DELIVERY,
+        )
         val lease = admission.lease
         if (lease == null) {
             val execution = recordModelExecution(profile, binding, run, envelopeJson, prompt, null, 0, false, admission.evidence)
