@@ -533,6 +533,7 @@ fun Application.workspaceApi(
                 RepositoryAnalysisTickStatus.IDLE -> HttpStatusCode.OK
                 RepositoryAnalysisTickStatus.BUSY,
                 RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED,
+                RepositoryAnalysisTickStatus.CANCELLED,
                 RepositoryAnalysisTickStatus.PLAN_STALE,
                 RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED -> HttpStatusCode.Conflict
                 RepositoryAnalysisTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted

@@ -6,6 +6,7 @@ import com.orchard.backend.analysis.ExecutionPlanOperation
 import com.orchard.backend.analysis.ExecutionPlanScopeCoverage
 import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
 import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
+import com.orchard.backend.analysis.RepositoryAnalysisAttempt
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.analysis.compactRepositoryContextToBudget
@@ -61,8 +62,10 @@ import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -172,6 +175,109 @@ class CompanyCircuitTest {
             listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, ANALYSIS_ATTEMPT_BLOCKED),
             attempts.load().map { it.state },
         )
+    }
+
+    @Test
+    fun `cancelled repository analysis consumes retry authority into durable block`() = runTest {
+        val state = createTempDirectory("orchard-company-analysis-cancellation-state-")
+        val projects = createTempDirectory("orchard-company-analysis-cancellation-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace)
+        val model = CancellingAnalysisModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val attempts = TransientRepositoryAnalysisAttemptStore()
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            attemptStore = attempts,
+        )
+        val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
+
+        assertFailsWith<CancellationException> { analysis.tick(runId) }
+
+        assertEquals(emptyList(), analysis.eligibleRunIds())
+        assertEquals(RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED, analysis.tick(runId).status)
+        assertEquals(1, model.analysisCallCount)
+        assertEquals(RepositoryAnalysisTickStatus.CANCELLED.name, attempts.load().single().resultStatus)
+        assertEquals(ANALYSIS_ATTEMPT_BLOCKED, attempts.load().single().state)
+    }
+
+    @Test
+    fun `startup blocks an authorized retry interrupted before durable attempt outcome`() = runTest {
+        val state = createTempDirectory("orchard-company-analysis-interruption-state-")
+        val projects = createTempDirectory("orchard-company-analysis-interruption-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace)
+        val model = RejectingAnalysisModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+        val revision = requireNotNull(run.context.workspaceReservation).baseRevision
+        val attempts = TransientRepositoryAnalysisAttemptStore()
+        attempts.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                run.runId,
+                revision,
+                ANALYSIS_ATTEMPT_BLOCKED,
+                RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                "Initial rejection.",
+                "a".repeat(64),
+                "2026-07-23T15:00:00Z",
+            )
+        }
+        attempts.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                run.runId,
+                revision,
+                ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
+                "Explicit retry.",
+                "a".repeat(64),
+                "2026-07-23T15:01:00Z",
+            )
+        }
+        workspace.recordModelExecution(
+            ModelExecutionObservationDraft(
+                profile = DefaultModelExecutionProfiles.broadRepositoryAnalysis,
+                binding = model.bindingProfile(),
+                workflowStepId = DefaultModelExecutionProfiles.broadRepositoryAnalysis.id,
+                workItemId = run.context.workItemId,
+                envelopeHash = "b".repeat(64),
+                promptHash = "c".repeat(64),
+                outputHash = null,
+                inputTokens = 100,
+                outputTokens = 0,
+                latencyMillis = 1,
+                schemaValid = false,
+            )
+        )
+
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            attemptStore = attempts,
+        )
+
+        assertEquals(emptyList(), analysis.eligibleRunIds())
+        assertEquals(RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED, analysis.tick(run.runId).status)
+        assertEquals(0, model.analysisCallCount)
+        assertEquals(RepositoryAnalysisTickStatus.CANCELLED.name, attempts.load().last().resultStatus)
+        assertEquals("c".repeat(64), attempts.load().last().promptHash)
     }
 
     @Test
@@ -579,6 +685,32 @@ class CompanyCircuitTest {
             analysisCallCount++
             analysisPrompts += prompt
             return ModelGeneration("{}", 1, 1)
+        }
+    }
+
+    private class CancellingAnalysisModel : ModelProvider {
+        var analysisCallCount = 0
+            private set
+
+        override suspend fun triage(prompt: String): String = "{}"
+
+        override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = "{}"
+
+        override fun bindingProfile() = ModelBindingProfile(
+            bindingId = "test:cancelling-analysis",
+            provider = "test",
+            model = "cancelling-analysis",
+            contextWindowTokens = 100_000,
+            capabilities = setOf(MODEL_CAPABILITY_STRICT_JSON),
+        )
+
+        override suspend fun executeRepositoryAnalysis(
+            prompt: String,
+            maxOutputTokens: Int,
+            contextWindowTokens: Int,
+        ): ModelGeneration {
+            analysisCallCount++
+            throw CancellationException("cancelled for test")
         }
     }
 

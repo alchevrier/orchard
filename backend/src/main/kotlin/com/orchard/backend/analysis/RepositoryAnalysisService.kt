@@ -27,6 +27,7 @@ import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.WorkspaceStore
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
@@ -49,6 +50,7 @@ enum class RepositoryAnalysisTickStatus {
     STORAGE_UNAVAILABLE,
     ATTEMPT_BLOCKED,
     RETRY_AUTHORIZED,
+    CANCELLED,
 }
 
 @Serializable
@@ -119,12 +121,45 @@ class RepositoryAnalysisService(
     init {
         planStore.load()
         attemptStore.load()
+        bootstrapInterruptedRetryBlocks()
         bootstrapLegacyAttemptBlocks()
     }
 
     fun plans(): List<RepositoryExecutionPlan> = planStore.load()
 
     fun attempts(): List<RepositoryAnalysisAttempt> = attemptStore.load()
+
+    private fun bootstrapInterruptedRetryBlocks() {
+        val attempts = attemptStore.load()
+        workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
+            .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
+            .forEach { run ->
+                val baseRevision = workspaceGateway.currentRevision(requireNotNull(run.context.workspaceReservation).path)
+                    ?: return@forEach
+                val authorization = attempts.lastOrNull { it.runId == run.runId && it.baseRevision == baseRevision }
+                    ?.takeIf { it.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED }
+                    ?: return@forEach
+                val interrupted = workspace.modelExecutions(run.context.workItemId)
+                    .filter {
+                        it.workflowStepId == DefaultModelExecutionProfiles.broadRepositoryAnalysis.id &&
+                            it.outputHash == null &&
+                            Instant.parse(it.recordedAt).isAfter(Instant.parse(authorization.recordedAt))
+                    }
+                    .maxByOrNull { it.executionId }
+                    ?: return@forEach
+                attemptStore.appendNext { attemptId ->
+                    RepositoryAnalysisAttempt(
+                        attemptId = attemptId,
+                        runId = run.runId,
+                        baseRevision = baseRevision,
+                        state = ANALYSIS_ATTEMPT_BLOCKED,
+                        resultStatus = RepositoryAnalysisTickStatus.CANCELLED.name,
+                        diagnostic = "Repository analysis execution was interrupted before producing an admissible plan.",
+                        promptHash = interrupted.promptHash,
+                    )
+                }
+            }
+    }
 
     private fun bootstrapLegacyAttemptBlocks() {
         val plans = planStore.load()
@@ -364,6 +399,13 @@ class RepositoryAnalysisService(
             lease.use { provider.executeRepositoryAnalysis(prompt, profile.outputBudgetTokens, profile.inputBudgetTokens + profile.outputBudgetTokens) }
         } catch (exception: CancellationException) {
             recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence)
+            blockAttempt(
+                run.runId,
+                baseRevision,
+                prompt,
+                RepositoryAnalysisTickStatus.CANCELLED,
+                "Repository analysis execution was cancelled before producing an admissible plan.",
+            )
             throw exception
         } catch (error: Exception) {
             recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence)
