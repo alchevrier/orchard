@@ -535,6 +535,19 @@ class RepositoryExecutionPlanStoreTest {
             "Required source operation paths omit source operations: frontend/src/main/Inbox.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(operations = complete.operations.filter { it.order != 2 })),
         )
+        val missingPinnedOwner = complete.copy(
+            evidence = complete.evidence.take(1),
+            operations = complete.operations.filter { it.order != 2 },
+        )
+        assertEquals(
+            "Scope coverage 1 does not cite pinned evidence or a concrete source operation.",
+            repositoryScopeCoverageDiagnostic(scope, missingPinnedOwner),
+        )
+        assertEquals(
+            "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.\n" +
+                "Required source operation paths omit source operations: frontend/src/main/Inbox.kt.",
+            repositoryScopeAuthorityDiagnostic(scope, selectors, context, missingPinnedOwner),
+        )
         assertEquals(
             "Scope coverage 2 requires a test source operation.",
             repositoryScopeCoverageDiagnostic(

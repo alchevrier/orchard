@@ -495,15 +495,7 @@ class RepositoryAnalysisService(
         context: CodingRepositoryContext,
         output: RepositoryAnalysisPlanContent,
     ): String? {
-        repositoryScopeIdentityDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
-        repositoryRequiredScopeSourcePathsDiagnostic(
-            run.workDefinition?.definition?.scope.orEmpty(),
-            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
-            context,
-            output,
-        )?.let { return it }
-        repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
-        repositoryUniversalScopeCoverageDiagnostic(
+        repositoryScopeAuthorityDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
@@ -721,6 +713,16 @@ internal fun repositoryScopeCoverageDiagnostic(
     return null
 }
 
+internal fun repositoryScopeAuthorityDiagnostic(
+    acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? = repositoryScopeIdentityDiagnostic(acceptedScope, output)
+    ?: repositoryRequiredScopeSourcePathsDiagnostic(acceptedScope, selectors, context, output)
+    ?: repositoryUniversalScopeCoverageDiagnostic(acceptedScope, selectors, context, output)
+    ?: repositoryScopeCoverageDiagnostic(acceptedScope, output)
+
 internal fun repositoryScopeIdentityDiagnostic(
     acceptedScope: List<String>,
     output: RepositoryAnalysisPlanContent,
@@ -753,17 +755,19 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
     if (requiredPaths.isEmpty()) return null
     val citedPaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val missingEvidence = requiredPaths - citedPaths
-    if (missingEvidence.isNotEmpty()) {
-        return "Required source operation paths omit evidence: ${missingEvidence.joinToString(", ")}."
-    }
     val sourceOperationPaths = output.operations.asSequence()
         .filter { it.action != PLAN_OPERATION_VERIFY }
         .mapTo(hashSetOf()) { it.path }
     val missingOperations = requiredPaths - sourceOperationPaths
-    if (missingOperations.isNotEmpty()) {
-        return "Required source operation paths omit source operations: ${missingOperations.joinToString(", ")}."
-    }
-    return null
+    val diagnostics = listOfNotNull(
+        missingEvidence.takeIf { it.isNotEmpty() }?.let {
+            "Required source operation paths omit evidence: ${it.joinToString(", ")}."
+        },
+        missingOperations.takeIf { it.isNotEmpty() }?.let {
+            "Required source operation paths omit source operations: ${it.joinToString(", ")}."
+        },
+    )
+    return diagnostics.takeIf { it.isNotEmpty() }?.joinToString("\n")
 }
 
 internal fun requiredRepositorySourceOperationPaths(
