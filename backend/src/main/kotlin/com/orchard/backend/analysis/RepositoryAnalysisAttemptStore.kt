@@ -110,12 +110,22 @@ fun RepositoryAnalysisAttemptStore.blockedAttempt(runId: Long, baseRevision: Str
 fun RepositoryAnalysisAttemptStore.retryDiagnostic(runId: Long, baseRevision: String): String? {
     val attempts = load().filter { it.runId == runId && it.baseRevision == baseRevision }
     if (attempts.lastOrNull()?.state != ANALYSIS_ATTEMPT_RETRY_AUTHORIZED) return null
-    return attempts.dropLast(1)
+    val blockedDiagnostics = attempts.dropLast(1)
         .filter { it.state == ANALYSIS_ATTEMPT_BLOCKED }
         .map { it.diagnostic }
-        .distinct()
-        .takeIf { it.isNotEmpty() }
-        ?.joinToString("\n")
+    val current = blockedDiagnostics.lastOrNull() ?: return null
+    val previous = blockedDiagnostics.distinct().filter { it != current }
+    return buildString {
+        append("Current rejection (")
+        append(blockedDiagnostics.count { it == current })
+        append(" occurrence")
+        if (blockedDiagnostics.count { it == current } != 1) append('s')
+        append("): ").append(current)
+        if (previous.isNotEmpty()) {
+            append("\nPreviously rejected defects that must remain fixed:")
+            previous.forEach { append("\n- ").append(it) }
+        }
+    }
 }
 
 private fun validateRepositoryAnalysisAttempt(

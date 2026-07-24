@@ -45,7 +45,10 @@ class RepositoryExecutionPlanStoreTest {
 
         val restored = FileRepositoryAnalysisAttemptStore(directory)
         assertFalse(restored.isBlocked(11, revision))
-        assertEquals("The plan omitted required selector coverage.", restored.retryDiagnostic(11, revision))
+        assertEquals(
+            "Current rejection (1 occurrence): The plan omitted required selector coverage.",
+            restored.retryDiagnostic(11, revision),
+        )
         assertEquals(listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED), restored.load().map { it.state })
         assertFailsWith<IllegalArgumentException> {
             store.appendNext { attemptId ->
@@ -82,7 +85,37 @@ class RepositoryExecutionPlanStoreTest {
         }
 
         assertEquals(
-            "The plan omitted required selector coverage.\nThe plan omitted a required source operation.",
+            "Current rejection (1 occurrence): The plan omitted a required source operation.\n" +
+                "Previously rejected defects that must remain fixed:\n" +
+                "- The plan omitted required selector coverage.",
+            store.retryDiagnostic(11, revision),
+        )
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                11,
+                revision,
+                ANALYSIS_ATTEMPT_BLOCKED,
+                RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                "The plan omitted a required source operation.",
+                "d".repeat(64),
+            )
+        }
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                11,
+                revision,
+                ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                "RETRY_AUTHORIZED",
+                "A human explicitly authorized a repeated correction.",
+            )
+        }
+
+        assertEquals(
+            "Current rejection (2 occurrences): The plan omitted a required source operation.\n" +
+                "Previously rejected defects that must remain fixed:\n" +
+                "- The plan omitted required selector coverage.",
             store.retryDiagnostic(11, revision),
         )
     }
