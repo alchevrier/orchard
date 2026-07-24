@@ -49,6 +49,7 @@ import kotlinx.serialization.json.Json
 enum class CodingWorkerTickStatus {
     IDLE,
     BUSY,
+    RETRY_AUTHORIZED,
     INTERRUPTED_RECOVERED,
     RESOURCE_BLOCKED,
     MODEL_FAILED,
@@ -66,6 +67,7 @@ enum class CodingWorkerTickStatus {
 data class CodingWorkerTickResult(
     val status: CodingWorkerTickStatus,
     val execution: CodingWorkerExecutionView? = null,
+    val diagnostic: String? = null,
 )
 
 @Serializable
@@ -77,6 +79,7 @@ private data class CodingWorkerModelEnvelope(
     val requiredOutputSchema: String,
     val run: WorkflowRunView,
     val executionPlan: RepositoryExecutionPlan? = null,
+    val priorRejectedCodingDiagnostic: String? = null,
     val repositoryContext: CodingRepositoryContext,
 )
 
@@ -92,6 +95,7 @@ class CodingWorkerService(
     private val companyControl: CompanyControlService? = null,
     private val repositoryAnalysis: RepositoryAnalysisService? = null,
     private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
+    private val attemptStore: CodingWorkerAttemptStore = TransientCodingWorkerAttemptStore(),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -99,9 +103,13 @@ class CodingWorkerService(
     init {
         require(retryBudget in 1..MAX_RETRY_BUDGET) { "Coding worker retry budget is invalid" }
         workerStore.loadEvents()
+        attemptStore.load()
+        bootstrapLegacyAttemptBlocks()
     }
 
     fun executions(): List<CodingWorkerExecutionView> = codingWorkerExecutions(workerStore.loadEvents())
+
+    fun attempts(): List<CodingWorkerAttempt> = attemptStore.load()
 
     suspend fun tick(): CodingWorkerTickResult {
         val runId = eligibleRunIds().firstOrNull() ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
@@ -109,6 +117,51 @@ class CodingWorkerService(
     }
 
     fun eligibleRunIds(): List<Long> = candidateRuns(codingWorkerExecutions(workerStore.loadEvents())).map { it.runId }
+
+    fun authorizeRetry(runId: Long): CodingWorkerTickResult {
+        if (codingWorkerExecutions(workerStore.loadEvents()).any { it.claim.runId == runId && it.result == null }) {
+            return CodingWorkerTickResult(
+                CodingWorkerTickStatus.BUSY,
+                diagnostic = "The coding run already has an active execution.",
+            )
+        }
+        val plan = repositoryAnalysis?.currentPlan(runId)
+            ?: return CodingWorkerTickResult(
+                CodingWorkerTickStatus.IDLE,
+                diagnostic = "The coding run has no current accepted execution plan.",
+            )
+        val latest = attemptStore.latestAttempt(runId, plan.planId, plan.hash)
+        if (latest?.state !in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_CONSUMED)) {
+            return CodingWorkerTickResult(
+                CodingWorkerTickStatus.IDLE,
+                diagnostic = "The coding run has no blocked attempt to retry.",
+            )
+        }
+        return runCatching {
+            attemptStore.appendNext { attemptId ->
+                CodingWorkerAttempt(
+                    attemptId = attemptId,
+                    runId = runId,
+                    executionPlanId = plan.planId,
+                    executionPlanHash = plan.hash,
+                    state = CODING_ATTEMPT_RETRY_AUTHORIZED,
+                    resultStatus = CodingWorkerTickStatus.RETRY_AUTHORIZED.name,
+                    diagnostic = "A human explicitly authorized one successor coding attempt.",
+                    proposalHash = requireNotNull(latest).proposalHash,
+                )
+            }
+        }.fold(
+            onSuccess = {
+                CodingWorkerTickResult(
+                    CodingWorkerTickStatus.RETRY_AUTHORIZED,
+                    diagnostic = "One successor coding attempt is authorized.",
+                )
+            },
+            onFailure = {
+                CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE, diagnostic = it.message.orEmpty())
+            },
+        )
+    }
 
     suspend fun tick(runId: Long): CodingWorkerTickResult {
         val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
@@ -144,6 +197,9 @@ class CodingWorkerService(
         if (executionPlan?.content?.disposition == DISPOSITION_COMPLETE) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_BLOCKED)
         }
+        val priorRejectedCodingDiagnostic = executionPlan?.let { plan ->
+            attemptStore.retryDiagnostic(run.runId, plan.planId, plan.hash)
+        }
         val defaultProfile = DefaultModelExecutionProfiles.boundedCodingPatch
         val profileOverride = runCatching { profileSettingsStore.load() }.getOrElse {
             return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
@@ -170,6 +226,24 @@ class CodingWorkerService(
         val binding = modelProvider.bindingProfile()
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
         val toolchainPolicy = toolchainResolution.getOrNull()
+        if (priorRejectedCodingDiagnostic != null) {
+            val consumed = runCatching {
+                attemptStore.appendNext { attemptId ->
+                    CodingWorkerAttempt(
+                        attemptId = attemptId,
+                        runId = run.runId,
+                        executionPlanId = executionPlan.planId,
+                        executionPlanHash = executionPlan.hash,
+                        state = CODING_ATTEMPT_RETRY_CONSUMED,
+                        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                        diagnostic = "The explicitly authorized successor coding attempt was consumed.",
+                    )
+                }
+            }
+            if (consumed.isFailure) {
+                return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE, diagnostic = consumed.exceptionOrNull()?.message)
+            }
+        }
         val claim = try {
             requireNotNull(workerStore.appendNext { eventId, preceding ->
                 val currentExecutions = codingWorkerExecutions(preceding)
@@ -212,6 +286,7 @@ class CodingWorkerService(
             requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
             run = run,
             executionPlan = executionPlan,
+            priorRejectedCodingDiagnostic = priorRejectedCodingDiagnostic,
             repositoryContext = repositoryContext,
         )
         val envelopeJson = json.encodeToString(envelope)
@@ -295,14 +370,96 @@ class CodingWorkerService(
             modelExecutionId = modelExecution.executionId,
         )
         val proposalHash = sha256(strictOutputJson.encodeToString(proposal))
-        if (executionPlan != null && !proposalAuthorized(proposal, executionPlan)) return finish(
-            claim,
-            CODING_EXECUTION_FAILED,
-            CodingWorkerTickStatus.PLAN_BLOCKED,
-            "The coding proposal exceeds the accepted execution-plan path or action scope.",
-            modelExecution.executionId,
-            proposalHash,
-        )
+        if (executionPlan != null) {
+            val authorizationDiagnostic = codingProposalAuthorizationDiagnostic(proposal, executionPlan)
+            if (authorizationDiagnostic != null) {
+                val repeatedProposal = attemptStore.load().any {
+                    it.runId == run.runId &&
+                        it.executionPlanId == executionPlan.planId &&
+                        it.executionPlanHash == executionPlan.hash &&
+                        it.state == CODING_ATTEMPT_BLOCKED &&
+                        it.proposalHash == proposalHash
+                }
+                val blocked = runCatching {
+                    attemptStore.appendNext { attemptId ->
+                        CodingWorkerAttempt(
+                            attemptId = attemptId,
+                            runId = run.runId,
+                            executionPlanId = executionPlan.planId,
+                            executionPlanHash = executionPlan.hash,
+                            state = CODING_ATTEMPT_BLOCKED,
+                            resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                            diagnostic = authorizationDiagnostic,
+                            proposalHash = proposalHash,
+                        )
+                    }
+                }
+                if (blocked.isFailure) return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    blocked.exceptionOrNull()?.message,
+                    modelExecution.executionId,
+                    proposalHash,
+                )
+                if (!repeatedProposal) {
+                    val correction = runCatching {
+                        attemptStore.appendNext { attemptId ->
+                            CodingWorkerAttempt(
+                                attemptId = attemptId,
+                                runId = run.runId,
+                                executionPlanId = executionPlan.planId,
+                                executionPlanHash = executionPlan.hash,
+                                state = CODING_ATTEMPT_RETRY_AUTHORIZED,
+                                resultStatus = CodingWorkerTickStatus.RETRY_AUTHORIZED.name,
+                                diagnostic = "The controller authorized one corrective successor for a novel coding rejection.",
+                                proposalHash = proposalHash,
+                            )
+                        }
+                    }
+                    if (correction.isFailure) return finish(
+                        claim,
+                        CODING_EXECUTION_FAILED,
+                        CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                        correction.exceptionOrNull()?.message,
+                        modelExecution.executionId,
+                        proposalHash,
+                    )
+                }
+                return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.PLAN_BLOCKED,
+                    authorizationDiagnostic,
+                    modelExecution.executionId,
+                    proposalHash,
+                )
+            }
+            if (priorRejectedCodingDiagnostic != null) {
+                val accepted = runCatching {
+                    attemptStore.appendNext { attemptId ->
+                        CodingWorkerAttempt(
+                            attemptId = attemptId,
+                            runId = run.runId,
+                            executionPlanId = executionPlan.planId,
+                            executionPlanHash = executionPlan.hash,
+                            state = CODING_ATTEMPT_SCOPE_ACCEPTED,
+                            resultStatus = CodingWorkerTickStatus.CANDIDATE_COMPLETED.name,
+                            diagnostic = "The successor proposal satisfies the accepted execution-plan action and path scope.",
+                            proposalHash = proposalHash,
+                        )
+                    }
+                }
+                if (accepted.isFailure) return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    accepted.exceptionOrNull()?.message,
+                    modelExecution.executionId,
+                    proposalHash,
+                )
+            }
+        }
         if (!runStillActionable(run)) return finish(
             claim,
             CODING_EXECUTION_BLOCKED,
@@ -352,9 +509,8 @@ class CodingWorkerService(
     }
 
     private fun candidateRuns(executions: List<CodingWorkerExecutionView>): List<WorkflowRunView> {
-        val attempts = executions.filter { it.result?.status in REPAIR_ATTEMPT_STATUSES }
-            .groupingBy { it.claim.runId }
-            .eachCount()
+        val repairExecutions = executions.filter { it.result?.status in REPAIR_ATTEMPT_STATUSES }
+            .groupBy { it.claim.runId }
         val blockedRuns = executions.groupBy { it.claim.runId }.mapNotNull { (runId, runExecutions) ->
             runExecutions.maxByOrNull { it.claim.executionId }?.result
                 ?.takeIf { it.status == CODING_EXECUTION_BLOCKED }
@@ -366,6 +522,10 @@ class CodingWorkerService(
                 ?.let { runId }
         }.toSet()
         val activeRuns = executions.filter { it.result == null }.mapTo(hashSetOf()) { it.claim.runId }
+        val latestPlanClaims = executions.groupBy { it.claim.runId }.mapValues { (_, runExecutions) ->
+            runExecutions.maxBy { it.claim.executionId }.claim
+        }
+        val codingAttempts = attemptStore.load()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
             .filter { run ->
@@ -375,7 +535,29 @@ class CodingWorkerService(
             .filter { it.runId !in blockedRuns }
             .filter { it.runId !in deferredRuns }
             .filter { it.runId !in activeRuns }
-            .filter { attempts.getOrDefault(it.runId, 0) < retryBudget }
+            .filter { run ->
+                val claim = latestPlanClaims[run.runId]
+                val authority = if (claim?.executionPlanId != null && claim.executionPlanHash != null) {
+                    codingAttempts.lastOrNull {
+                        it.runId == run.runId &&
+                            it.executionPlanId == claim.executionPlanId &&
+                            it.executionPlanHash == claim.executionPlanHash
+                    }
+                } else null
+                val scopeAcceptedAt = if (claim?.executionPlanId != null && claim.executionPlanHash != null) {
+                    codingAttempts.lastOrNull {
+                        it.runId == run.runId &&
+                            it.executionPlanId == claim.executionPlanId &&
+                            it.executionPlanHash == claim.executionPlanHash &&
+                            it.state == CODING_ATTEMPT_SCOPE_ACCEPTED
+                    }?.recordedAt?.let(Instant::parse)
+                } else null
+                val repairCount = repairExecutions[run.runId].orEmpty().count { execution ->
+                    scopeAcceptedAt == null || Instant.parse(requireNotNull(execution.result).completedAt) >= scopeAcceptedAt
+                }
+                authority?.state !in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_CONSUMED) &&
+                    (repairCount < retryBudget || authority?.state == CODING_ATTEMPT_RETRY_AUTHORIZED)
+            }
             .sortedBy { it.runId }
             .toList()
     }
@@ -408,18 +590,6 @@ class CodingWorkerService(
             hash = "",
         )
         return draft.copy(hash = codingWorkerClaimHash(draft))
-    }
-
-    private fun proposalAuthorized(proposal: CodingPatchProposal, plan: RepositoryExecutionPlan): Boolean {
-        val authority = plan.content.operations.filter { it.action != "VERIFY" }.associate { it.path to it.action }
-        return proposal.operations.isNotEmpty() && proposal.operations.all { operation ->
-            when (operation.action) {
-                CODING_FILE_WRITE -> authority[operation.path] in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY)
-                CODING_FILE_REPLACE -> authority[operation.path] == PLAN_OPERATION_MODIFY
-                CODING_FILE_DELETE -> authority[operation.path] == PLAN_OPERATION_DELETE
-                else -> false
-            }
-        }
     }
 
     private fun resolveProvider(profile: ModelExecutionProfile, override: ModelProfileOverride?): ModelProvider? {
@@ -591,6 +761,52 @@ class CodingWorkerService(
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
 
+    private fun bootstrapLegacyAttemptBlocks() {
+        val attempts = attemptStore.load()
+        codingWorkerExecutions(workerStore.loadEvents())
+            .filter { execution ->
+                execution.claim.executionPlanId != null &&
+                    execution.claim.executionPlanHash != null &&
+                    execution.result?.status == CODING_EXECUTION_FAILED &&
+                    execution.result.proposalHash != null &&
+                    execution.result.diagnostic == LEGACY_PLAN_SCOPE_DIAGNOSTIC
+            }
+            .groupBy { execution ->
+                listOf(
+                    execution.claim.runId.toString(),
+                    execution.claim.executionPlanId.toString(),
+                    execution.claim.executionPlanHash,
+                    execution.result?.proposalHash,
+                )
+            }
+            .values
+            .filter { it.size >= LEGACY_IDENTICAL_OUTCOME_BLOCK_THRESHOLD }
+            .forEach { repeated ->
+                val latest = repeated.maxBy { it.claim.executionId }
+                val planId = requireNotNull(latest.claim.executionPlanId)
+                val planHash = requireNotNull(latest.claim.executionPlanHash)
+                if (attempts.none {
+                        it.runId == latest.claim.runId &&
+                            it.executionPlanId == planId &&
+                            it.executionPlanHash == planHash
+                    }
+                ) {
+                    attemptStore.appendNext { attemptId ->
+                        CodingWorkerAttempt(
+                            attemptId = attemptId,
+                            runId = latest.claim.runId,
+                            executionPlanId = planId,
+                            executionPlanHash = planHash,
+                            state = CODING_ATTEMPT_BLOCKED,
+                            resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                            diagnostic = "Automatic coding blocked after repeated identical historical proposals exceeded the accepted execution-plan scope.",
+                            proposalHash = latest.result?.proposalHash,
+                        )
+                    }
+                }
+            }
+    }
+
     private companion object {
         const val CODING_WORKFLOW_STEP_ID = "DELIVER_CHANGE:CODING_PATCH"
         const val CODING_PROPOSAL_SCHEMA = "coding-patch-proposal-v2"
@@ -598,6 +814,8 @@ class CodingWorkerService(
         const val DEFAULT_RETRY_BUDGET = 3
         const val MAX_RETRY_BUDGET = 10
         const val MAX_DIAGNOSTIC_LENGTH = 4_096
+        const val LEGACY_PLAN_SCOPE_DIAGNOSTIC = "The coding proposal exceeds the accepted execution-plan path or action scope."
+        const val LEGACY_IDENTICAL_OUTCOME_BLOCK_THRESHOLD = 2
         val TRANSIENT_RETRY_DELAY: Duration = Duration.ofSeconds(30)
         val REPAIR_ATTEMPT_STATUSES = setOf(CODING_EXECUTION_COMPLETED, CODING_EXECUTION_FAILED)
 
@@ -607,5 +825,44 @@ class CodingWorkerService(
             ) { "Missing coding worker prompt" }
             return stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         }
+    }
+}
+
+internal fun codingProposalAuthorizationDiagnostic(
+    proposal: CodingPatchProposal,
+    plan: RepositoryExecutionPlan,
+): String? {
+    val authority = plan.content.operations.filter { it.action != "VERIFY" }.associate { it.path to it.action }
+    val unauthorized = proposal.operations.filter { operation ->
+        when (operation.action) {
+            CODING_FILE_WRITE -> authority[operation.path] !in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY)
+            CODING_FILE_REPLACE -> authority[operation.path] != PLAN_OPERATION_MODIFY
+            CODING_FILE_DELETE -> authority[operation.path] != PLAN_OPERATION_DELETE
+            else -> true
+        }
+    }
+    if (proposal.operations.isNotEmpty() && unauthorized.isEmpty()) return null
+    return buildString {
+        append("The coding proposal exceeds the accepted execution-plan path or action scope.")
+        if (proposal.operations.isEmpty()) {
+            append(" The proposal contains no coding operations.")
+        } else {
+            append(" Unauthorized coding operations: ")
+            append(unauthorized.map { "${it.action} ${it.path}" }.distinct().sorted().joinToString(" | "))
+            append('.')
+        }
+        append(" Allowed execution-plan operations: ")
+        append(
+            authority.entries.sortedBy { it.key }.joinToString(" | ") { (path, action) ->
+                val codingActions = when (action) {
+                    PLAN_OPERATION_CREATE -> CODING_FILE_WRITE
+                    PLAN_OPERATION_MODIFY -> "$CODING_FILE_REPLACE or $CODING_FILE_WRITE"
+                    PLAN_OPERATION_DELETE -> CODING_FILE_DELETE
+                    else -> "none"
+                }
+                "$action $path permits $codingActions"
+            }
+        )
+        append('.')
     }
 }

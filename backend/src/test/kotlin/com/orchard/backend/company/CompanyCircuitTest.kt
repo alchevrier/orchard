@@ -729,6 +729,10 @@ class CompanyCircuitTest {
             maxOutputTokens: Int,
             contextWindowTokens: Int,
         ): ModelGeneration {
+            if (codingCalls == 1) {
+                assertTrue(prompt.contains("priorRejectedCodingDiagnostic"))
+                assertTrue(prompt.contains("Unauthorized coding operations: WRITE README.md"))
+            }
             val content = when (codingCalls++) {
                 0 -> "plugins { base }\n"
                 1 -> "plugins { this is not valid Kotlin }\n"

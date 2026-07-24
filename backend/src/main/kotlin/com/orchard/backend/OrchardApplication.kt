@@ -10,6 +10,7 @@ import com.orchard.backend.agent.GenesisIntelligenceService
 import com.orchard.backend.agent.GenesisProposalRequest
 import com.orchard.backend.agent.GenesisProposalStatus
 import com.orchard.backend.agent.CodingWorkerTickStatus
+import com.orchard.backend.agent.FileCodingWorkerAttemptStore
 import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
@@ -267,6 +268,7 @@ fun main() {
         companyControl = companyControl,
         repositoryAnalysis = repositoryAnalysis,
         profileSettingsStore = modelProfileSettingsStore,
+        attemptStore = FileCodingWorkerAttemptStore(OrchardPaths.WORKSPACE_DIR),
     )
     val companyAudit = CompanyAuditService(
         workspace,
@@ -1280,6 +1282,32 @@ fun Application.workspaceApi(
             }
             call.respond(executions)
         }
+        get("/api/coding-worker/attempts") {
+            if (codingWorker == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val attempts = runCatching { codingWorker.attempts() }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(attempts)
+        }
+        post("/api/coding-worker/runs/{runId}/retry") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (codingWorker == null || runId == null || runId <= 0) {
+                call.respond(if (runId == null || runId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = codingWorker.authorizeRetry(runId)
+            val status = when (result.status) {
+                CodingWorkerTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
+                CodingWorkerTickStatus.IDLE -> HttpStatusCode.Conflict
+                CodingWorkerTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+                else -> HttpStatusCode.Conflict
+            }
+            call.respond(status, result)
+        }
         post("/api/coding-worker/tick") {
             if (codingWorker == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable)
@@ -1293,6 +1321,7 @@ fun Application.workspaceApi(
                 CodingWorkerTickStatus.CANDIDATE_COMPLETED -> HttpStatusCode.Created
                 CodingWorkerTickStatus.IDLE,
                 CodingWorkerTickStatus.INTERRUPTED_RECOVERED -> HttpStatusCode.OK
+                CodingWorkerTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
                 CodingWorkerTickStatus.BUSY -> HttpStatusCode.Conflict
                 CodingWorkerTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
                 CodingWorkerTickStatus.INVALID_PROPOSAL,

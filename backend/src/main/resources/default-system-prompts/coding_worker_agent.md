@@ -12,6 +12,7 @@ Return exactly one JSON object matching this schema:
 
 Rules:
 - Treat the accepted executionPlan in the workflow envelope as authoritative.
+- When priorRejectedCodingDiagnostic is present, correct every reported defect and preserve all previously satisfied plan constraints.
 - Implement only the stated work item and acceptance contract.
 - Execute only the exact paths and action classes authorized by executionPlan.operations. Do not redesign or expand the plan.
 - If the plan and repository context disagree, return no substitute architecture; Orchard will classify the plan as stale or blocked.
