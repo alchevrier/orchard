@@ -24,6 +24,9 @@ class CodingWorkerAttemptStoreTest {
 
         val restored = FileCodingWorkerAttemptStore(directory)
         assertTrue(requireNotNull(restored.retryDiagnostic(RUN_ID, PLAN_ID, PLAN_HASH)).contains("Rejected scope."))
+        assertFailsWith<IllegalArgumentException> {
+            restored.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_RETRY_AUTHORIZED, "Duplicate authorization.") }
+        }
         restored.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_RETRY_CONSUMED, "Authorized successor consumed.") }
 
         assertEquals(CODING_ATTEMPT_RETRY_CONSUMED, restored.latestAttempt(RUN_ID, PLAN_ID, PLAN_HASH)?.state)

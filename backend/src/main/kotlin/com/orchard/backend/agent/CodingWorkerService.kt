@@ -226,24 +226,6 @@ class CodingWorkerService(
         val binding = modelProvider.bindingProfile()
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
         val toolchainPolicy = toolchainResolution.getOrNull()
-        if (priorRejectedCodingDiagnostic != null) {
-            val consumed = runCatching {
-                attemptStore.appendNext { attemptId ->
-                    CodingWorkerAttempt(
-                        attemptId = attemptId,
-                        runId = run.runId,
-                        executionPlanId = executionPlan.planId,
-                        executionPlanHash = executionPlan.hash,
-                        state = CODING_ATTEMPT_RETRY_CONSUMED,
-                        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
-                        diagnostic = "The explicitly authorized successor coding attempt was consumed.",
-                    )
-                }
-            }
-            if (consumed.isFailure) {
-                return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE, diagnostic = consumed.exceptionOrNull()?.message)
-            }
-        }
         val claim = try {
             requireNotNull(workerStore.appendNext { eventId, preceding ->
                 val currentExecutions = codingWorkerExecutions(preceding)
@@ -306,6 +288,30 @@ class CodingWorkerService(
                 modelExecutionId = execution?.executionId,
                 retryAfter = Instant.now().plus(TRANSIENT_RETRY_DELAY).toString(),
             )
+        }
+        if (priorRejectedCodingDiagnostic != null) {
+            val consumed = runCatching {
+                attemptStore.appendNext { attemptId ->
+                    CodingWorkerAttempt(
+                        attemptId = attemptId,
+                        runId = run.runId,
+                        executionPlanId = executionPlan.planId,
+                        executionPlanHash = executionPlan.hash,
+                        state = CODING_ATTEMPT_RETRY_CONSUMED,
+                        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                        diagnostic = "The explicitly authorized successor coding attempt was consumed.",
+                    )
+                }
+            }
+            if (consumed.isFailure) {
+                lease.close()
+                return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    consumed.exceptionOrNull()?.message,
+                )
+            }
         }
         val startedAt = System.nanoTime()
         val generation = try {
