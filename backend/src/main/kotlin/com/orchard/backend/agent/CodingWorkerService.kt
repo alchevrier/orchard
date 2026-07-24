@@ -105,6 +105,7 @@ class CodingWorkerService(
         workerStore.loadEvents()
         attemptStore.load()
         bootstrapLegacyAttemptBlocks()
+        bootstrapApplicationFailureBlocks()
     }
 
     fun executions(): List<CodingWorkerExecutionView> = codingWorkerExecutions(workerStore.loadEvents())
@@ -382,59 +383,21 @@ class CodingWorkerService(
         if (executionPlan != null) {
             val authorizationDiagnostic = codingProposalAuthorizationDiagnostic(proposal, executionPlan)
             if (authorizationDiagnostic != null) {
-                val repeatedProposal = attemptStore.load().any {
-                    it.runId == run.runId &&
-                        it.executionPlanId == executionPlan.planId &&
-                        it.executionPlanHash == executionPlan.hash &&
-                        it.state == CODING_ATTEMPT_BLOCKED &&
-                        it.proposalHash == proposalHash
-                }
-                val blocked = runCatching {
-                    attemptStore.appendNext { attemptId ->
-                        CodingWorkerAttempt(
-                            attemptId = attemptId,
-                            runId = run.runId,
-                            executionPlanId = executionPlan.planId,
-                            executionPlanHash = executionPlan.hash,
-                            state = CODING_ATTEMPT_BLOCKED,
-                            resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
-                            diagnostic = authorizationDiagnostic,
-                            proposalHash = proposalHash,
-                        )
-                    }
-                }
-                if (blocked.isFailure) return finish(
+                val storageDiagnostic = recordCorrectiveRejection(
+                    run.runId,
+                    executionPlan.planId,
+                    executionPlan.hash,
+                    proposalHash,
+                    authorizationDiagnostic,
+                )
+                if (storageDiagnostic != null) return finish(
                     claim,
                     CODING_EXECUTION_FAILED,
                     CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
-                    blocked.exceptionOrNull()?.message,
+                    storageDiagnostic,
                     modelExecution.executionId,
                     proposalHash,
                 )
-                if (!repeatedProposal) {
-                    val correction = runCatching {
-                        attemptStore.appendNext { attemptId ->
-                            CodingWorkerAttempt(
-                                attemptId = attemptId,
-                                runId = run.runId,
-                                executionPlanId = executionPlan.planId,
-                                executionPlanHash = executionPlan.hash,
-                                state = CODING_ATTEMPT_RETRY_AUTHORIZED,
-                                resultStatus = CodingWorkerTickStatus.RETRY_AUTHORIZED.name,
-                                diagnostic = "The controller authorized one corrective successor for a novel coding rejection.",
-                                proposalHash = proposalHash,
-                            )
-                        }
-                    }
-                    if (correction.isFailure) return finish(
-                        claim,
-                        CODING_EXECUTION_FAILED,
-                        CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
-                        correction.exceptionOrNull()?.message,
-                        modelExecution.executionId,
-                        proposalHash,
-                    )
-                }
                 return finish(
                     claim,
                     CODING_EXECUTION_FAILED,
@@ -484,11 +447,29 @@ class CodingWorkerService(
                 claim.executionId,
             )
         }.getOrElse { error ->
+            val applicationDiagnostic = "The coding proposal could not be applied: ${error.message.orEmpty()}"
+            if (executionPlan != null) {
+                val storageDiagnostic = recordCorrectiveRejection(
+                    run.runId,
+                    executionPlan.planId,
+                    executionPlan.hash,
+                    proposalHash,
+                    applicationDiagnostic,
+                )
+                if (storageDiagnostic != null) return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    storageDiagnostic,
+                    modelExecution.executionId,
+                    proposalHash,
+                )
+            }
             return finish(
                 claim,
                 CODING_EXECUTION_FAILED,
                 CodingWorkerTickStatus.APPLICATION_FAILED,
-                error.message,
+                applicationDiagnostic,
                 modelExecution.executionId,
                 proposalHash,
             )
@@ -606,6 +587,50 @@ class CodingWorkerService(
             modelProviders.filter { it.bindingProfile().bindingId == preferred }
         } ?: modelProviders
         return runCatching { ModelProfileResolver.resolve(profile, eligible) }.getOrNull()
+    }
+
+    private fun recordCorrectiveRejection(
+        runId: Long,
+        planId: Long,
+        planHash: String,
+        proposalHash: String,
+        diagnostic: String,
+    ): String? {
+        val repeatedProposal = attemptStore.load().any {
+            it.runId == runId &&
+                it.executionPlanId == planId &&
+                it.executionPlanHash == planHash &&
+                it.state == CODING_ATTEMPT_BLOCKED &&
+                it.proposalHash == proposalHash
+        }
+        return runCatching {
+            attemptStore.appendNext { attemptId ->
+                CodingWorkerAttempt(
+                    attemptId = attemptId,
+                    runId = runId,
+                    executionPlanId = planId,
+                    executionPlanHash = planHash,
+                    state = CODING_ATTEMPT_BLOCKED,
+                    resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                    diagnostic = diagnostic,
+                    proposalHash = proposalHash,
+                )
+            }
+            if (!repeatedProposal) {
+                attemptStore.appendNext { attemptId ->
+                    CodingWorkerAttempt(
+                        attemptId = attemptId,
+                        runId = runId,
+                        executionPlanId = planId,
+                        executionPlanHash = planHash,
+                        state = CODING_ATTEMPT_RETRY_AUTHORIZED,
+                        resultStatus = CodingWorkerTickStatus.RETRY_AUTHORIZED.name,
+                        diagnostic = "The controller authorized one corrective successor for a novel coding rejection.",
+                        proposalHash = proposalHash,
+                    )
+                }
+            }
+        }.exceptionOrNull()?.message.orEmpty().ifBlank { null }
     }
 
     private fun submitEvidence(
@@ -812,6 +837,41 @@ class CodingWorkerService(
                             proposalHash = latest.result?.proposalHash,
                         )
                     }
+                }
+            }
+    }
+
+    private fun bootstrapApplicationFailureBlocks() {
+        val attempts = attemptStore.load()
+        codingWorkerExecutions(workerStore.loadEvents())
+            .groupBy { it.claim.runId }
+            .values
+            .mapNotNull { executions -> executions.maxByOrNull { it.claim.executionId } }
+            .filter { execution ->
+                execution.claim.executionPlanId != null &&
+                    execution.claim.executionPlanHash != null &&
+                    execution.result?.status == CODING_EXECUTION_FAILED &&
+                    execution.result.proposalHash != null &&
+                    execution.result.changedPaths.isEmpty() &&
+                    execution.result.revision == null
+            }
+            .forEach { execution ->
+                val planId = requireNotNull(execution.claim.executionPlanId)
+                val planHash = requireNotNull(execution.claim.executionPlanHash)
+                val proposalHash = requireNotNull(execution.result?.proposalHash)
+                val latest = attempts.lastOrNull {
+                    it.runId == execution.claim.runId &&
+                        it.executionPlanId == planId &&
+                        it.executionPlanHash == planHash
+                }
+                if (latest?.state == CODING_ATTEMPT_SCOPE_ACCEPTED && latest.proposalHash == proposalHash) {
+                    recordCorrectiveRejection(
+                        execution.claim.runId,
+                        planId,
+                        planHash,
+                        proposalHash,
+                        "The coding proposal could not be applied: ${requireNotNull(execution.result).diagnostic}",
+                    )
                 }
             }
     }

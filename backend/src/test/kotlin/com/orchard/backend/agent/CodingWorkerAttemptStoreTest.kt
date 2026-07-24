@@ -82,6 +82,44 @@ class CodingWorkerAttemptStoreTest {
         assertEquals(1, FileCodingWorkerAttemptStore(directory).load().size)
     }
 
+    @Test
+    fun `scope accepted application failure bootstraps one corrective successor`() {
+        val directory = createTempDirectory("orchard-application-failure-attempts-")
+        val attemptStore = FileCodingWorkerAttemptStore(directory)
+        attemptStore.appendNext { attemptId ->
+            attempt(attemptId, CODING_ATTEMPT_BLOCKED, "Rejected scope.").copy(proposalHash = HISTORICAL_PROPOSAL_HASH)
+        }
+        attemptStore.appendNext { attemptId ->
+            attempt(attemptId, CODING_ATTEMPT_RETRY_AUTHORIZED, "Successor authorized.").copy(proposalHash = HISTORICAL_PROPOSAL_HASH)
+        }
+        attemptStore.appendNext { attemptId ->
+            attempt(attemptId, CODING_ATTEMPT_RETRY_CONSUMED, "Successor consumed.").copy(proposalHash = null)
+        }
+        attemptStore.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_SCOPE_ACCEPTED, "Scope accepted.") }
+        val workerStore = TransientCodingWorkerStore()
+        appendApplicationFailure(workerStore)
+
+        CodingWorkerService(
+            workspace = WorkspaceStore(),
+            modelProviders = emptyList(),
+            workerStore = workerStore,
+            attemptStore = attemptStore,
+        )
+
+        val recovered = attemptStore.load()
+        assertEquals(listOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_AUTHORIZED), recovered.takeLast(2).map { it.state })
+        assertTrue(requireNotNull(attemptStore.retryDiagnostic(RUN_ID, PLAN_ID, PLAN_HASH)).contains("REPLACE old text must occur exactly once"))
+
+        CodingWorkerService(
+            workspace = WorkspaceStore(),
+            modelProviders = emptyList(),
+            workerStore = workerStore,
+            attemptStore = FileCodingWorkerAttemptStore(directory),
+        )
+
+        assertEquals(recovered, FileCodingWorkerAttemptStore(directory).load())
+    }
+
     private fun attempt(attemptId: Long, state: String, diagnostic: String) = CodingWorkerAttempt(
         attemptId = attemptId,
         runId = RUN_ID,
@@ -126,6 +164,31 @@ class CodingWorkerAttemptStoreTest {
         )
     }
 
+    private fun appendApplicationFailure(store: CodingWorkerStore) {
+        val claimDraft = CodingWorkerClaim(
+            executionId = 1,
+            runId = RUN_ID,
+            attempt = 1,
+            contextHash = "a".repeat(64),
+            workspacePath = "/tmp/orchard-application-failure-worktree",
+            bindingFingerprint = "b".repeat(64),
+            executionPlanId = PLAN_ID,
+            executionPlanHash = PLAN_HASH,
+            claimedAt = "2026-06-22T00:00:01Z",
+            hash = "",
+        )
+        store.append(CodingWorkerEvent(eventId = 1, claim = claimDraft.copy(hash = codingWorkerClaimHash(claimDraft))))
+        val resultDraft = CodingWorkerResult(
+            executionId = 1,
+            status = CODING_EXECUTION_FAILED,
+            proposalHash = PROPOSAL_HASH,
+            diagnostic = "REPLACE old text must occur exactly once",
+            completedAt = "2026-06-22T00:00:02Z",
+            hash = "",
+        )
+        store.append(CodingWorkerEvent(eventId = 2, result = resultDraft.copy(hash = codingWorkerResultHash(resultDraft))))
+    }
+
     private fun executionPlan() = RepositoryExecutionPlan(
         planId = PLAN_ID,
         runId = RUN_ID,
@@ -166,5 +229,6 @@ class CodingWorkerAttemptStoreTest {
         const val PLAN_ID = 11L
         val PLAN_HASH = "2".repeat(64)
         val PROPOSAL_HASH = "3".repeat(64)
+        val HISTORICAL_PROPOSAL_HASH = "4".repeat(64)
     }
 }
