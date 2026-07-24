@@ -59,6 +59,32 @@ class RepositoryExecutionPlanStoreTest {
                 )
             }
         }
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                11,
+                revision,
+                ANALYSIS_ATTEMPT_BLOCKED,
+                RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                "The plan omitted a required source operation.",
+                "c".repeat(64),
+            )
+        }
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                11,
+                revision,
+                ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                "RETRY_AUTHORIZED",
+                "A human explicitly authorized another successor attempt.",
+            )
+        }
+
+        assertEquals(
+            "The plan omitted required selector coverage.\nThe plan omitted a required source operation.",
+            store.retryDiagnostic(11, revision),
+        )
     }
 
     @Test
