@@ -525,8 +525,9 @@ class RepositoryExecutionPlanStoreTest {
             ),
             compiledScopeAuthority.scopeCoverage.map { it.evidencePaths },
         )
-        assertEquals(swappedScopePaths.scopeCoverage.map { it.operationOrders }, compiledScopeAuthority.scopeCoverage.map { it.operationOrders })
+        assertEquals(listOf(listOf(1, 2), listOf(3, 4)), compiledScopeAuthority.scopeCoverage.map { it.operationOrders })
         assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, compiledScopeAuthority))
+        assertNull(repositoryScopeCoverageDiagnostic(scope, compiledScopeAuthority))
         assertEquals(
             "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(evidence = complete.evidence.take(1))),

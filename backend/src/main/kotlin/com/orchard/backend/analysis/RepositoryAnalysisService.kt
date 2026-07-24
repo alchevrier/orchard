@@ -851,14 +851,23 @@ internal fun compileRepositoryScopeAuthority(
     val pathsBySelector = requiredRepositoryPathsBySelector(selectors, context)
     val selectorIdsByScope = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, selectors)
     val coverageByScope = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
+    val operationsByOrder = output.operations.associateBy { it.order }
     return output.copy(
         scopeCoverage = acceptedScope.mapIndexed { index, scope ->
-            coverageByScope.getValue(canonicalAuthorityText(scope)).copy(
+            val coverage = coverageByScope.getValue(canonicalAuthorityText(scope))
+            val evidencePaths = selectorIdsByScope[index]
+                .flatMap { pathsBySelector[it].orEmpty() }
+                .distinct()
+                .sorted()
+            val sourceOperationOrders = output.operations.asSequence()
+                .filter { it.action != PLAN_OPERATION_VERIFY && it.path in evidencePaths }
+                .map { it.order }
+            val verificationOperationOrders = coverage.operationOrders.asSequence()
+                .filter { operationsByOrder[it]?.action == PLAN_OPERATION_VERIFY }
+            coverage.copy(
                 scope = scope,
-                evidencePaths = selectorIdsByScope[index]
-                    .flatMap { pathsBySelector[it].orEmpty() }
-                    .distinct()
-                    .sorted(),
+                evidencePaths = evidencePaths,
+                operationOrders = (sourceOperationOrders + verificationOperationOrders).distinct().sorted().toList(),
             )
         },
     )
