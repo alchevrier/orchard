@@ -352,7 +352,8 @@ class RepositoryExecutionPlanStoreTest {
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )
         assertEquals(
-            "Scope coverage 2 cites a path without a corresponding source operation.",
+            "Scope coverage 2 cites paths without corresponding source operations: src/MainTest.kt. " +
+                "Linked source operation paths: <none>.",
             repositoryScopeCoverageDiagnostic(scope, verifyOnly),
         )
         val unmatchedEvidence = content.copy(
@@ -360,7 +361,8 @@ class RepositoryExecutionPlanStoreTest {
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
         )
         assertEquals(
-            "Scope coverage 2 cites a path without a corresponding source operation.",
+            "Scope coverage 2 cites paths without corresponding source operations: src/Other.kt. " +
+                "Linked source operation paths: src/Main.kt.",
             repositoryScopeCoverageDiagnostic(scope, unmatchedEvidence),
         )
         assertNull(

@@ -714,8 +714,11 @@ internal fun repositoryScopeCoverageDiagnostic(
                 .mapNotNull(operations::get)
                 .filter { it.action != PLAN_OPERATION_VERIFY }
                 .mapTo(hashSetOf()) { it.path }
-            if (coverage.evidencePaths.any { it !in linkedSourcePaths }) {
-                return "Scope coverage ${index + 1} cites a path without a corresponding source operation."
+            val missingSourcePaths = coverage.evidencePaths.filter { it !in linkedSourcePaths }.distinct().sorted()
+            if (missingSourcePaths.isNotEmpty()) {
+                val linked = linkedSourcePaths.sorted().joinToString(", ").ifBlank { "<none>" }
+                return "Scope coverage ${index + 1} cites paths without corresponding source operations: " +
+                    "${missingSourcePaths.joinToString(", ")}. Linked source operation paths: $linked."
             }
             if (requiresTestSource(coverage.scope) && linkedSourcePaths.none(::isTestSourcePath)) {
                 return "Scope coverage ${index + 1} requires a test source operation."
