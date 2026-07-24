@@ -489,13 +489,14 @@ class RepositoryAnalysisService(
         context: CodingRepositoryContext,
         output: RepositoryAnalysisPlanContent,
     ): String? {
-        repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
+        repositoryScopeIdentityDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
         repositoryRequiredScopeSourcePathsDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
             output,
         )?.let { return it }
+        repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), output)?.let { return it }
         repositoryUniversalScopeCoverageDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
@@ -684,21 +685,7 @@ internal fun repositoryScopeCoverageDiagnostic(
     acceptedScope: List<String>,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val required = acceptedScope.associateBy(::canonicalAuthorityText)
-    if (required.isEmpty()) return "The workflow has no accepted implementation scope to compile."
-    if (required.size != acceptedScope.size) return "The workflow has ambiguous accepted implementation scope."
-    val scopeCounts = output.scopeCoverage.groupingBy { canonicalAuthorityText(it.scope) }.eachCount()
-    val missing = required.filterKeys { scopeCounts[it] == null }.values
-    val duplicated = required.filterKeys { (scopeCounts[it] ?: 0) > 1 }.values
-    val unexpected = output.scopeCoverage.map { it.scope }.filter { canonicalAuthorityText(it) !in required }
-    if (missing.isNotEmpty() || duplicated.isNotEmpty() || unexpected.isNotEmpty()) {
-        return buildString {
-            append("Execution plan scope coverage must map every accepted scope clause exactly once.")
-            if (missing.isNotEmpty()) append(" Missing: ").append(missing.joinToString(" | "))
-            if (duplicated.isNotEmpty()) append(" Duplicated: ").append(duplicated.joinToString(" | "))
-            if (unexpected.isNotEmpty()) append(" Unexpected: ").append(unexpected.joinToString(" | "))
-        }
-    }
+    repositoryScopeIdentityDiagnostic(acceptedScope, output)?.let { return it }
     val evidencePaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val operations = output.operations.associateBy { it.order }
     val sourceOperationPaths = output.operations.filter { it.action != PLAN_OPERATION_VERIFY }.mapTo(hashSetOf()) { it.path }
@@ -723,6 +710,28 @@ internal fun repositoryScopeCoverageDiagnostic(
             if (requiresTestSource(coverage.scope) && linkedSourcePaths.none(::isTestSourcePath)) {
                 return "Scope coverage ${index + 1} requires a test source operation."
             }
+        }
+    }
+    return null
+}
+
+internal fun repositoryScopeIdentityDiagnostic(
+    acceptedScope: List<String>,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val required = acceptedScope.associateBy(::canonicalAuthorityText)
+    if (required.isEmpty()) return "The workflow has no accepted implementation scope to compile."
+    if (required.size != acceptedScope.size) return "The workflow has ambiguous accepted implementation scope."
+    val scopeCounts = output.scopeCoverage.groupingBy { canonicalAuthorityText(it.scope) }.eachCount()
+    val missing = required.filterKeys { scopeCounts[it] == null }.values
+    val duplicated = required.filterKeys { (scopeCounts[it] ?: 0) > 1 }.values
+    val unexpected = output.scopeCoverage.map { it.scope }.filter { canonicalAuthorityText(it) !in required }
+    if (missing.isNotEmpty() || duplicated.isNotEmpty() || unexpected.isNotEmpty()) {
+        return buildString {
+            append("Execution plan scope coverage must map every accepted scope clause exactly once.")
+            if (missing.isNotEmpty()) append(" Missing: ").append(missing.joinToString(" | "))
+            if (duplicated.isNotEmpty()) append(" Duplicated: ").append(duplicated.joinToString(" | "))
+            if (unexpected.isNotEmpty()) append(" Unexpected: ").append(unexpected.joinToString(" | "))
         }
     }
     return null

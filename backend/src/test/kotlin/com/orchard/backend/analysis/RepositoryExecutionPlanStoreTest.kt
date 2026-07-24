@@ -454,6 +454,20 @@ class RepositoryExecutionPlanStoreTest {
                 }),
             ),
         )
+        val misplacedTest = complete.copy(scopeCoverage = complete.scopeCoverage.map {
+            if (it.scope == scope[0]) {
+                it.copy(evidencePaths = listOf("frontend/src/test/TypographyTest.kt"), operationOrders = listOf(4))
+            } else {
+                it
+            }
+        })
+        assertNull(repositoryScopeIdentityDiagnostic(scope, misplacedTest))
+        assertEquals(
+            "Scope coverage 1 paths differ from deterministic scope authority. " +
+                "Expected: frontend/src/main/Inbox.kt, frontend/src/main/Theme.kt. " +
+                "Actual: frontend/src/test/TypographyTest.kt.",
+            repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, misplacedTest),
+        )
         assertEquals(
             "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(evidence = complete.evidence.take(1))),
