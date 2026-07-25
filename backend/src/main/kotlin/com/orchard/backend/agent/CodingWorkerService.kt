@@ -426,8 +426,28 @@ class CodingWorkerService(
         )
         val proposalHash = sha256(strictOutputJson.encodeToString(proposal))
         if (executionPlan != null) {
+            val rejectedAnchorDiagnostic = runCatching {
+                codingRejectedAnchorDiagnostic(
+                    proposal = proposal,
+                    attempts = attemptStore.load(),
+                    runId = run.runId,
+                    planId = executionPlan.planId,
+                    planHash = executionPlan.hash,
+                    repositoryContext = repositoryContext,
+                )
+            }.getOrElse { error ->
+                return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    error.message,
+                    modelExecution.executionId,
+                    proposalHash,
+                )
+            }
             val authorizationDiagnostic = codingProposalShapeDiagnostic(proposal)
                 ?: codingProposalAuthorizationDiagnostic(proposal, executionPlan)
+                ?: rejectedAnchorDiagnostic
             if (authorizationDiagnostic != null) {
                 val storageDiagnostic = recordCorrectiveRejection(
                     run.runId,
@@ -1091,6 +1111,45 @@ internal fun codingProposalShapeDiagnostic(proposal: CodingPatchProposal): Strin
     }
 }
 
+internal fun codingRejectedAnchorDiagnostic(
+    proposal: CodingPatchProposal,
+    attempts: List<CodingWorkerAttempt>,
+    runId: Long,
+    planId: Long,
+    planHash: String,
+    repositoryContext: CodingRepositoryContext,
+): String? {
+    val rejected = attempts.filter {
+        it.runId == runId &&
+            it.executionPlanId == planId &&
+            it.executionPlanHash == planHash &&
+            it.state == CODING_ATTEMPT_BLOCKED
+    }
+    proposal.operations.forEach { operation ->
+        operation.replacements.forEachIndexed { index, replacement ->
+            val fingerprint = rejectedReplacementAnchor(replacement.old)
+            val pathMarker = "REPLACE ${operation.path} "
+            if (rejected.any { pathMarker in it.diagnostic && fingerprint in it.diagnostic }) {
+                val declarations = repositoryContext.files.singleOrNull { it.path == operation.path }
+                    ?.matchedDeclarations
+                    .orEmpty()
+                    .take(MAX_REJECTED_ANCHOR_DECLARATIONS)
+                return buildString {
+                    append("The coding proposal reuses a previously rejected source anchor: REPLACE ")
+                    append(operation.path).append(" replacement ").append(index + 1).append("; ")
+                    append(fingerprint).append(". Select a different exact anchor from the supplied source.")
+                    if (declarations.isNotEmpty()) {
+                        append(" Source-backed declarations available for this path: ")
+                        append(declarations.joinToString(" | "))
+                        append('.')
+                    }
+                }
+            }
+        }
+    }
+    return null
+}
+
 internal fun codingProposalAuthorizationDiagnostic(
     proposal: CodingPatchProposal,
     plan: RepositoryExecutionPlan,
@@ -1136,3 +1195,5 @@ internal fun codingProposalAuthorizationDiagnostic(
         append('.')
     }
 }
+
+private const val MAX_REJECTED_ANCHOR_DECLARATIONS = 5

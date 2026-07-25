@@ -336,6 +336,56 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `coding proposal cannot reuse a rejected anchor for the same path`() {
+        val path = "src/Theme.kt"
+        val old = "fontFamily = FontFamily.Serif"
+        val attempts = listOf(CodingWorkerAttempt(
+            attemptId = 1,
+            runId = 19,
+            executionPlanId = 23,
+            executionPlanHash = "a".repeat(64),
+            state = CODING_ATTEMPT_BLOCKED,
+            resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+            diagnostic = "The coding proposal could not be applied: REPLACE $path replacement 1 old text occurs 0 times; " +
+                "expected exactly once; ${rejectedReplacementAnchor(old)}",
+        ))
+        val proposal = CodingPatchProposal(
+            summary = "Attempt the rejected theme anchor again.",
+            operations = listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(old, "fontFamily = FontFamily.Default")),
+            )),
+        )
+        val context = CodingRepositoryContext(listOf(CodingContextFile(
+            path = path,
+            content = "private fun OrchardTheme() = MaterialTheme()",
+            contentHash = "b".repeat(64),
+            matchedDeclarations = listOf("private fun OrchardTheme(content: @Composable () -> Unit)"),
+        )), 0)
+
+        val diagnostic = codingRejectedAnchorDiagnostic(
+            proposal,
+            attempts,
+            runId = 19,
+            planId = 23,
+            planHash = "a".repeat(64),
+            repositoryContext = context,
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("reuses a previously rejected source anchor"))
+        assertTrue(diagnostic.contains("private fun OrchardTheme"))
+        assertNull(codingRejectedAnchorDiagnostic(
+            proposal,
+            attempts,
+            runId = 20,
+            planId = 23,
+            planHash = "a".repeat(64),
+            repositoryContext = context,
+        ))
+    }
+
+    @Test
     fun `explicit retry rejects an active coding execution before resolving its plan`() {
         val store = TransientCodingWorkerStore()
         store.append(CodingWorkerEvent(eventId = 1, claim = claim(executionId = 1, runId = 19, attempt = 1)))
