@@ -30,12 +30,18 @@ object DefaultDeliveryWorkflow {
             add(EvidenceRequirement("BUILD", "A successful build against the resulting revision."))
             add(EvidenceRequirement("TEST", "A successful relevant test suite against the resulting revision."))
             workDefinition?.let { manifest ->
+                val acceptanceVerification = manifest.definition.acceptanceCriteria
+                    .map { it.verification.trim() }
+                    .filter(String::isNotBlank)
+                    .distinct()
+                    .singleOrNull()
                 add(
                     EvidenceRequirement(
                         "ACCEPTANCE",
                         manifest.definition.acceptanceCriteria.joinToString(" ") {
                             "${it.description} Verification: ${it.verification}"
                         },
+                        verification = acceptanceVerification,
                     )
                 )
             }

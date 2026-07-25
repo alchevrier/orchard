@@ -23,7 +23,7 @@ import com.orchard.backend.workspace.FileWorkflowMemoryStore
 import com.orchard.backend.workspace.FileWorkDefinitionStore
 import com.orchard.backend.workspace.FileWorkspaceRepository
 import com.orchard.backend.workspace.MESSAGE_READY
-import com.orchard.backend.workspace.RUN_STATE_DONE
+import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.StagedDeliveryPlanSubmission
 import com.orchard.backend.workspace.StagedPlanNodeSubmission
 import com.orchard.backend.workspace.StagedPlanStageSubmission
@@ -47,7 +47,7 @@ import kotlinx.serialization.json.Json
 
 class CodingWorkerTest {
     @Test
-    fun `governed worker commits and completes only through workflow evidence`() = runTest {
+    fun `governed worker does not substitute generic tests for acceptance evidence`() = runTest {
         val directory = createTempDirectory("orchard-coding-worker-e2e-")
         val repository = initializedRepository()
         val gradle = repository.resolve("gradlew")
@@ -82,7 +82,10 @@ class CodingWorkerTest {
                 scope = listOf("src/Main.kt"),
                 nonGoals = listOf("Changing build tooling"),
                 constraints = listOf("Keep the function signature"),
-                acceptanceCriteria = listOf(AcceptanceCriterion("The answer is forty two", "Run ./gradlew test")),
+                acceptanceCriteria = listOf(
+                    AcceptanceCriterion("The answer is forty two", "Inspect the returned value"),
+                    AcceptanceCriterion("The signature is preserved", "Review the source diff"),
+                ),
             ),
         )
         workspace.acceptStagedPlan(
@@ -123,8 +126,12 @@ class CodingWorkerTest {
         val result = worker.tick()
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
 
-        assertEquals(CodingWorkerTickStatus.CANDIDATE_COMPLETED, result.status)
-        assertEquals(CODING_EXECUTION_COMPLETED, requireNotNull(result.execution?.result).status)
+        assertEquals(CodingWorkerTickStatus.VERIFICATION_FAILED, result.status)
+        assertEquals(CODING_EXECUTION_FAILED, requireNotNull(result.execution?.result).status)
+        assertEquals(
+            "Evidence ACCEPTANCE has no admitted or repository verification command.",
+            result.execution?.result?.diagnostic,
+        )
         assertEquals("orchard.default-toolchains", result.execution?.claim?.toolchainPackId)
         assertEquals("gradle-wrapper", result.execution?.claim?.toolchainProfileId)
         assertTrue(requireNotNull(result.execution?.claim?.toolchainPolicyHash).matches(Regex("[0-9a-f]{64}")))
@@ -132,8 +139,8 @@ class CodingWorkerTest {
         assertTrue(model.prompt?.contains("Copy every REPLACE old value as one exact contiguous substring") == true)
         assertTrue(model.prompt?.contains("pairwise non-overlapping old values and order replacements from the bottom") == true)
         assertTrue(model.prompt?.contains("excerpt headers are context metadata, not repository source") == true)
-        assertEquals(RUN_STATE_DONE, run.state)
-        assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST", "ACCEPTANCE"), run.evidence.mapTo(hashSetOf()) { it.kind })
+        assertEquals(RUN_STATE_EVIDENCE_PENDING, run.state)
+        assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST"), run.evidence.mapTo(hashSetOf()) { it.kind })
         assertTrue(run.evidence.all { it.passed })
         assertEquals("fun answer() = 42\n", Files.readString(Path.of(run.context.repository.path).resolve("src/Main.kt")))
         assertEquals(8_000, model.maxOutputTokens)

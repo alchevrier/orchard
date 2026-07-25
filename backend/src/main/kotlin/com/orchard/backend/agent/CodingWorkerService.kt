@@ -747,7 +747,7 @@ class CodingWorkerService(
         VerificationInvocation(workspaceGateway.parseVerificationCommand(admitted), admitted)
     } ?: toolchainPolicy.commands[
         when (requirement.kind) {
-            "REGRESSION_TEST", "ACCEPTANCE" -> "TEST"
+            "REGRESSION_TEST" -> "TEST"
             else -> requirement.kind
         }
     ]?.let { command -> VerificationInvocation(command, command.canonical()) }
