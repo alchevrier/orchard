@@ -116,6 +116,37 @@ class CodingWorkspaceGatewayTest {
         assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 12 * 1024)
     }
 
+    @Test
+    fun `plan context preserves every pinned path within corrective retry aperture`() {
+        val repository = createTempDirectory("orchard-plan-retry-context-")
+        git(repository, "init")
+        val paths = (1..5).map { index -> "src/Owner$index.kt" }
+        Files.createDirectories(repository.resolve("src"))
+        paths.forEachIndexed { index, path ->
+            Files.writeString(
+                repository.resolve(path),
+                "class Owner${index + 1}\n" + "val platformTypography${index + 1} = true\n".repeat(200),
+            )
+        }
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        val revision = gitOutput(repository, "rev-parse", "HEAD")
+
+        val context = LocalCodingWorkspaceGateway().collectPlanContext(
+            repository.toString(),
+            revision,
+            paths,
+            "platform typography",
+            2 * 1024,
+        )
+
+        assertEquals(paths, context.files.map { it.path })
+        assertEquals(0, context.omittedFileCount)
+        assertTrue(context.files.all { it.contentHash.matches(Regex("[0-9a-f]{64}")) })
+        assertTrue(context.files.all { it.content.isNotEmpty() })
+        assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 2 * 1024)
+    }
+
     private companion object {
         val contextJson = Json { encodeDefaults = true }
     }

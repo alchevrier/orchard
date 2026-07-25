@@ -702,7 +702,7 @@ class LocalCodingWorkspaceGateway(
         const val MAX_CONTEXT_FILE_BYTES = 64 * 1024
         const val MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024L
         const val MAX_CONTEXT_BYTES = 256 * 1024
-        const val MIN_PLAN_CONTEXT_FILE_BYTES = 512
+        const val MIN_PLAN_CONTEXT_FILE_BYTES = 128
         const val MAX_ANALYSIS_CONTEXT_FILES = 96
         const val MAX_ANALYSIS_CONTEXT_BYTES = 768 * 1024
         const val MAX_ANALYSIS_CONTEXT_FILE_BYTES = 12 * 1024
