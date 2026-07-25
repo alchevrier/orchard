@@ -458,7 +458,8 @@ class CodingWorkerTest {
         }
 
         assertEquals(
-            "REPLACE src/Main.kt replacement 1 old text occurs 2 times; expected exactly once",
+            "REPLACE src/Main.kt replacement 1 old text occurs 2 times; expected exactly once; " +
+                rejectedReplacementAnchor("fun answer() = 1"),
             error.message,
         )
         assertEquals("fun answer() = 1\nfun answer() = 1\n", Files.readString(source))
@@ -494,7 +495,8 @@ class CodingWorkerTest {
 
         assertEquals(
             "REPLACE src/Main.kt replacement 2 old text occurs 0 times after prior replacements but once in the original source; " +
-                "replacements must use non-overlapping anchors ordered from bottom to top",
+                "replacements must use non-overlapping anchors ordered from bottom to top; " +
+                rejectedReplacementAnchor("fun label() = \"mono\""),
             error.message,
         )
         assertEquals(original, Files.readString(source))

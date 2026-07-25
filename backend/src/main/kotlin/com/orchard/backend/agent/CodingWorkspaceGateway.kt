@@ -22,6 +22,7 @@ import kotlinx.serialization.json.Json
 const val CODING_FILE_WRITE = "WRITE"
 const val CODING_FILE_DELETE = "DELETE"
 const val CODING_FILE_REPLACE = "REPLACE"
+private const val MAX_REJECTED_ANCHOR_PREVIEW_CHARS = 512
 
 @Serializable
 data class CodingContextFile(
@@ -404,11 +405,14 @@ class LocalCodingWorkspaceGateway(
                         val occurrenceCount = exactOccurrenceCount(candidate, replacement.old)
                         require(occurrenceCount == 1) {
                             val originalOccurrenceCount = exactOccurrenceCount(original, replacement.old)
+                            val anchor = rejectedReplacementAnchor(replacement.old)
                             if (occurrenceCount == 0 && originalOccurrenceCount == 1 && index > 0) {
                                 "REPLACE ${operation.path} replacement ${index + 1} old text occurs 0 times after prior replacements " +
-                                    "but once in the original source; replacements must use non-overlapping anchors ordered from bottom to top"
+                                    "but once in the original source; replacements must use non-overlapping anchors ordered from bottom to top; " +
+                                    anchor
                             } else {
-                                "REPLACE ${operation.path} replacement ${index + 1} old text occurs $occurrenceCount times; expected exactly once"
+                                "REPLACE ${operation.path} replacement ${index + 1} old text occurs $occurrenceCount times; expected exactly once; " +
+                                    anchor
                             }
                         }
                         candidate = candidate.replaceFirst(replacement.old, replacement.new)
@@ -766,6 +770,12 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
             .takeWhile { it.encodeToByteArray().size <= maxBytes }
             .lastOrNull().orEmpty()
     }
+}
+
+internal fun rejectedReplacementAnchor(old: String): String {
+    val preview = old.take(MAX_REJECTED_ANCHOR_PREVIEW_CHARS)
+    val suffix = if (preview.length == old.length) "" else " (preview truncated)"
+    return "rejected old text ${Json.encodeToString(preview)}$suffix, sha256 ${sha256Content(old)}"
 }
 
 internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>): List<String> {
