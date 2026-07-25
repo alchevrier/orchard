@@ -31,6 +31,7 @@ import com.orchard.backend.company.CompanyCircuitStatus
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.CompanyProjectView
+import com.orchard.backend.company.FileCompanyAuditAttemptStore
 import com.orchard.backend.company.FileCompanyControlStore
 import com.orchard.backend.conversation.ConversationConductorService
 import com.orchard.backend.conversation.FileConversationStore
@@ -276,6 +277,8 @@ fun main() {
         companyControl,
         LocalCodingWorkspaceGateway(FileToolchainPolicyCatalog(OrchardPaths.TOOLCHAIN_POLICY_PACKS_DIR)),
         resourceController,
+        modelProfileSettingsStore,
+        FileCompanyAuditAttemptStore(OrchardPaths.WORKSPACE_DIR),
     )
     val repositoryOnboarding = RepositoryOnboardingService(workspace, OrchardPaths.LOCAL_REPOSITORIES_DIR)
     val conversationConductor = ConversationConductorService(
@@ -368,6 +371,13 @@ fun main() {
                 coroutineScope {
                     conversationConductor.dispatchableRunIds(companyAudit.eligibleRunIds())
                         .map { runId -> async { companyAudit.tick(runId) } }.awaitAll()
+                        .filter { it.status != com.orchard.backend.company.CompanyAuditTickStatus.IDLE }
+                        .forEach { result ->
+                            AUDIT_LOGGER.log(
+                                Level.INFO,
+                                "Independent company audit tick resolved as ${result.status} for run ${result.runId}: ${result.diagnostic}",
+                            )
+                        }
                 }
             }.onFailure { error ->
                 AUDIT_LOGGER.log(Level.WARNING, "Independent company audit tick failed", error)
@@ -408,6 +418,7 @@ fun main() {
             conversationConductor,
             projectReports,
             repositoryIntelligenceImporter,
+            companyAudit,
         )
     }
     Runtime.getRuntime().addShutdownHook(Thread {
@@ -440,6 +451,7 @@ fun Application.workspaceApi(
     conversationConductor: ConversationConductorService? = null,
     projectReports: ProjectReportService? = null,
     repositoryIntelligenceImporter: RepositoryIntelligenceImporter? = null,
+    companyAudit: CompanyAuditService? = null,
 ) {
     configureJson()
     routing {
@@ -800,6 +812,20 @@ fun Application.workspaceApi(
                 else -> HttpStatusCode.Conflict
             }
             call.respond(status, workspaceResponse(workspace, companyControl))
+        }
+        post("/api/company-audits/runs/{runId}/retry") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (runId == null || runId <= 0 || companyAudit == null) {
+                call.respond(if (runId == null || runId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = companyAudit.authorizeRetry(runId)
+            val status = when (result.status) {
+                com.orchard.backend.company.CompanyAuditTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
+                com.orchard.backend.company.CompanyAuditTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+                else -> HttpStatusCode.Conflict
+            }
+            call.respond(status, result)
         }
         post("/api/projects/{projectId}/genesis") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()

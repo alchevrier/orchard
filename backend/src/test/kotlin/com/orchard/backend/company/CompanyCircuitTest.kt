@@ -1,5 +1,6 @@
 package com.orchard.backend.company
 
+import com.orchard.backend.workspaceApi
 import com.orchard.backend.analysis.DISPOSITION_PARTIALLY_IMPLEMENTED
 import com.orchard.backend.analysis.DISPOSITION_SCAFFOLD_ONLY
 import com.orchard.backend.analysis.ExecutionPlanOperation
@@ -30,8 +31,10 @@ import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelGeneration
+import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
+import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.ArchitectureComponent
@@ -61,6 +64,9 @@ import com.orchard.backend.workspace.RepositoryBlueprint
 import com.orchard.backend.workspace.WorkspaceStore
 import java.nio.file.Files
 import java.nio.file.Path
+import io.ktor.client.request.post
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.testing.testApplication
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -383,9 +389,59 @@ class CompanyCircuitTest {
         val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
         assertTrue(company.projectView(1).escalations.any { it.runId == runId && it.requiredRole == ROLE_IMPLEMENTER })
 
-        val audit = CompanyAuditService(workspace, worker, company, LocalCodingWorkspaceGateway())
+        val auditProfileSettings = TransientModelProfileSettingsStore().also { settings ->
+            settings.save(
+                listOf(
+                    ModelProfileOverride(
+                        DefaultModelExecutionProfiles.boundedIndependentAudit.id,
+                        80_000,
+                        6_000,
+                    )
+                )
+            )
+        }
+        val audit = CompanyAuditService(
+            workspace,
+            worker,
+            company,
+            LocalCodingWorkspaceGateway(),
+            profileSettingsStore = auditProfileSettings,
+        )
+        val invalid = audit.tick()
+        assertEquals(CompanyAuditTickStatus.INVALID_JUDGMENT, invalid.status, invalid.diagnostic)
+        assertTrue(invalid.diagnostic.contains("blank summary"))
+        val rejectedCorrection = audit.tick()
+        assertEquals(CompanyAuditTickStatus.MODEL_FAILED, rejectedCorrection.status, rejectedCorrection.diagnostic)
+        assertEquals(CompanyAuditTickStatus.IDLE, audit.tick().status)
+        assertEquals(2, staff.auditCallCount)
+        testApplication {
+            application { workspaceApi(workspace, companyControl = company, companyAudit = audit) }
+            val retry = client.post("/api/company-audits/runs/$runId/retry")
+            assertEquals(HttpStatusCode.Accepted, retry.status)
+        }
         val violation = audit.tick()
         assertEquals(CompanyAuditTickStatus.VIOLATION, violation.status, violation.diagnostic)
+        assertEquals(6_000, staff.auditMaxOutputTokens)
+        assertEquals(86_000, staff.auditContextWindowTokens)
+        assertTrue(staff.auditCorrectionDiagnosticObserved)
+        val persistedAudit = company.projectView(1).audits.last()
+        val candidateEvidenceIds = workspace.snapshot(MESSAGE_READY).workflowRuns.single().evidence
+            .filter { it.revision == persistedAudit.candidateRevision }
+            .map { it.evidenceId }
+            .distinct()
+            .sorted()
+        assertTrue(persistedAudit.findings.all { it.evidenceIds == candidateEvidenceIds })
+        assertEquals(
+            listOf(
+                AUDIT_ATTEMPT_BLOCKED,
+                AUDIT_ATTEMPT_RETRY_AUTHORIZED,
+                AUDIT_ATTEMPT_RETRY_CONSUMED,
+                AUDIT_ATTEMPT_BLOCKED,
+                AUDIT_ATTEMPT_RETRY_AUTHORIZED,
+                AUDIT_ATTEMPT_RETRY_CONSUMED,
+            ),
+            audit.attempts().map { it.state },
+        )
         assertEquals("EVIDENCE_BLOCKED", workspace.snapshot(MESSAGE_READY).workflowRuns.single().state)
         assertEquals(CodingWorkerTickStatus.PLAN_STALE, worker.tick().status)
         assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick().status)
@@ -721,6 +777,13 @@ class CompanyCircuitTest {
         private var auditCalls = 0
         private var analysisCalls = 0
         val codingCallCount: Int get() = codingCalls
+        val auditCallCount: Int get() = auditCalls
+        var auditMaxOutputTokens: Int? = null
+            private set
+        var auditContextWindowTokens: Int? = null
+            private set
+        var auditCorrectionDiagnosticObserved = false
+            private set
 
         override suspend fun triage(prompt: String): String = "{}"
 
@@ -837,15 +900,28 @@ class CompanyCircuitTest {
             maxOutputTokens: Int,
             contextWindowTokens: Int,
         ): ModelGeneration {
+            auditMaxOutputTokens = maxOutputTokens
+            auditContextWindowTokens = contextWindowTokens
+            val auditCall = auditCalls++
+            if (auditCall in 1..2) {
+                auditCorrectionDiagnosticObserved = auditCorrectionDiagnosticObserved || prompt.contains("blank summary")
+            }
+            if (auditCall == 1) error("audit provider unavailable")
             val ruleIds = Regex("\\\"ruleId\\\":\\\"([^\\\"]+)\\\"")
                 .findAll(prompt).map { it.groupValues[1] }.distinct().toList()
-            val evidenceIds = Regex("\\\"evidenceId\\\":([0-9]+)")
-                .findAll(prompt).map { it.groupValues[1].toLong() }.distinct().toList()
-            val status = if (auditCalls++ == 0) AUDIT_VIOLATION else AUDIT_CONFORMING
+            val status = if (auditCall <= 2) AUDIT_VIOLATION else AUDIT_CONFORMING
             val output = Json.encodeToString(
                 AuditProposalOutput(
                     findings = ruleIds.map {
-                        AuditFinding(it, status, if (status == AUDIT_VIOLATION) "The first candidate violates the admitted rule." else "The repaired candidate conforms.", evidenceIds)
+                        AuditFindingOutput(
+                            it,
+                            status,
+                            if (auditCall <= 1) "" else if (status == AUDIT_VIOLATION) {
+                                "The first candidate violates the admitted rule."
+                            } else {
+                                "The repaired candidate conforms."
+                            },
+                        )
                     },
                     rationale = if (status == AUDIT_VIOLATION) {
                         "The candidate violates admitted architecture and requires repair."
@@ -868,7 +944,14 @@ class CompanyCircuitTest {
 
     @Serializable
     private data class AuditProposalOutput(
-        val findings: List<AuditFinding>,
+        val findings: List<AuditFindingOutput>,
         val rationale: String,
+    )
+
+    @Serializable
+    private data class AuditFindingOutput(
+        val ruleId: String,
+        val status: String,
+        val summary: String,
     )
 }
