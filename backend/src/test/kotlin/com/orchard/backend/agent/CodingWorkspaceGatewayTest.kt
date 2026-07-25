@@ -120,8 +120,10 @@ class CodingWorkspaceGatewayTest {
     fun `plan context preserves every pinned path within corrective retry aperture`() {
         val repository = createTempDirectory("orchard-plan-retry-context-")
         git(repository, "init")
-        val paths = (1..5).map { index -> "src/Owner$index.kt" }
-        Files.createDirectories(repository.resolve("src"))
+        val paths = (1..5).map { index ->
+            "frontend/src/desktopMain/kotlin/com/orchard/frontend/ui/Owner$index.kt"
+        }
+        Files.createDirectories(repository.resolve("frontend/src/desktopMain/kotlin/com/orchard/frontend/ui"))
         paths.forEachIndexed { index, path ->
             Files.writeString(
                 repository.resolve(path),
@@ -137,14 +139,14 @@ class CodingWorkspaceGatewayTest {
             revision,
             paths,
             "platform typography",
-            2 * 1024,
+            1_600,
         )
 
         assertEquals(paths, context.files.map { it.path })
         assertEquals(0, context.omittedFileCount)
         assertTrue(context.files.all { it.contentHash.matches(Regex("[0-9a-f]{64}")) })
         assertTrue(context.files.all { it.content.isNotEmpty() })
-        assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 2 * 1024)
+        assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 1_600)
     }
 
     private companion object {
