@@ -1032,17 +1032,24 @@ internal fun codingProposalAuthorizationDiagnostic(
             else -> true
         }
     }
-    if (proposal.operations.isNotEmpty() && unauthorized.isEmpty()) return null
+    val proposedPaths = proposal.operations.mapTo(mutableSetOf()) { it.path }
+    val missing = authority.filterKeys { it !in proposedPaths }
+    if (proposal.operations.isNotEmpty() && unauthorized.isEmpty() && missing.isEmpty()) return null
     return buildString {
-        append("The coding proposal exceeds the accepted execution-plan path or action scope.")
+        append("The coding proposal does not exactly cover the accepted execution-plan path and action scope.")
         if (proposal.operations.isEmpty()) {
             append(" The proposal contains no coding operations.")
-        } else {
+        } else if (unauthorized.isNotEmpty()) {
             append(" Unauthorized coding operations: ")
             append(unauthorized.map { "${it.action} ${it.path}" }.distinct().sorted().joinToString(" | "))
             append('.')
         }
-        append(" Allowed execution-plan operations: ")
+        if (missing.isNotEmpty()) {
+            append(" Missing required execution-plan operations: ")
+            append(missing.entries.sortedBy { it.key }.joinToString(" | ") { (path, action) -> "$action $path" })
+            append('.')
+        }
+        append(" Required execution-plan operations: ")
         append(
             authority.entries.sortedBy { it.key }.joinToString(" | ") { (path, action) ->
                 val codingActions = when (action) {

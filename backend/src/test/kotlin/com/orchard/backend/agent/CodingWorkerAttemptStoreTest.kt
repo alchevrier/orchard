@@ -78,6 +78,35 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
+    fun `proposal diagnostic rejects omitted required plan paths`() {
+        val plan = executionPlan()
+        val diagnostic = codingProposalAuthorizationDiagnostic(
+            CodingPatchProposal(
+                summary = "Change only one admitted file.",
+                operations = listOf(
+                    CodingFileOperation(CODING_FILE_REPLACE, "src/Allowed.kt", replacements = emptyList()),
+                ),
+            ),
+            plan.copy(
+                content = plan.content.copy(
+                    operations = plan.content.operations + ExecutionPlanOperation(
+                        order = 2,
+                        action = PLAN_OPERATION_MODIFY,
+                        path = "src/AlsoRequired.kt",
+                        instruction = "Make the second admitted change.",
+                        acceptanceCriteria = listOf("The second admitted change is present."),
+                    ),
+                ),
+            ),
+        )
+
+        assertNotNull(diagnostic)
+        assertTrue(diagnostic.contains("Missing required execution-plan operations: MODIFY src/AlsoRequired.kt."))
+        assertTrue(diagnostic.contains("MODIFY src/Allowed.kt permits REPLACE"))
+        assertTrue(diagnostic.contains("MODIFY src/AlsoRequired.kt permits REPLACE"))
+    }
+
+    @Test
     fun `proposal shape diagnostic rejects incomplete replacements before scope acceptance`() {
         val diagnostic = codingProposalShapeDiagnostic(
             CodingPatchProposal(
