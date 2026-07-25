@@ -128,6 +128,9 @@ class CodingWorkerTest {
         assertEquals("orchard.default-toolchains", result.execution?.claim?.toolchainPackId)
         assertEquals("gradle-wrapper", result.execution?.claim?.toolchainProfileId)
         assertTrue(requireNotNull(result.execution?.claim?.toolchainPolicyHash).matches(Regex("[0-9a-f]{64}")))
+        assertTrue(requireNotNull(model.prompt).contains("Plan instructions describe intent and do not prove that any literal exists."))
+        assertTrue(model.prompt?.contains("Copy every REPLACE old value as one exact contiguous substring") == true)
+        assertTrue(model.prompt?.contains("excerpt headers are context metadata, not repository source") == true)
         assertEquals(RUN_STATE_DONE, run.state)
         assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST", "ACCEPTANCE"), run.evidence.mapTo(hashSetOf()) { it.kind })
         assertTrue(run.evidence.all { it.passed })
@@ -769,6 +772,7 @@ class CodingWorkerTest {
         var maxOutputTokens: Int? = null
         var contextWindowTokens: Int? = null
         var resourceDemandInputTokens: Int? = null
+        var prompt: String? = null
 
         override suspend fun triage(prompt: String): String = error("Unsupported")
 
@@ -800,6 +804,7 @@ class CodingWorkerTest {
             maxOutputTokens: Int,
             contextWindowTokens: Int,
         ): ModelGeneration {
+            this.prompt = prompt
             this.maxOutputTokens = maxOutputTokens
             this.contextWindowTokens = contextWindowTokens
             return ModelGeneration(output, prompt.length, output.length)
