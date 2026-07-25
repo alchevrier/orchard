@@ -1130,14 +1130,18 @@ internal fun codingRejectedAnchorDiagnostic(
             val fingerprint = rejectedReplacementAnchor(replacement.old)
             val pathMarker = "REPLACE ${operation.path} "
             if (rejected.any { pathMarker in it.diagnostic && fingerprint in it.diagnostic }) {
-                val declarations = repositoryContext.files.singleOrNull { it.path == operation.path }
-                    ?.matchedDeclarations
-                    .orEmpty()
-                    .take(MAX_REJECTED_ANCHOR_DECLARATIONS)
+                val contextFile = repositoryContext.files.singleOrNull { it.path == operation.path }
+                val declarations = contextFile?.matchedDeclarations.orEmpty().take(MAX_REJECTED_ANCHOR_DECLARATIONS)
+                val anchors = contextFile?.let(::sourceBackedDeclarationAnchors).orEmpty()
                 return buildString {
                     append("The coding proposal reuses a previously rejected source anchor: REPLACE ")
                     append(operation.path).append(" replacement ").append(index + 1).append("; ")
                     append(fingerprint).append(". Select a different exact anchor from the supplied source.")
+                    if (anchors.isNotEmpty()) {
+                        append(" Exact contiguous source text near matched declarations: ")
+                        append(anchors.joinToString(" | ") { Json.encodeToString(it) })
+                        append('.')
+                    }
                     if (declarations.isNotEmpty()) {
                         append(" Source-backed declarations available for this path: ")
                         append(declarations.joinToString(" | "))
@@ -1148,6 +1152,26 @@ internal fun codingRejectedAnchorDiagnostic(
         }
     }
     return null
+}
+
+internal fun sourceBackedDeclarationAnchors(contextFile: CodingContextFile): List<String> {
+    val sourceLines = contextFile.content.lineSequence()
+        .filterNot { it.startsWith("[Orchard excerpt lines ") }
+        .toList()
+    return contextFile.matchedDeclarations.asSequence().mapNotNull { declaration ->
+        val declarationIndex = sourceLines.indexOfFirst { line ->
+            val trimmed = line.trim()
+            trimmed == declaration || trimmed.startsWith(declaration)
+        }
+        declarationIndex.takeIf { it >= 0 }?.let { index ->
+            sourceLines.subList(index, minOf(index + SOURCE_ANCHOR_LINES, sourceLines.size))
+                .joinToString("\n")
+                .trimEnd()
+        }
+    }.filter(String::isNotEmpty)
+        .distinct()
+        .take(MAX_REJECTED_ANCHOR_EXAMPLES)
+        .toList()
 }
 
 internal fun codingProposalAuthorizationDiagnostic(
@@ -1197,3 +1221,5 @@ internal fun codingProposalAuthorizationDiagnostic(
 }
 
 private const val MAX_REJECTED_ANCHOR_DECLARATIONS = 5
+private const val MAX_REJECTED_ANCHOR_EXAMPLES = 2
+private const val SOURCE_ANCHOR_LINES = 4

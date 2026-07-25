@@ -359,7 +359,15 @@ class CodingWorkerTest {
         )
         val context = CodingRepositoryContext(listOf(CodingContextFile(
             path = path,
-            content = "private fun OrchardTheme() = MaterialTheme()",
+            content = """[Orchard excerpt lines 40-46 of 100]
+                |@Composable
+                |private fun OrchardTheme(content: @Composable () -> Unit) {
+                |    MaterialTheme(
+                |        colors = MaterialTheme.colors.copy(
+                |            primary = OrchardColors.moss,
+                |        ),
+                |        content = content,
+                |""".trimMargin(),
             contentHash = "b".repeat(64),
             matchedDeclarations = listOf("private fun OrchardTheme(content: @Composable () -> Unit)"),
         )), 0)
@@ -375,6 +383,9 @@ class CodingWorkerTest {
 
         assertTrue(requireNotNull(diagnostic).contains("reuses a previously rejected source anchor"))
         assertTrue(diagnostic.contains("private fun OrchardTheme"))
+    assertTrue(diagnostic.contains("Exact contiguous source text near matched declarations"))
+    assertTrue(diagnostic.contains("MaterialTheme.colors.copy"))
+    assertTrue(!diagnostic.contains("[Orchard excerpt lines"))
         assertNull(codingRejectedAnchorDiagnostic(
             proposal,
             attempts,
