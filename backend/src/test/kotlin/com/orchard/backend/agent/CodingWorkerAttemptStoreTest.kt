@@ -98,6 +98,7 @@ class CodingWorkerAttemptStoreTest {
         attemptStore.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_SCOPE_ACCEPTED, "Scope accepted.") }
         val workerStore = TransientCodingWorkerStore()
         appendApplicationFailure(workerStore)
+        appendActiveClaim(workerStore)
 
         CodingWorkerService(
             workspace = WorkspaceStore(),
@@ -187,6 +188,22 @@ class CodingWorkerAttemptStoreTest {
             hash = "",
         )
         store.append(CodingWorkerEvent(eventId = 2, result = resultDraft.copy(hash = codingWorkerResultHash(resultDraft))))
+    }
+
+    private fun appendActiveClaim(store: CodingWorkerStore) {
+        val claimDraft = CodingWorkerClaim(
+            executionId = 3,
+            runId = RUN_ID,
+            attempt = 2,
+            contextHash = "a".repeat(64),
+            workspacePath = "/tmp/orchard-application-failure-worktree",
+            bindingFingerprint = "b".repeat(64),
+            executionPlanId = PLAN_ID,
+            executionPlanHash = PLAN_HASH,
+            claimedAt = "2026-06-22T00:00:03Z",
+            hash = "",
+        )
+        store.append(CodingWorkerEvent(eventId = 3, claim = claimDraft.copy(hash = codingWorkerClaimHash(claimDraft))))
     }
 
     private fun executionPlan() = RepositoryExecutionPlan(

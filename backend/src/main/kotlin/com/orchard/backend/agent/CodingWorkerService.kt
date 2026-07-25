@@ -844,6 +844,7 @@ class CodingWorkerService(
     private fun bootstrapApplicationFailureBlocks() {
         val attempts = attemptStore.load()
         codingWorkerExecutions(workerStore.loadEvents())
+            .filter { it.result != null }
             .groupBy { it.claim.runId }
             .values
             .mapNotNull { executions -> executions.maxByOrNull { it.claim.executionId } }
