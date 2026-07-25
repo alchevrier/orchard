@@ -13,8 +13,18 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 class CodingWorkerAttemptStoreTest {
+    @Test
+    fun `only explicit retry authority releases a blocked coding execution`() {
+        assertTrue(codingExecutionBlockRemains(CODING_EXECUTION_BLOCKED, null))
+        assertTrue(codingExecutionBlockRemains(CODING_EXECUTION_BLOCKED, CODING_ATTEMPT_BLOCKED))
+        assertTrue(codingExecutionBlockRemains(CODING_EXECUTION_BLOCKED, CODING_ATTEMPT_RETRY_CONSUMED))
+        assertFalse(codingExecutionBlockRemains(CODING_EXECUTION_BLOCKED, CODING_ATTEMPT_RETRY_AUTHORIZED))
+        assertFalse(codingExecutionBlockRemains(CODING_EXECUTION_FAILED, CODING_ATTEMPT_BLOCKED))
+    }
+
     @Test
     fun `coding retry authorization is durable and consumed by exactly one successor`() {
         val directory = createTempDirectory("orchard-coding-attempts-")

@@ -542,9 +542,22 @@ class CodingWorkerService(
     private fun candidateRuns(executions: List<CodingWorkerExecutionView>): List<WorkflowRunView> {
         val repairExecutions = executions.filter { it.result?.status in REPAIR_ATTEMPT_STATUSES }
             .groupBy { it.claim.runId }
+        val latestPlanClaims = executions.groupBy { it.claim.runId }.mapValues { (_, runExecutions) ->
+            runExecutions.maxBy { it.claim.executionId }.claim
+        }
+        val codingAttempts = attemptStore.load()
+        val latestAuthorityStates = latestPlanClaims.mapValues { (runId, claim) ->
+            if (claim.executionPlanId != null && claim.executionPlanHash != null) {
+                codingAttempts.lastOrNull {
+                    it.runId == runId &&
+                        it.executionPlanId == claim.executionPlanId &&
+                        it.executionPlanHash == claim.executionPlanHash
+                }?.state
+            } else null
+        }
         val blockedRuns = executions.groupBy { it.claim.runId }.mapNotNull { (runId, runExecutions) ->
             runExecutions.maxByOrNull { it.claim.executionId }?.result
-                ?.takeIf { it.status == CODING_EXECUTION_BLOCKED }
+                ?.takeIf { codingExecutionBlockRemains(it.status, latestAuthorityStates[runId]) }
                 ?.let { runId }
         }.toSet()
         val deferredRuns = executions.groupBy { it.claim.runId }.mapNotNull { (runId, runExecutions) ->
@@ -553,10 +566,6 @@ class CodingWorkerService(
                 ?.let { runId }
         }.toSet()
         val activeRuns = executions.filter { it.result == null }.mapTo(hashSetOf()) { it.claim.runId }
-        val latestPlanClaims = executions.groupBy { it.claim.runId }.mapValues { (_, runExecutions) ->
-            runExecutions.maxBy { it.claim.executionId }.claim
-        }
-        val codingAttempts = attemptStore.load()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
             .filter { run ->
@@ -963,6 +972,9 @@ class CodingWorkerService(
         }
     }
 }
+
+internal fun codingExecutionBlockRemains(executionStatus: String?, authorityState: String?): Boolean =
+    executionStatus == CODING_EXECUTION_BLOCKED && authorityState != CODING_ATTEMPT_RETRY_AUTHORIZED
 
 internal fun codingRejectionIsRepeated(
     attempts: List<CodingWorkerAttempt>,
