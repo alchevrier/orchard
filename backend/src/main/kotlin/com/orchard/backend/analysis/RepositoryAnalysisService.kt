@@ -952,7 +952,7 @@ private fun requiresSourceOperation(scope: String): Boolean = canonicalAuthority
 
 private fun requiresTestSource(scope: String): Boolean {
     val normalized = canonicalAuthorityText(scope).lowercase()
-    return normalized.substringBefore(' ') == "add" && ("test" in normalized || "regression" in normalized)
+    return "test" in normalized || "regression" in normalized
 }
 
 private fun isTestSourcePath(path: String): Boolean {

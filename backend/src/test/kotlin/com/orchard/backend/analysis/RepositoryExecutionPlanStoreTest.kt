@@ -434,6 +434,25 @@ class RepositoryExecutionPlanStoreTest {
                 }),
             ),
         )
+        val declarativeRegressionScope = listOf(
+            "Deterministic typography regression coverage in frontend/src/desktopTest/kotlin/TypographyTest.kt"
+        )
+        assertEquals(
+            "Scope coverage 1 requires a test source operation.",
+            repositoryScopeCoverageDiagnostic(
+                declarativeRegressionScope,
+                verifyOnly.copy(
+                    scopeCoverage = listOf(
+                        ExecutionPlanScopeCoverage(
+                            declarativeRegressionScope.single(),
+                            listOf("src/MainTest.kt"),
+                            listOf(1),
+                            compliantEvidencePaths = listOf("src/MainTest.kt"),
+                        )
+                    ),
+                ),
+            ),
+        )
         val unmatchedEvidence = content.copy(
             evidence = content.evidence + RepositoryEvidenceCitation("src/Other.kt", null, "Another owner.", "d".repeat(64)),
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
