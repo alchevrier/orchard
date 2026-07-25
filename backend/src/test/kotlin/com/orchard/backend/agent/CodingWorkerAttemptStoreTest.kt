@@ -47,6 +47,29 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
+    fun `coding retry context bounds historical defects and keeps the current rejection`() {
+        val store = TransientCodingWorkerAttemptStore()
+        repeat(7) { index ->
+            store.appendNext { attemptId ->
+                attempt(attemptId, CODING_ATTEMPT_BLOCKED, "Historical defect $index: ${"x".repeat(700)}")
+            }
+        }
+        val current = "The proposal contains no coding operations."
+        store.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_BLOCKED, current) }
+        store.appendNext { attemptId ->
+            attempt(attemptId, CODING_ATTEMPT_RETRY_AUTHORIZED, "Human authorized one focused successor.")
+        }
+
+        val diagnostic = requireNotNull(store.retryDiagnostic(RUN_ID, PLAN_ID, PLAN_HASH))
+
+        assertTrue(diagnostic.contains(current))
+        assertTrue(diagnostic.contains("Historical defect 6"))
+        assertTrue(diagnostic.contains("Historical defect 2"))
+        assertFalse(diagnostic.contains("Historical defect 1"))
+        assertTrue(diagnostic.length < 3_200)
+    }
+
+    @Test
     fun `proposal diagnostic reports exact unauthorized and allowed action paths`() {
         val diagnostic = codingProposalAuthorizationDiagnostic(
             CodingPatchProposal(

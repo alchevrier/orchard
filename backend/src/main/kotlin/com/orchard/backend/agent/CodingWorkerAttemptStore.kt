@@ -125,7 +125,11 @@ fun CodingWorkerAttemptStore.retryDiagnostic(
         .filter { it.state == CODING_ATTEMPT_BLOCKED }
         .map { it.diagnostic }
     val current = blockedDiagnostics.lastOrNull() ?: return null
-    val previous = blockedDiagnostics.distinct().filter { it != current }
+    val previous = blockedDiagnostics.asReversed()
+        .distinct()
+        .filter { it != current }
+        .take(MAX_PRIOR_RETRY_DIAGNOSTICS)
+        .asReversed()
     return buildString {
         append("Current coding rejection (")
         append(blockedDiagnostics.count { it == current })
@@ -133,11 +137,14 @@ fun CodingWorkerAttemptStore.retryDiagnostic(
         if (blockedDiagnostics.count { it == current } != 1) append('s')
         append("): ").append(current)
         if (previous.isNotEmpty()) {
-            append("\nPreviously rejected coding defects that must remain fixed:")
-            previous.forEach { append("\n- ").append(it) }
+            append("\nRecent prior coding defects remain enforced by deterministic admission:")
+            previous.forEach { append("\n- ").append(it.take(MAX_PRIOR_RETRY_DIAGNOSTIC_CHARS)) }
         }
     }
 }
+
+private const val MAX_PRIOR_RETRY_DIAGNOSTICS = 5
+private const val MAX_PRIOR_RETRY_DIAGNOSTIC_CHARS = 512
 
 private fun validateCodingWorkerAttempt(
     attempt: CodingWorkerAttempt,
