@@ -350,6 +350,8 @@ fun main() {
             delay(CODING_INTERVAL_MILLIS)
             runCatching {
                 coroutineScope {
+                    codingWorker.interruptedRunIds()
+                        .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
                     conversationConductor.dispatchableRunIds(codingWorker.eligibleRunIds())
                         .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
                 }

@@ -114,17 +114,21 @@ class CodingWorkerService(
 
     suspend fun tick(): CodingWorkerTickResult {
         val executions = codingWorkerExecutions(workerStore.loadEvents())
-        val runId = executions.asSequence()
-            .filter { it.result == null }
-            .minByOrNull { it.claim.executionId }
-            ?.claim
-            ?.runId
+        val runId = interruptedRunIds(executions).firstOrNull()
             ?: candidateRuns(executions).firstOrNull()?.runId
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
         return tick(runId)
     }
 
+    fun interruptedRunIds(): List<Long> = interruptedRunIds(codingWorkerExecutions(workerStore.loadEvents()))
+
     fun eligibleRunIds(): List<Long> = candidateRuns(codingWorkerExecutions(workerStore.loadEvents())).map { it.runId }
+
+    private fun interruptedRunIds(executions: List<CodingWorkerExecutionView>): List<Long> = executions.asSequence()
+        .filter { it.result == null }
+        .sortedBy { it.claim.executionId }
+        .map { it.claim.runId }
+        .toList()
 
     fun authorizeRetry(runId: Long): CodingWorkerTickResult {
         if (codingWorkerExecutions(workerStore.loadEvents()).any { it.claim.runId == runId && it.result == null }) {
