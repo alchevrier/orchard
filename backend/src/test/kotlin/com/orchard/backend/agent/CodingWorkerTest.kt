@@ -681,12 +681,60 @@ class CodingWorkerTest {
         }
 
         assertEquals(
-            "REPLACE src/Secondary.kt only appends trailing line comments to unchanged source; " +
+            "REPLACE src/Secondary.kt only changes line comments on unchanged source; " +
                 "cosmetic replacement indices: 1; every required operation must change source behavior",
             error.message,
         )
         assertEquals("fun answer() = 1\n", Files.readString(source))
         assertEquals("fun label() = \"default\"\n", Files.readString(secondary))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
+    fun `workspace gateway rejects reworded comments but preserves double slash string changes`() {
+        val repository = initializedRepository()
+        val source = repository.resolve("src/Main.kt")
+        Files.writeString(source, "fun endpoint() = \"https://old.example\" // typography verified\n")
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add endpoint")
+        val gateway = LocalCodingWorkspaceGateway()
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            gateway.applyAndCommit(
+                repository.toString(),
+                CodingPatchProposal(
+                    summary = "Reword a placeholder comment.",
+                    operations = listOf(CodingFileOperation(
+                        action = CODING_FILE_REPLACE,
+                        path = "src/Main.kt",
+                        replacements = listOf(CodingTextReplacement(
+                            "fun endpoint() = \"https://old.example\" // typography verified",
+                            "fun endpoint() = \"https://old.example\" // typography confirmed",
+                        )),
+                    )),
+                ),
+                executionId = 13,
+            )
+        }
+
+        assertTrue(requireNotNull(error.message).contains("only changes line comments on unchanged source"))
+        gateway.applyAndCommit(
+            repository.toString(),
+            CodingPatchProposal(
+                summary = "Change the endpoint value.",
+                operations = listOf(CodingFileOperation(
+                    action = CODING_FILE_REPLACE,
+                    path = "src/Main.kt",
+                    replacements = listOf(CodingTextReplacement(
+                        "https://old.example",
+                        "https://new.example",
+                    )),
+                )),
+            ),
+            executionId = 14,
+        )
+
+        assertEquals("fun endpoint() = \"https://new.example\" // typography verified\n", Files.readString(source))
         assertEquals("", run(repository, "git", "status", "--porcelain"))
     }
 

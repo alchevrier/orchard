@@ -431,12 +431,10 @@ class LocalCodingWorkspaceGateway(
                             "REPLACE ${operation.path} does not change file content; replacements collectively restore the original source"
                         }
                     }
-                    val cosmeticIndices = operation.replacements.mapIndexedNotNull { index, replacement ->
-                        (index + 1).takeIf { replacement.old == replacement.new || replacement.addsOnlyTrailingLineComments() }
-                    }
-                    require(cosmeticIndices.size != operation.replacements.size) {
-                        "REPLACE ${operation.path} only appends trailing line comments to unchanged source; " +
-                            "cosmetic replacement indices: ${cosmeticIndices.joinToString()}; every required operation must change source behavior"
+                    require(original.withoutLineComments() != candidate.withoutLineComments()) {
+                        "REPLACE ${operation.path} only changes line comments on unchanged source; " +
+                            "cosmetic replacement indices: ${operation.replacements.indices.joinToString { (it + 1).toString() }}; " +
+                            "every required operation must change source behavior"
                     }
                 }
                 else -> require(operation.content == null && operation.replacements.isEmpty() && Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
@@ -739,24 +737,86 @@ class LocalCodingWorkspaceGateway(
     }
 }
 
-private fun CodingTextReplacement.addsOnlyTrailingLineComments(): Boolean {
-    val oldLines = old.lines()
-    val newLines = new.lines()
-    if (oldLines.size != newLines.size) return false
-    var appendedComment = false
-    val preservesCode = oldLines.zip(newLines).all { (oldLine, newLine) ->
-        val oldCode = oldLine.trimEnd()
-        val newCode = newLine.trimEnd()
-        when {
-            newCode == oldCode -> true
-            oldCode.isBlank() || !newCode.startsWith(oldCode) -> false
-            else -> newCode.removePrefix(oldCode).trimStart().startsWith("//").also {
-                if (it) appendedComment = true
+private fun String.withoutLineComments(): String {
+    val source = this
+    return buildString(source.length) {
+        var index = 0
+        var state = KotlinLexicalState.CODE
+        var escaped = false
+        var blockDepth = 0
+        while (index < source.length) {
+            when (state) {
+                KotlinLexicalState.CODE -> when {
+                    source.startsWith("//", index) -> {
+                        while (isNotEmpty() && last().isWhitespace() && last() != '\n' && last() != '\r') {
+                            deleteCharAt(lastIndex)
+                        }
+                        index = source.indexOf('\n', index).takeIf { it >= 0 } ?: source.length
+                    }
+                    source.startsWith("/*", index) -> {
+                        append("/*")
+                        index += 2
+                        blockDepth = 1
+                        state = KotlinLexicalState.BLOCK_COMMENT
+                    }
+                    source.startsWith("\"\"\"", index) -> {
+                        append("\"\"\"")
+                        index += 3
+                        state = KotlinLexicalState.RAW_STRING
+                    }
+                    source[index] == '"' -> {
+                        append('"')
+                        index++
+                        escaped = false
+                        state = KotlinLexicalState.STRING
+                    }
+                    source[index] == '\'' -> {
+                        append('\'')
+                        index++
+                        escaped = false
+                        state = KotlinLexicalState.CHARACTER
+                    }
+                    else -> append(source[index++])
+                }
+                KotlinLexicalState.STRING, KotlinLexicalState.CHARACTER -> {
+                    val character = source[index++]
+                    append(character)
+                    when {
+                        escaped -> escaped = false
+                        character == '\\' -> escaped = true
+                        state == KotlinLexicalState.STRING && character == '"' -> state = KotlinLexicalState.CODE
+                        state == KotlinLexicalState.CHARACTER && character == '\'' -> state = KotlinLexicalState.CODE
+                    }
+                }
+                KotlinLexicalState.RAW_STRING -> {
+                    if (source.startsWith("\"\"\"", index)) {
+                        append("\"\"\"")
+                        index += 3
+                        state = KotlinLexicalState.CODE
+                    } else {
+                        append(source[index++])
+                    }
+                }
+                KotlinLexicalState.BLOCK_COMMENT -> when {
+                    source.startsWith("/*", index) -> {
+                        append("/*")
+                        index += 2
+                        blockDepth++
+                    }
+                    source.startsWith("*/", index) -> {
+                        append("*/")
+                        index += 2
+                        blockDepth--
+                        if (blockDepth == 0) state = KotlinLexicalState.CODE
+                    }
+                    else -> append(source[index++])
+                }
             }
         }
     }
-    return preservesCode && appendedComment
 }
+
+private enum class KotlinLexicalState { CODE, STRING, CHARACTER, RAW_STRING, BLOCK_COMMENT }
 
 internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, maxBytes: Int): String {
     require(maxBytes > 0)
