@@ -308,7 +308,7 @@ class CodingWorkerService(
             allowedActions = listOf(CODING_FILE_WRITE, CODING_FILE_REPLACE, CODING_FILE_DELETE),
             forbiddenActions = listOf("EXECUTE_COMMAND", "APPROVE_CRITERION", "COMPLETE_WORKFLOW", "PUSH", "MERGE"),
             requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
-            run = run,
+            run = codingWorkerRunProjection(run),
             executionPlan = executionPlan,
             priorRejectedCodingDiagnostic = retryDiagnostic,
             repositoryContext = repositoryContext,
@@ -1013,6 +1013,13 @@ class CodingWorkerService(
 
 internal fun codingExecutionBlockRemains(executionStatus: String?, authorityState: String?): Boolean =
     executionStatus == CODING_EXECUTION_BLOCKED && authorityState != CODING_ATTEMPT_RETRY_AUTHORIZED
+
+internal fun codingWorkerRunProjection(run: WorkflowRunView): WorkflowRunView = run.copy(
+    evidence = emptyList(),
+    attempts = emptyList(),
+    decisions = emptyList(),
+    judgments = emptyList(),
+)
 
 internal fun codingRunCanExecute(
     executions: List<CodingWorkerExecutionView>,
