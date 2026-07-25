@@ -411,6 +411,47 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `workspace gateway rejects a no-op replacement before mutating other files`() {
+        val repository = initializedRepository()
+        val source = repository.resolve("src/Main.kt")
+        val secondary = repository.resolve("src/Secondary.kt")
+        Files.writeString(secondary, "fun label() = \"default\"\n")
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add secondary source")
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            LocalCodingWorkspaceGateway().applyAndCommit(
+                repository.toString(),
+                CodingPatchProposal(
+                    summary = "Attempt one change and one no-op.",
+                    operations = listOf(
+                        CodingFileOperation(
+                            action = CODING_FILE_REPLACE,
+                            path = "src/Main.kt",
+                            replacements = listOf(CodingTextReplacement("fun answer() = 1", "fun answer() = 42")),
+                        ),
+                        CodingFileOperation(
+                            action = CODING_FILE_REPLACE,
+                            path = "src/Secondary.kt",
+                            replacements = listOf(CodingTextReplacement("default", "default")),
+                        ),
+                    ),
+                ),
+                executionId = 11,
+            )
+        }
+
+        assertEquals(
+            "REPLACE src/Secondary.kt does not change file content; no-op replacement indices: 1; " +
+                "every replacement new text must differ from its old text",
+            error.message,
+        )
+        assertEquals("fun answer() = 1\n", Files.readString(source))
+        assertEquals("fun label() = \"default\"\n", Files.readString(secondary))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
     fun `workspace gateway excerpts query matches from oversized source files`() {
         val repository = initializedRepository()
         val source = repository.resolve("src/Main.kt")

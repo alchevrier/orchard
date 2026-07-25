@@ -388,6 +388,9 @@ class LocalCodingWorkspaceGateway(
                     require(!Files.exists(target) || Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
                         "WRITE target must be a regular file"
                     }
+                    require(!Files.exists(target) || !Files.readAllBytes(target).contentEquals(operation.content.toByteArray(Charsets.UTF_8))) {
+                        "WRITE ${operation.path} content matches the existing file; every required operation must change its target"
+                    }
                 }
                 CODING_FILE_REPLACE -> {
                     require(operation.content == null && operation.replacements.size in 1..MAX_REPLACEMENTS) {
@@ -416,6 +419,17 @@ class LocalCodingWorkspaceGateway(
                             }
                         }
                         candidate = candidate.replaceFirst(replacement.old, replacement.new)
+                    }
+                    require(candidate != original) {
+                        val noOpIndices = operation.replacements.mapIndexedNotNull { index, replacement ->
+                            (index + 1).takeIf { replacement.old == replacement.new }
+                        }
+                        if (noOpIndices.isNotEmpty()) {
+                            "REPLACE ${operation.path} does not change file content; no-op replacement indices: " +
+                                "${noOpIndices.joinToString()}; every replacement new text must differ from its old text"
+                        } else {
+                            "REPLACE ${operation.path} does not change file content; replacements collectively restore the original source"
+                        }
                     }
                 }
                 else -> require(operation.content == null && operation.replacements.isEmpty() && Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
