@@ -625,6 +625,10 @@ class RepositoryAnalysisService(
             appendLine(it.requiredBehavior)
             appendLine(it.scope.joinToString(" "))
             appendLine(it.constraints.joinToString(" "))
+            it.acceptanceCriteria.forEach { criterion ->
+                appendLine(criterion.description)
+                appendLine(criterion.verification)
+            }
         }
         run.context.recalledEpisodes.forEach { appendLine("${it.problem} ${it.resolution} ${it.evidenceSummary}") }
     }
