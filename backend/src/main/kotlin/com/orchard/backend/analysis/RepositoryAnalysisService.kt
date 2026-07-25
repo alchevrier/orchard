@@ -489,7 +489,14 @@ class RepositoryAnalysisService(
             baseRevision,
             codingWorkerEvents,
         )
-        val invalid = validateOutput(run, boundedContext, compiledOutput, failedCandidatePaths)
+        val invalid = validateOutput(
+            run,
+            boundedContext,
+            compiledOutput,
+            failedCandidatePaths,
+            currentPlan?.content,
+            rejectedCodingPlanDiagnostic,
+        )
         if (invalid != null) return blockAttempt(
             run.runId,
             baseRevision,
@@ -531,6 +538,8 @@ class RepositoryAnalysisService(
         context: CodingRepositoryContext,
         output: RepositoryAnalysisPlanContent,
         failedCandidatePaths: Set<String>,
+        rejectedPlan: RepositoryAnalysisPlanContent?,
+        rejectedCodingPlanDiagnostic: String?,
     ): String? {
         repositoryScopeAuthorityDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
@@ -545,6 +554,7 @@ class RepositoryAnalysisService(
         )?.let { return it }
         repositoryOperationShapeDiagnostic(context, output)?.let { return it }
         failedCandidateCorrectionDiagnostic(failedCandidatePaths, output)?.let { return it }
+        correctivePlanAuthorityDiagnostic(rejectedPlan, rejectedCodingPlanDiagnostic, output)?.let { return it }
         val admittedCommands = run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }?.toSet().orEmpty()
         if (output.verificationCommands.toSet() != admittedCommands) return "Execution plan verification differs from admitted commands."
         return null
@@ -740,6 +750,24 @@ internal fun failedCandidateCorrectionDiagnostic(
     return missingPaths.takeIf { it.isNotEmpty() }?.let {
         "A verification-failed candidate requires corrective source operations for every changed path: ${it.joinToString(", ")}."
     }
+}
+
+internal fun correctivePlanAuthorityDiagnostic(
+    rejectedPlan: RepositoryAnalysisPlanContent?,
+    rejectedCodingPlanDiagnostic: String?,
+    correction: RepositoryAnalysisPlanContent,
+): String? {
+    if (rejectedPlan == null || rejectedCodingPlanDiagnostic == null) return null
+    val requiresAuthorityRevision = rejectedCodingPlanDiagnostic.contains("contains no coding operations") ||
+        rejectedCodingPlanDiagnostic.contains("only changes line comments on unchanged source")
+    if (!requiresAuthorityRevision) return null
+    fun RepositoryAnalysisPlanContent.sourceAuthority() = operations.asSequence()
+        .filter { it.action != PLAN_OPERATION_VERIFY }
+        .map { it.action to it.path }
+        .toSet()
+    if (rejectedPlan.sourceAuthority() != correction.sourceAuthority()) return null
+    return "A corrective plan cannot repeat unchanged source-operation authority after an empty or cosmetic coding proposal; " +
+        "reclassify compliant evidence paths or provide different concrete source authority."
 }
 
 private fun repositoryPlanRevisionDiagnostic(

@@ -521,6 +521,35 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `empty or cosmetic coding rejection requires revised source authority`() {
+        val rejected = plan(1, 1, "a".repeat(40)).content
+        val unchanged = rejected.copy(summary = "Retry the same authority.")
+        val expected = "A corrective plan cannot repeat unchanged source-operation authority after an empty or cosmetic coding proposal; " +
+            "reclassify compliant evidence paths or provide different concrete source authority."
+
+        assertEquals(
+            expected,
+            correctivePlanAuthorityDiagnostic(rejected, "The proposal contains no coding operations.", unchanged),
+        )
+        assertEquals(
+            expected,
+            correctivePlanAuthorityDiagnostic(
+                rejected,
+                "REPLACE src/Main.kt only changes line comments on unchanged source",
+                unchanged,
+            ),
+        )
+        assertNull(
+            correctivePlanAuthorityDiagnostic(
+                rejected,
+                "The proposal contains no coding operations.",
+                unchanged.copy(operations = unchanged.operations.filter { it.action == PLAN_OPERATION_VERIFY }),
+            ),
+        )
+        assertNull(correctivePlanAuthorityDiagnostic(rejected, "An exact anchor was ambiguous.", unchanged))
+    }
+
+    @Test
     fun `repository selectors require every matched owner and an affine test operation`() {
         val context = CodingRepositoryContext(
             listOf(
