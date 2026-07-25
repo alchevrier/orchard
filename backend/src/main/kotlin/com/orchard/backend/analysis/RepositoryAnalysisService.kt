@@ -357,9 +357,11 @@ class RepositoryAnalysisService(
         val currentPlan = plans.asSequence()
             .filter { it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) }
             .maxByOrNull { it.revision }
-        val rejectedCodingPlanDiagnostic = currentPlan?.let {
-            repositoryPlanRevisionDiagnostic(it, codingAttemptStore?.load().orEmpty())
-        }
+        val codingWorkerEvents = codingWorkerStore?.loadEvents().orEmpty()
+        val rejectedCodingPlanDiagnostic = listOfNotNull(
+            currentPlan?.let { repositoryPlanRevisionDiagnostic(it, codingAttemptStore?.load().orEmpty()) },
+            failedCandidateVerificationDiagnostic(baseRevision, codingWorkerEvents),
+        ).distinct().joinToString("\n").ifBlank { null }
         if (currentPlan != null && rejectedCodingPlanDiagnostic == null) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, run.runId)
         }
@@ -485,7 +487,7 @@ class RepositoryAnalysisService(
         )
         val failedCandidatePaths = failedCandidateCorrectionPaths(
             baseRevision,
-            codingWorkerStore?.loadEvents().orEmpty(),
+            codingWorkerEvents,
         )
         val invalid = validateOutput(run, boundedContext, compiledOutput, failedCandidatePaths)
         if (invalid != null) return blockAttempt(
@@ -713,9 +715,19 @@ internal fun repositoryPlanRequiresRevision(
 internal fun failedCandidateCorrectionPaths(
     baseRevision: String,
     codingWorkerEvents: List<CodingWorkerEvent>,
-): Set<String> = codingWorkerExecutions(codingWorkerEvents).asReversed().firstOrNull { execution ->
+): Set<String> = failedCandidateExecution(baseRevision, codingWorkerEvents)?.result?.changedPaths.orEmpty().toSet()
+
+internal fun failedCandidateVerificationDiagnostic(
+    baseRevision: String,
+    codingWorkerEvents: List<CodingWorkerEvent>,
+): String? = failedCandidateExecution(baseRevision, codingWorkerEvents)?.result?.diagnostic
+
+private fun failedCandidateExecution(
+    baseRevision: String,
+    codingWorkerEvents: List<CodingWorkerEvent>,
+) = codingWorkerExecutions(codingWorkerEvents).asReversed().firstOrNull { execution ->
     execution.result?.status == CODING_EXECUTION_FAILED && execution.result.revision == baseRevision
-}?.result?.changedPaths.orEmpty().toSet()
+}
 
 internal fun failedCandidateCorrectionDiagnostic(
     requiredPaths: Set<String>,
