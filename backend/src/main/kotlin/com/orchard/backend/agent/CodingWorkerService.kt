@@ -36,6 +36,7 @@ import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.WorkflowMutationStatus
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.admittedAcceptanceVerification
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
@@ -253,6 +254,29 @@ class CodingWorkerService(
         } catch (_: Exception) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
         }
+        if (priorRejectedCodingDiagnostic != null) {
+            val consumed = runCatching {
+                attemptStore.appendNext { attemptId ->
+                    CodingWorkerAttempt(
+                        attemptId = attemptId,
+                        runId = run.runId,
+                        executionPlanId = requireNotNull(executionPlan).planId,
+                        executionPlanHash = executionPlan.hash,
+                        state = CODING_ATTEMPT_RETRY_CONSUMED,
+                        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                        diagnostic = "The explicitly authorized successor coding attempt was consumed.",
+                    )
+                }
+            }
+            if (consumed.isFailure) {
+                return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    consumed.exceptionOrNull()?.message,
+                )
+            }
+        }
         toolchainResolution.exceptionOrNull()?.let { error ->
             return finish(
                 claim,
@@ -345,30 +369,6 @@ class CodingWorkerService(
                 modelExecutionId = execution?.executionId,
                 retryAfter = Instant.now().plus(TRANSIENT_RETRY_DELAY).toString(),
             )
-        }
-        if (priorRejectedCodingDiagnostic != null) {
-            val consumed = runCatching {
-                attemptStore.appendNext { attemptId ->
-                    CodingWorkerAttempt(
-                        attemptId = attemptId,
-                        runId = run.runId,
-                        executionPlanId = executionPlan.planId,
-                        executionPlanHash = executionPlan.hash,
-                        state = CODING_ATTEMPT_RETRY_CONSUMED,
-                        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
-                        diagnostic = "The explicitly authorized successor coding attempt was consumed.",
-                    )
-                }
-            }
-            if (consumed.isFailure) {
-                lease.close()
-                return finish(
-                    claim,
-                    CODING_EXECUTION_FAILED,
-                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
-                    consumed.exceptionOrNull()?.message,
-                )
-            }
         }
         val startedAt = System.nanoTime()
         val generation = try {
@@ -730,7 +730,13 @@ class CodingWorkerService(
             val observation = if (requirement.kind == "SOURCE_DIFF") {
                 VerificationObservation("", 0, sha256(candidate.changedPaths.joinToString("\n")), "Candidate source diff was committed.")
             } else {
-                val command = runCatching { verificationCommand(requirement, toolchainPolicy) }
+                val command = runCatching {
+                    verificationCommand(
+                        requirement,
+                        toolchainPolicy,
+                        run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
+                    )
+                }
                     .getOrElse {
                         return "Evidence ${requirement.kind} has an invalid admitted verification command: ${it.message.orEmpty()}"
                     }
@@ -776,7 +782,9 @@ class CodingWorkerService(
     private fun verificationCommand(
         requirement: EvidenceRequirement,
         toolchainPolicy: ResolvedToolchainPolicy,
-    ): VerificationInvocation? = requirement.verification?.takeIf(String::isNotBlank)?.let { admitted ->
+        acceptanceVerifications: List<String>,
+    ): VerificationInvocation? = (requirement.verification?.takeIf(String::isNotBlank)
+        ?: admittedAcceptanceVerification(acceptanceVerifications).takeIf { requirement.kind == "ACCEPTANCE" })?.let { admitted ->
         VerificationInvocation(workspaceGateway.parseVerificationCommand(admitted), admitted)
     } ?: toolchainPolicy.commands[
         when (requirement.kind) {

@@ -32,6 +32,7 @@ object DefaultDeliveryWorkflow {
         workDefinition: WorkDefinitionManifest?,
         acceptanceContract: AcceptanceContract?,
         acceptanceVerificationEnabled: Boolean,
+        canonicalAcceptanceVerification: Boolean = true,
     ): ResolvedWorkflow {
         require(workItemType == ENTITY_TASK || workItemType == ENTITY_BUG) { "Only tasks and bugs can start a workflow" }
         val requirements = buildList {
@@ -43,8 +44,9 @@ object DefaultDeliveryWorkflow {
             add(EvidenceRequirement("TEST", "A successful relevant test suite against the resulting revision."))
             workDefinition?.let { manifest ->
                 val acceptanceVerification = if (acceptanceVerificationEnabled) {
-                    manifest.definition.acceptanceCriteria
-                        .map { it.verification.trim() }
+                    val verifications = manifest.definition.acceptanceCriteria.map { it.verification }
+                    if (canonicalAcceptanceVerification) admittedAcceptanceVerification(verifications) else verifications
+                        .map(String::trim)
                         .filter(String::isNotBlank)
                         .distinct()
                         .singleOrNull()
@@ -136,6 +138,13 @@ object DefaultDeliveryWorkflow {
             workItemType,
             workDefinition,
             acceptanceContract,
+            acceptanceVerificationEnabled = true,
+            canonicalAcceptanceVerification = false,
+        )) ||
+        (workDefinition != null && workflow == resolve(
+            workItemType,
+            workDefinition,
+            acceptanceContract,
             acceptanceVerificationEnabled = false,
         )) ||
         (workDefinition == null && workflow == legacy(workItemType))
@@ -165,3 +174,12 @@ object DefaultDeliveryWorkflow {
         )
     }
 }
+
+internal fun admittedAcceptanceVerification(verifications: List<String>): String? = verifications
+    .mapNotNull { verification ->
+        val trimmed = verification.trim()
+        val candidate = if (trimmed.startsWith("Run ")) trimmed.removePrefix("Run ") else trimmed
+        candidate.removeSuffix(".").takeIf { it.startsWith("./") }
+    }
+    .distinct()
+    .singleOrNull()

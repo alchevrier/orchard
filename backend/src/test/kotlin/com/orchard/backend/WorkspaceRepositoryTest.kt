@@ -40,6 +40,7 @@ import com.orchard.backend.workspace.newDefinitionProposal
 import com.orchard.backend.workspace.ModelExecutionObservationDraft
 import com.orchard.backend.workspace.ModelExecutionObservation
 import com.orchard.backend.workspace.ModelExperienceEvent
+import com.orchard.backend.workspace.admittedAcceptanceVerification
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
@@ -1007,6 +1008,10 @@ class WorkspaceRepositoryTest {
         assertTrue(run.workflow.evidenceContract.requirements.any {
             it.kind == "ACCEPTANCE" && "./gradlew build" in it.description
         })
+        assertEquals(
+            "./gradlew build",
+            run.workflow.evidenceContract.requirements.single { it.kind == "ACCEPTANCE" }.verification,
+        )
         assertEquals(started.snapshot.workDefinitions.single().hash, run.workDefinition?.hash)
         assertTrue("status=1" in started.snapshot.resources.getValue("entity-4").action)
 
@@ -1148,6 +1153,22 @@ class WorkspaceRepositoryTest {
             AcceptanceCriterion("The complete build succeeds", "Run ./gradlew build")
         ),
     )
+
+    @Test
+    fun `acceptance verification admits one explicit repository command among prose checks`() {
+        assertEquals(
+            "./gradlew :frontend:desktopTest :frontend:compileKotlinDesktop --no-daemon",
+            admittedAcceptanceVerification(listOf(
+                "Run deterministic source-policy assertions.",
+                "Run ./gradlew :frontend:desktopTest :frontend:compileKotlinDesktop --no-daemon.",
+                "Capture and inspect deterministic layout evidence.",
+            )),
+        )
+        assertEquals(
+            null,
+            admittedAcceptanceVerification(listOf("Inspect the returned value", "Review the source diff")),
+        )
+    }
 
     private fun withTempDirectory(block: (Path) -> Unit) {
         val directory = createTempDirectory("orchard-workspace-test")

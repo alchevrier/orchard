@@ -431,6 +431,13 @@ class LocalCodingWorkspaceGateway(
                             "REPLACE ${operation.path} does not change file content; replacements collectively restore the original source"
                         }
                     }
+                    val cosmeticIndices = operation.replacements.mapIndexedNotNull { index, replacement ->
+                        (index + 1).takeIf { replacement.old == replacement.new || replacement.addsOnlyTrailingLineComments() }
+                    }
+                    require(cosmeticIndices.size != operation.replacements.size) {
+                        "REPLACE ${operation.path} only appends trailing line comments to unchanged source; " +
+                            "cosmetic replacement indices: ${cosmeticIndices.joinToString()}; every required operation must change source behavior"
+                    }
                 }
                 else -> require(operation.content == null && operation.replacements.isEmpty() && Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
                     "DELETE target must be an existing regular file without content or replacements"
@@ -730,6 +737,25 @@ class LocalCodingWorkspaceGateway(
         )
         val CONTEXT_JSON = Json { encodeDefaults = true }
     }
+}
+
+private fun CodingTextReplacement.addsOnlyTrailingLineComments(): Boolean {
+    val oldLines = old.lines()
+    val newLines = new.lines()
+    if (oldLines.size != newLines.size) return false
+    var appendedComment = false
+    val preservesCode = oldLines.zip(newLines).all { (oldLine, newLine) ->
+        val oldCode = oldLine.trimEnd()
+        val newCode = newLine.trimEnd()
+        when {
+            newCode == oldCode -> true
+            oldCode.isBlank() || !newCode.startsWith(oldCode) -> false
+            else -> newCode.removePrefix(oldCode).trimStart().startsWith("//").also {
+                if (it) appendedComment = true
+            }
+        }
+    }
+    return preservesCode && appendedComment
 }
 
 internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, maxBytes: Int): String {
