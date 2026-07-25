@@ -142,6 +142,8 @@ class CodingWorkerTest {
         assertTrue(requireNotNull(model.prompt).contains("Plan instructions describe intent and do not prove that any literal exists."))
         assertTrue(model.prompt?.contains("Copy every REPLACE old value as one exact contiguous substring") == true)
         assertTrue(model.prompt?.contains("A rejected REPLACE old value is a defect in the prior proposal") == true)
+        assertTrue(model.prompt?.contains("rejected old-text value named in priorRejectedCodingDiagnostic as forbidden") == true)
+        assertTrue(model.prompt?.contains("Every WRITE and REPLACE operation must change its target bytes") == true)
         assertTrue(model.prompt?.contains("operations must not be empty") == true)
         assertTrue(model.prompt?.contains("pairwise non-overlapping old values and order replacements from the bottom") == true)
         assertTrue(model.prompt?.contains("excerpt headers are context metadata, not repository source") == true)
@@ -282,6 +284,55 @@ class CodingWorkerTest {
             attempts.retryBasisForTerminalFailure(listOf(failed), 19, plan)?.state,
         )
         assertEquals(2, attempts.load().size)
+    }
+
+    @Test
+    fun `coding context query includes accepted plan semantics`() {
+        val plan = RepositoryExecutionPlan(
+            planId = 23,
+            runId = 19,
+            revision = 1,
+            projectId = 5,
+            baseRevision = "e".repeat(40),
+            content = RepositoryAnalysisPlanContent(
+                disposition = DISPOSITION_PARTIALLY_IMPLEMENTED,
+                summary = "Declare shared platform-default typography.",
+                evidence = listOf(com.orchard.backend.analysis.RepositoryEvidenceCitation(
+                    path = "src/Theme.kt",
+                    symbol = "OrchardTheme",
+                    observation = "MaterialTheme owns the shared typography defaults.",
+                    contentHash = "f".repeat(64),
+                )),
+                reuse = emptyList(),
+                preservedInvariants = emptyList(),
+                nonGoals = emptyList(),
+                operations = listOf(com.orchard.backend.analysis.ExecutionPlanOperation(
+                    order = 1,
+                    action = "MODIFY",
+                    path = "src/Theme.kt",
+                    symbol = "OrchardCircuitBinder",
+                    instruction = "Set the default font family on shared typography.",
+                    acceptanceCriteria = listOf("Human-readable text uses FontFamily.Default."),
+                )),
+                verificationCommands = emptyList(),
+            ),
+            provenance = AnalysisExecutionProvenance(
+                executionProfileId = "test-analysis",
+                bindingFingerprint = "a".repeat(64),
+                promptHash = "b".repeat(64),
+                contextHash = "c".repeat(64),
+                outputHash = "d".repeat(64),
+                modelExecutionId = 1,
+            ),
+            hash = "1".repeat(64),
+        )
+
+        val query = codingPlanContextQuery(plan)
+
+        assertTrue(query.contains("OrchardTheme"))
+        assertTrue(query.contains("MaterialTheme owns the shared typography defaults."))
+        assertTrue(query.contains("Set the default font family on shared typography."))
+        assertTrue(query.contains("Human-readable text uses FontFamily.Default."))
     }
 
     @Test

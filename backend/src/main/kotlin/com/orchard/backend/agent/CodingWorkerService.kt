@@ -269,7 +269,7 @@ class CodingWorkerService(
             "No valid toolchain policy matches the reserved repository.",
         )
 
-        val contextQuery = run.context.title + "\n" + run.context.content
+        val contextQuery = codingContextQuery(run, executionPlan)
         val planPaths = executionPlan?.content?.operations
             ?.filter { it.action != "VERIFY" }
             ?.map { it.path }
@@ -981,6 +981,27 @@ class CodingWorkerService(
 
 internal fun codingExecutionBlockRemains(executionStatus: String?, authorityState: String?): Boolean =
     executionStatus == CODING_EXECUTION_BLOCKED && authorityState != CODING_ATTEMPT_RETRY_AUTHORIZED
+
+internal fun codingContextQuery(run: WorkflowRunView, executionPlan: RepositoryExecutionPlan?): String = buildString {
+    appendLine(run.context.title)
+    appendLine(run.context.content)
+    append(codingPlanContextQuery(executionPlan))
+}
+
+internal fun codingPlanContextQuery(executionPlan: RepositoryExecutionPlan?): String = buildString {
+    executionPlan?.content?.let { plan ->
+        appendLine(plan.summary)
+        plan.evidence.forEach { evidence ->
+            evidence.symbol?.let(::appendLine)
+            appendLine(evidence.observation)
+        }
+        plan.operations.forEach { operation ->
+            operation.symbol?.let(::appendLine)
+            appendLine(operation.instruction)
+            operation.acceptanceCriteria.forEach(::appendLine)
+        }
+    }
+}
 
 internal fun codingRetryableTerminalFailure(
     executions: List<CodingWorkerExecutionView>,

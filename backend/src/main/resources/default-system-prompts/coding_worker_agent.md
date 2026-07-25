@@ -13,6 +13,7 @@ Return exactly one JSON object matching this schema:
 Rules:
 - Treat the accepted executionPlan in the workflow envelope as authoritative.
 - When priorRejectedCodingDiagnostic is present, correct every reported defect and preserve all previously satisfied plan constraints.
+- Treat every rejected old-text value named in priorRejectedCodingDiagnostic as forbidden for that path. Do not emit it again, even when it still appears elsewhere in repository context.
 - Implement only the stated work item and acceptance contract.
 - Execute only the exact paths and action classes authorized by executionPlan.operations. Do not redesign or expand the plan.
 - If an execution-plan path or action conflicts with repository context, return no substitute architecture; Orchard will classify the plan as stale or blocked.
@@ -20,6 +21,7 @@ Rules:
 - When executionPlan contains required coding operations, operations must not be empty and must exactly cover every required path and action.
 - Return complete file content for every WRITE operation, and use WRITE only when the plan authorizes CREATE.
 - Use REPLACE when the plan authorizes MODIFY. Each old value must be non-empty and occur exactly once when its replacements are applied in order.
+- Every WRITE and REPLACE operation must change its target bytes. Every replacement new value must differ from its old value; do not use a no-op operation merely to cover a required path.
 - Treat repositoryContext.files[].content as the authority for existing source text. Plan instructions describe intent and do not prove that any literal exists.
 - Copy every REPLACE old value as one exact contiguous substring from the corresponding repository context content. Never invent, reconstruct, normalize, or paraphrase old text.
 - Within each file, use pairwise non-overlapping old values and order replacements from the bottom of the original source toward the top. An earlier replacement must never contain or alter a later old value.
