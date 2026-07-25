@@ -287,6 +287,76 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `new execution plan does not inherit exhausted repair budget from prior plan`() {
+        val oldPlanHash = "d".repeat(64)
+        val newPlanHash = "e".repeat(64)
+        val oldExecutions = (1L..3L).map { executionId ->
+            val claimDraft = claim(executionId, runId = 19, attempt = executionId.toInt()).copy(
+                executionPlanId = 23,
+                executionPlanHash = oldPlanHash,
+                hash = "",
+            )
+            val resultDraft = CodingWorkerResult(
+                executionId = executionId,
+                status = CODING_EXECUTION_FAILED,
+                diagnostic = "Prior plan repair failed.",
+                completedAt = "2026-06-21T00:0${executionId}:00Z",
+                hash = "",
+            )
+            CodingWorkerExecutionView(
+                claimDraft.copy(hash = codingWorkerClaimHash(claimDraft)),
+                resultDraft.copy(hash = codingWorkerResultHash(resultDraft)),
+            )
+        }
+        val currentPlan = RepositoryExecutionPlan(
+            planId = 24,
+            runId = 19,
+            revision = 2,
+            projectId = 1,
+            baseRevision = "f".repeat(40),
+            content = RepositoryAnalysisPlanContent(
+                disposition = DISPOSITION_PARTIALLY_IMPLEMENTED,
+                summary = "Repair the current candidate.",
+                evidence = emptyList(),
+                reuse = emptyList(),
+                preservedInvariants = emptyList(),
+                nonGoals = emptyList(),
+                operations = emptyList(),
+                verificationCommands = emptyList(),
+            ),
+            provenance = AnalysisExecutionProvenance(
+                executionProfileId = "test-analysis",
+                bindingFingerprint = "1".repeat(64),
+                promptHash = "2".repeat(64),
+                contextHash = "3".repeat(64),
+                outputHash = "4".repeat(64),
+                modelExecutionId = 1,
+            ),
+            hash = newPlanHash,
+        )
+
+        assertTrue(
+            codingRunCanExecute(
+                executions = oldExecutions,
+                attempts = emptyList(),
+                currentPlan = currentPlan,
+                bindToCurrentPlan = true,
+                retryBudget = 3,
+            )
+        )
+        assertEquals(
+            false,
+            codingRunCanExecute(
+                executions = oldExecutions,
+                attempts = emptyList(),
+                currentPlan = null,
+                bindToCurrentPlan = false,
+                retryBudget = 3,
+            ),
+        )
+    }
+
+    @Test
     fun `coding context query includes accepted plan semantics`() {
         val plan = RepositoryExecutionPlan(
             planId = 23,

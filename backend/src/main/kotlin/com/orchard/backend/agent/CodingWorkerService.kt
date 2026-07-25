@@ -573,63 +573,21 @@ class CodingWorkerService(
     }
 
     private fun candidateRuns(executions: List<CodingWorkerExecutionView>): List<WorkflowRunView> {
-        val repairExecutions = executions.filter { it.result?.status in REPAIR_ATTEMPT_STATUSES }
-            .groupBy { it.claim.runId }
-        val latestPlanClaims = executions.groupBy { it.claim.runId }.mapValues { (_, runExecutions) ->
-            runExecutions.maxBy { it.claim.executionId }.claim
-        }
         val codingAttempts = attemptStore.load()
-        val latestAuthorityStates = latestPlanClaims.mapValues { (runId, claim) ->
-            if (claim.executionPlanId != null && claim.executionPlanHash != null) {
-                codingAttempts.lastOrNull {
-                    it.runId == runId &&
-                        it.executionPlanId == claim.executionPlanId &&
-                        it.executionPlanHash == claim.executionPlanHash
-                }?.state
-            } else null
-        }
-        val blockedRuns = executions.groupBy { it.claim.runId }.mapNotNull { (runId, runExecutions) ->
-            runExecutions.maxByOrNull { it.claim.executionId }?.result
-                ?.takeIf { codingExecutionBlockRemains(it.status, latestAuthorityStates[runId]) }
-                ?.let { runId }
-        }.toSet()
-        val deferredRuns = executions.groupBy { it.claim.runId }.mapNotNull { (runId, runExecutions) ->
-            runExecutions.maxByOrNull { it.claim.executionId }?.result
-                ?.takeIf { it.status == CODING_EXECUTION_DEFERRED && Instant.parse(requireNotNull(it.retryAfter)).isAfter(Instant.now()) }
-                ?.let { runId }
-        }.toSet()
-        val activeRuns = executions.filter { it.result == null }.mapTo(hashSetOf()) { it.claim.runId }
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
             .filter { run ->
                 run.context.circuitDispatchId != null &&
                     run.context.workspaceReservation?.mode in setOf("ISOLATED", "INTEGRATION")
             }
-            .filter { it.runId !in blockedRuns }
-            .filter { it.runId !in deferredRuns }
-            .filter { it.runId !in activeRuns }
             .filter { run ->
-                val claim = latestPlanClaims[run.runId]
-                val authority = if (claim?.executionPlanId != null && claim.executionPlanHash != null) {
-                    codingAttempts.lastOrNull {
-                        it.runId == run.runId &&
-                            it.executionPlanId == claim.executionPlanId &&
-                            it.executionPlanHash == claim.executionPlanHash
-                    }
-                } else null
-                val scopeAcceptedAt = if (claim?.executionPlanId != null && claim.executionPlanHash != null) {
-                    codingAttempts.lastOrNull {
-                        it.runId == run.runId &&
-                            it.executionPlanId == claim.executionPlanId &&
-                            it.executionPlanHash == claim.executionPlanHash &&
-                            it.state == CODING_ATTEMPT_SCOPE_ACCEPTED
-                    }?.recordedAt?.let(Instant::parse)
-                } else null
-                val repairCount = repairExecutions[run.runId].orEmpty().count { execution ->
-                    scopeAcceptedAt == null || Instant.parse(requireNotNull(execution.result).completedAt) >= scopeAcceptedAt
-                }
-                authority?.state !in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_CONSUMED) &&
-                    (repairCount < retryBudget || authority?.state == CODING_ATTEMPT_RETRY_AUTHORIZED)
+                codingRunCanExecute(
+                    executions = executions.filter { it.claim.runId == run.runId },
+                    attempts = codingAttempts.filter { it.runId == run.runId },
+                    currentPlan = repositoryAnalysis?.currentPlan(run.runId),
+                    bindToCurrentPlan = repositoryAnalysis != null,
+                    retryBudget = retryBudget,
+                )
             }
             .sortedBy { it.runId }
             .toList()
@@ -1004,7 +962,6 @@ class CodingWorkerService(
         const val LEGACY_PLAN_SCOPE_DIAGNOSTIC = "The coding proposal exceeds the accepted execution-plan path or action scope."
         const val LEGACY_IDENTICAL_OUTCOME_BLOCK_THRESHOLD = 2
         val TRANSIENT_RETRY_DELAY: Duration = Duration.ofSeconds(30)
-        val REPAIR_ATTEMPT_STATUSES = setOf(CODING_EXECUTION_COMPLETED, CODING_EXECUTION_FAILED)
 
         fun loadPrompt(): String {
             val stream = requireNotNull(
@@ -1017,6 +974,52 @@ class CodingWorkerService(
 
 internal fun codingExecutionBlockRemains(executionStatus: String?, authorityState: String?): Boolean =
     executionStatus == CODING_EXECUTION_BLOCKED && authorityState != CODING_ATTEMPT_RETRY_AUTHORIZED
+
+internal fun codingRunCanExecute(
+    executions: List<CodingWorkerExecutionView>,
+    attempts: List<CodingWorkerAttempt>,
+    currentPlan: RepositoryExecutionPlan?,
+    bindToCurrentPlan: Boolean,
+    retryBudget: Int,
+    now: Instant = Instant.now(),
+): Boolean {
+    if (executions.any { it.result == null }) return false
+    val relevantExecutions = if (bindToCurrentPlan) {
+        currentPlan?.let { plan ->
+            executions.filter {
+                it.claim.executionPlanId == plan.planId && it.claim.executionPlanHash == plan.hash
+            }
+        }.orEmpty()
+    } else {
+        executions
+    }
+    val latestExecution = relevantExecutions.maxByOrNull { it.claim.executionId }
+    val planId = currentPlan?.planId ?: latestExecution?.claim?.executionPlanId
+    val planHash = currentPlan?.hash ?: latestExecution?.claim?.executionPlanHash
+    val planAttempts = if (planId != null && planHash != null) {
+        attempts.filter { it.executionPlanId == planId && it.executionPlanHash == planHash }
+    } else {
+        emptyList()
+    }
+    val authority = planAttempts.lastOrNull()
+    if (codingExecutionBlockRemains(latestExecution?.result?.status, authority?.state)) return false
+    val deferred = latestExecution?.result?.takeIf {
+        it.status == CODING_EXECUTION_DEFERRED && Instant.parse(requireNotNull(it.retryAfter)).isAfter(now)
+    }
+    if (deferred != null) return false
+    if (authority?.state in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_CONSUMED)) return false
+    val scopeAcceptedAt = planAttempts.lastOrNull { it.state == CODING_ATTEMPT_SCOPE_ACCEPTED }
+        ?.recordedAt
+        ?.let(Instant::parse)
+    val repairCount = relevantExecutions.count { execution ->
+        codingExecutionConsumesRepairBudget(execution.result?.status) &&
+            (scopeAcceptedAt == null || Instant.parse(requireNotNull(execution.result).completedAt) >= scopeAcceptedAt)
+    }
+    return repairCount < retryBudget || authority?.state == CODING_ATTEMPT_RETRY_AUTHORIZED
+}
+
+internal fun codingExecutionConsumesRepairBudget(status: String?): Boolean =
+    status == CODING_EXECUTION_COMPLETED || status == CODING_EXECUTION_FAILED
 
 internal fun codingContextQuery(run: WorkflowRunView, executionPlan: RepositoryExecutionPlan?): String = buildString {
     appendLine(run.context.title)
