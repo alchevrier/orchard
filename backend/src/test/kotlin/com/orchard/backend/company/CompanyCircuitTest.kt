@@ -15,11 +15,13 @@ import com.orchard.backend.analysis.TransientRepositoryAnalysisAttemptStore
 import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_BLOCKED
 import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
 import com.orchard.backend.analysis.RepositoryEvidenceCitation
+import com.orchard.backend.agent.CODING_FILE_REPLACE
 import com.orchard.backend.agent.CODING_FILE_WRITE
 import com.orchard.backend.agent.CodingFileOperation
 import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CodingPatchProposal
+import com.orchard.backend.agent.CodingTextReplacement
 import com.orchard.backend.agent.CodingWorkerService
 import com.orchard.backend.agent.CodingWorkerTickStatus
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
@@ -745,7 +747,21 @@ class CompanyCircuitTest {
                     CodingFileOperation(CODING_FILE_WRITE, "README.md", "Unauthorized scope expansion.\n"),
                 )
             } else {
-                listOf(CodingFileOperation(CODING_FILE_WRITE, "build.gradle.kts", content))
+                val envelope = Json.parseToJsonElement(
+                    prompt.substringAfter("Authoritative coding execution envelope:\n")
+                ).jsonObject
+                val currentContent = requireNotNull(envelope["repositoryContext"]).jsonObject
+                    .getValue("files").jsonArray
+                    .map { it.jsonObject }
+                    .single { it.getValue("path").jsonPrimitive.content == "build.gradle.kts" }
+                    .getValue("content").jsonPrimitive.content
+                listOf(
+                    CodingFileOperation(
+                        CODING_FILE_REPLACE,
+                        "build.gradle.kts",
+                        replacements = listOf(CodingTextReplacement(currentContent, content)),
+                    )
+                )
             }
             val output = Json.encodeToString(
                 CodingPatchProposal(

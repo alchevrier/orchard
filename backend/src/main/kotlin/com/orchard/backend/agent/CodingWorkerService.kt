@@ -957,7 +957,7 @@ internal fun codingProposalAuthorizationDiagnostic(
     val authority = plan.content.operations.filter { it.action != "VERIFY" }.associate { it.path to it.action }
     val unauthorized = proposal.operations.filter { operation ->
         when (operation.action) {
-            CODING_FILE_WRITE -> authority[operation.path] !in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY)
+            CODING_FILE_WRITE -> authority[operation.path] != PLAN_OPERATION_CREATE
             CODING_FILE_REPLACE -> authority[operation.path] != PLAN_OPERATION_MODIFY
             CODING_FILE_DELETE -> authority[operation.path] != PLAN_OPERATION_DELETE
             else -> true
@@ -978,7 +978,7 @@ internal fun codingProposalAuthorizationDiagnostic(
             authority.entries.sortedBy { it.key }.joinToString(" | ") { (path, action) ->
                 val codingActions = when (action) {
                     PLAN_OPERATION_CREATE -> CODING_FILE_WRITE
-                    PLAN_OPERATION_MODIFY -> "$CODING_FILE_REPLACE or $CODING_FILE_WRITE"
+                    PLAN_OPERATION_MODIFY -> CODING_FILE_REPLACE
                     PLAN_OPERATION_DELETE -> CODING_FILE_DELETE
                     else -> "none"
                 }

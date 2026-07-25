@@ -42,7 +42,7 @@ class CodingWorkerAttemptStoreTest {
             CodingPatchProposal(
                 summary = "Change two files.",
                 operations = listOf(
-                    CodingFileOperation(CODING_FILE_REPLACE, "src/Allowed.kt", replacements = emptyList()),
+                    CodingFileOperation(CODING_FILE_WRITE, "src/Allowed.kt", content = "replacement"),
                     CodingFileOperation(CODING_FILE_DELETE, "src/Unexpected.kt"),
                 ),
             ),
@@ -50,8 +50,21 @@ class CodingWorkerAttemptStoreTest {
         )
 
         assertNotNull(diagnostic)
+        assertTrue(diagnostic.contains("WRITE src/Allowed.kt"))
         assertTrue(diagnostic.contains("DELETE src/Unexpected.kt"))
-        assertTrue(diagnostic.contains("MODIFY src/Allowed.kt permits REPLACE or WRITE"))
+        assertTrue(diagnostic.contains("MODIFY src/Allowed.kt permits REPLACE"))
+        assertEquals(
+            null,
+            codingProposalAuthorizationDiagnostic(
+                CodingPatchProposal(
+                    summary = "Change the admitted file.",
+                    operations = listOf(
+                        CodingFileOperation(CODING_FILE_REPLACE, "src/Allowed.kt", replacements = emptyList()),
+                    ),
+                ),
+                executionPlan(),
+            ),
+        )
     }
 
     @Test
