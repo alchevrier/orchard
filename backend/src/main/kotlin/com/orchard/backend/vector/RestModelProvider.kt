@@ -25,8 +25,6 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import java.net.HttpURLConnection
 import java.net.URI
 import java.time.Duration
@@ -114,7 +112,7 @@ class CatalogModelProvider(
         generate(prompt, maxOutputTokens, contextWindowTokens)
 
     override suspend fun executeCodingPatch(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
-        generate(prompt, maxOutputTokens, contextWindowTokens, CODING_PATCH_OUTPUT_FORMAT)
+        generate(prompt, maxOutputTokens, contextWindowTokens)
 
     override fun modelIdentity(): String = binding.model
 
@@ -168,25 +166,17 @@ class CatalogModelProvider(
         ModelEndpointInspection(endpoint.endpointId, false, diagnostic = error.message.orEmpty().take(512))
     }
 
-    private suspend fun generate(
-        prompt: String,
-        maxOutputTokens: Int?,
-        contextWindowTokens: Int,
-        outputFormat: StructuredOutputFormat = JSON_OBJECT_OUTPUT_FORMAT,
-    ): ModelGeneration {
+    private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int): ModelGeneration {
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
         if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
-            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, outputFormat.ollamaFormat)
-                val completed = if (
-                    outputFormat.allowPlainFallback &&
-                    (structured.done != true || !isJsonObject(structured.response))
-                ) {
-                generateOllama(prompt, maxOutputTokens, contextWindowTokens, format = null)
+            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true)
+            val completed = if (structured.done != true || !isJsonObject(structured.response)) {
+                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false)
             } else {
                 structured
             }
-            check(completed.response.isNotBlank() && completed.done == true && isJsonObject(completed.response)) {
-                    "Provider ${endpoint.endpointId} did not complete after structured and plain retries " +
+            check(completed.response.isNotBlank() && completed.done == true) {
+                "Provider ${endpoint.endpointId} did not complete after structured and plain retries " +
                     "(structuredDone=${structured.done}, plainDone=${completed.done})"
             }
             return ModelGeneration(
@@ -205,7 +195,6 @@ class CatalogModelProvider(
                         messages = listOf(OpenAiMessage("user", prompt)),
                         maxTokens = maxOutputTokens,
                         temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
-                        responseFormat = outputFormat.openAiFormat,
                     )
                 )
             }
@@ -225,7 +214,7 @@ class CatalogModelProvider(
         prompt: String,
         maxOutputTokens: Int?,
         contextWindowTokens: Int,
-        format: JsonElement?,
+        structured: Boolean,
     ): OllamaCatalogResponse {
         val think = ollamaThinkControl()
         val options = OllamaCatalogOptions(
@@ -238,8 +227,8 @@ class CatalogModelProvider(
         val response = client.post(url("/api/generate")) {
             authorize()
             header(HttpHeaders.ContentType, ContentType.Application.Json)
-            if (format != null) {
-                setBody(OllamaCatalogRequest(binding.model, prompt, format = format, think = think, options = options))
+            if (structured) {
+                setBody(OllamaCatalogRequest(binding.model, prompt, think = think, options = options))
             } else {
                 setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options))
             }
@@ -265,7 +254,7 @@ class CatalogModelProvider(
                             evalCount = decoded.evalCount,
                             numContext = contextWindowTokens,
                             numPredict = maxOutputTokens,
-                            formatPresent = format != null,
+                            formatPresent = structured,
                             think = think,
                         )
                     )
@@ -436,7 +425,7 @@ private data class OllamaCatalogRequest(
     val model: String,
     val prompt: String,
     val stream: Boolean = false,
-    val format: JsonElement = JsonPrimitive("json"),
+    val format: String = "json",
     val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
 )
@@ -496,77 +485,17 @@ private data class OllamaModel(val name: String)
 private val residencyJson = Json { ignoreUnknownKeys = true }
 private const val OLLAMA_RESIDENCY_PROBE_TIMEOUT_MILLIS = 500
 
-private data class StructuredOutputFormat(
-    val ollamaFormat: JsonElement,
-    val openAiFormat: JsonElement,
-    val allowPlainFallback: Boolean = true,
-)
-
-private val JSON_OBJECT_OUTPUT_FORMAT = StructuredOutputFormat(
-    ollamaFormat = JsonPrimitive("json"),
-    openAiFormat = buildJsonObject { put("type", "json_object") },
-)
-
-private val CODING_PATCH_JSON_SCHEMA = Json.parseToJsonElement(
-    """{
-        "type":"object",
-        "additionalProperties":false,
-        "required":["summary","operations"],
-        "properties":{
-            "summary":{"type":"string","minLength":1,"maxLength":2000},
-            "operations":{
-                "type":"array",
-                "minItems":1,
-                "maxItems":32,
-                "items":{
-                    "type":"object",
-                    "additionalProperties":false,
-                    "required":["action","path","content","replacements"],
-                    "properties":{
-                        "action":{"type":"string","enum":["WRITE","REPLACE","DELETE"]},
-                        "path":{"type":"string","minLength":1},
-                        "content":{"type":["string","null"]},
-                        "replacements":{
-                            "type":"array",
-                            "maxItems":32,
-                            "items":{
-                                "type":"object",
-                                "additionalProperties":false,
-                                "required":["old","new"],
-                                "properties":{
-                                    "old":{"type":"string"},
-                                    "new":{"type":"string"}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }""".trimIndent()
-)
-
-private val CODING_PATCH_OUTPUT_FORMAT = StructuredOutputFormat(
-    ollamaFormat = CODING_PATCH_JSON_SCHEMA,
-    openAiFormat = buildJsonObject {
-        put("type", "json_schema")
-        put("json_schema", buildJsonObject {
-            put("name", "coding_patch_proposal")
-            put("strict", true)
-            put("schema", CODING_PATCH_JSON_SCHEMA)
-        })
-    },
-    allowPlainFallback = false,
-)
-
 @Serializable
 private data class OpenAiChatRequest(
     val model: String,
     val messages: List<OpenAiMessage>,
     @SerialName("max_tokens") val maxTokens: Int? = null,
     val temperature: Double,
-    @SerialName("response_format") val responseFormat: JsonElement = JSON_OBJECT_OUTPUT_FORMAT.openAiFormat,
+    @SerialName("response_format") val responseFormat: OpenAiResponseFormat = OpenAiResponseFormat(),
 )
+
+@Serializable
+private data class OpenAiResponseFormat(val type: String = "json_object")
 
 @Serializable
 private data class OpenAiMessage(val role: String, val content: String)

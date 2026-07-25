@@ -180,8 +180,7 @@ class ModelProviderCatalogTest {
         assertEquals("{\"ok\":true}", generation.text)
         assertEquals(7, generation.promptTokens)
         assertEquals(listOf("analyst:70b", "coder:14b"), inspection.discoveredModels)
-        assertTrue(requests.first().contains("\"format\":{\"type\":\"object\""))
-        assertTrue(requests.first().contains("\"operations\":{\"type\":\"array\",\"minItems\":1"))
+        assertTrue(requests.first().contains("\"format\":\"json\""))
         assertTrue(requests.first().contains("\"think\":false"))
         assertTrue(requests.first().contains("\"num_ctx\":4096"))
     }
@@ -230,28 +229,6 @@ class ModelProviderCatalogTest {
         assertTrue(diagnostics.last().contains("\"formatPresent\":false"))
         assertTrue(diagnostics.all { it.contains("\"httpStatus\":200") && it.contains("\"think\":false") })
         assertTrue(diagnostics.none { it.contains(privatePrompt) || it.contains("private reasoning") || it.contains("PROPOSE_DOMAIN_ACTION") })
-    }
-
-    @Test
-    fun `Ollama coding schema failure does not fall back to unconstrained generation`() = runTest {
-        val requests = mutableListOf<String>()
-        val engine = MockEngine { request ->
-            requests += (request.body as? TextContent)?.text.orEmpty()
-            respond(
-                """{"response":"","done":true,"done_reason":"stop","eval_count":0}""",
-                headers = headersOf(HttpHeaders.ContentType, "application/json"),
-            )
-        }
-        val catalog = defaultLocalModelProviderCatalog()
-        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
-
-        assertFailsWith<IllegalStateException> {
-            provider.executeCodingPatch("prompt", 128, 4_096)
-        }
-        provider.close()
-
-        assertEquals(1, requests.size)
-        assertTrue(requests.single().contains("\"minItems\":1"))
     }
 
     @Test
@@ -350,10 +327,8 @@ class ModelProviderCatalogTest {
     @Test
     fun `remote OpenAI compatible adapter resolves environment reference without persisting the secret`() = runTest {
         var authorization: String? = null
-        var body = ""
         val engine = MockEngine { request ->
             authorization = request.headers[HttpHeaders.Authorization]
-            body = (request.body as? TextContent)?.text.orEmpty()
             respond(
                 """{"choices":[{"message":{"role":"assistant","content":"{}"}}]}""",
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
@@ -376,8 +351,6 @@ class ModelProviderCatalogTest {
         provider.close()
 
         assertEquals("Bearer runtime-secret", authorization)
-        assertTrue(body.contains("\"response_format\":{\"type\":\"json_schema\""))
-        assertTrue(body.contains("\"minItems\":1"))
         assertFalse(endpoint.toString().contains("runtime-secret"))
     }
 
