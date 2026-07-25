@@ -431,7 +431,7 @@ class CodingWorkerTest {
         run(repository, "git", "add", ".")
         run(repository, "git", "commit", "-m", "Add ambiguous source")
 
-        assertFailsWith<IllegalArgumentException> {
+        val error = assertFailsWith<IllegalArgumentException> {
             LocalCodingWorkspaceGateway().applyAndCommit(
                 repository.toString(),
                 CodingPatchProposal(
@@ -446,6 +446,10 @@ class CodingWorkerTest {
             )
         }
 
+        assertEquals(
+            "REPLACE src/Main.kt replacement 1 old text occurs 2 times; expected exactly once",
+            error.message,
+        )
         assertEquals("fun answer() = 1\nfun answer() = 1\n", Files.readString(source))
         assertEquals("", run(repository, "git", "status", "--porcelain"))
     }

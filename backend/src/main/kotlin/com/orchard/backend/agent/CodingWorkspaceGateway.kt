@@ -396,9 +396,13 @@ class LocalCodingWorkspaceGateway(
                         "REPLACE target must be an existing regular file"
                     }
                     var candidate = Files.readString(target, Charsets.UTF_8)
-                    operation.replacements.forEach { replacement ->
-                        require(replacement.old.isNotEmpty() && candidate.indexOf(replacement.old) == candidate.lastIndexOf(replacement.old)) {
-                            "REPLACE old text must occur exactly once"
+                    operation.replacements.forEachIndexed { index, replacement ->
+                        require(replacement.old.isNotEmpty()) {
+                            "REPLACE ${operation.path} replacement ${index + 1} old text is empty"
+                        }
+                        val occurrenceCount = exactOccurrenceCount(candidate, replacement.old)
+                        require(occurrenceCount == 1) {
+                            "REPLACE ${operation.path} replacement ${index + 1} old text occurs $occurrenceCount times; expected exactly once"
                         }
                         candidate = candidate.replaceFirst(replacement.old, replacement.new)
                     }
@@ -808,3 +812,13 @@ private data class SourceDeclarationMatch(
 internal fun sha256Content(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8))
     .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+private fun exactOccurrenceCount(content: String, value: String): Int {
+    var count = 0
+    var index = content.indexOf(value)
+    while (index >= 0) {
+        count += 1
+        index = content.indexOf(value, index + 1)
+    }
+    return count
+}
