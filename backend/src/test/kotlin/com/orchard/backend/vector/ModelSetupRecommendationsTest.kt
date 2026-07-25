@@ -57,6 +57,16 @@ class ModelSetupRecommendationsTest {
     }
 
     @Test
+    fun `128 GB apple silicon reserves enough output for multi file coding proposals`() {
+        val coding = LocalModelSetupRecommendations.resolve("apple-silicon-128gb")
+            .profileOverrides
+            .single { it.profileId == DefaultModelExecutionProfiles.boundedCodingPatch.id }
+
+        assertEquals(80_000, coding.inputBudgetTokens)
+        assertEquals(16_000, coding.outputBudgetTokens)
+    }
+
+    @Test
     fun `every preset provides compatible bindings for all stages within its memory floor`() {
         val presetIds = listOf(
             "classic-pc-8gb",

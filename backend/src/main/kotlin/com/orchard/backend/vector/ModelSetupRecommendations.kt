@@ -207,7 +207,7 @@ object LocalModelSetupRecommendations {
             minimumMemoryGiB = 128,
             summary = "The larger reasoning model with expanded analysis and audit context on 128 GB unified memory.",
             generalModel = model("gpt-oss:120b", 65_000, 131_072, 12),
-            aperture = Aperture(64_000, 4_000, 16_000, 2_000, 16_000, 3_000, 32_000, 8_000, 88_000, 8_000, 80_000, 4_000),
+            aperture = Aperture(64_000, 4_000, 16_000, 2_000, 16_000, 3_000, 80_000, 16_000, 88_000, 8_000, 80_000, 4_000),
         ),
     )
 
