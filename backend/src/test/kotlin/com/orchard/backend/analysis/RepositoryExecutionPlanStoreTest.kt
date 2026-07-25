@@ -1,7 +1,10 @@
 package com.orchard.backend.analysis
 
 import com.orchard.backend.agent.CodingContextFile
+import com.orchard.backend.agent.CodingWorkerAttempt
 import com.orchard.backend.agent.CodingRepositoryContext
+import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
+import com.orchard.backend.agent.CODING_ATTEMPT_RETRY_AUTHORIZED
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import java.nio.file.Files
@@ -14,6 +17,25 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class RepositoryExecutionPlanStoreTest {
+    @Test
+    fun `only a terminal block on the current plan requests repository reanalysis`() {
+        val current = plan(2, 2, "a".repeat(40))
+        val blocked = CodingWorkerAttempt(
+            attemptId = 1,
+            runId = current.runId,
+            executionPlanId = current.planId,
+            executionPlanHash = current.hash,
+            state = CODING_ATTEMPT_BLOCKED,
+            resultStatus = "PLAN_BLOCKED",
+            diagnostic = "The accepted plan requires a cosmetic source mutation.",
+        )
+
+        assertTrue(repositoryPlanRequiresRevision(current, listOf(blocked)))
+        assertFalse(repositoryPlanRequiresRevision(current, listOf(blocked.copy(executionPlanId = 1))))
+        assertFalse(repositoryPlanRequiresRevision(current, listOf(blocked.copy(state = CODING_ATTEMPT_RETRY_AUTHORIZED))))
+        assertFalse(repositoryPlanRequiresRevision(current, listOf(blocked, blocked.copy(attemptId = 2, state = CODING_ATTEMPT_RETRY_AUTHORIZED))))
+    }
+
     @Test
     fun `repository analysis attempt block requires durable explicit retry`() {
         val directory = createTempDirectory("orchard-analysis-attempts-")
@@ -181,6 +203,8 @@ class RepositoryExecutionPlanStoreTest {
 
         assert(prompt.contains("A valid response has exactly this shape:"))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
+        assert(prompt.contains("If priorRejectedCodingPlanDiagnostic is non-null"))
+        assert(prompt.contains("Revise the operation authority to correct that exact plan defect"))
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
         assert(prompt.contains("copying scope exactly without paraphrasing, omission, or invention"))
         assert(prompt.contains("or from a path targeted by a CREATE, MODIFY, or DELETE operation"))

@@ -25,7 +25,10 @@ import com.orchard.backend.agent.CodingPatchProposal
 import com.orchard.backend.agent.CodingTextReplacement
 import com.orchard.backend.agent.CodingWorkerService
 import com.orchard.backend.agent.CodingWorkerTickStatus
+import com.orchard.backend.agent.CodingWorkerAttempt
+import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
+import com.orchard.backend.agent.TransientCodingWorkerAttemptStore
 import com.orchard.backend.agent.TransientCodingWorkerStore
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
@@ -183,6 +186,52 @@ class CompanyCircuitTest {
             listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, ANALYSIS_ATTEMPT_BLOCKED),
             attempts.load().map { it.state },
         )
+    }
+
+    @Test
+    fun `terminal coding plan block requests a grounded repository analysis revision`() = runTest {
+        val state = createTempDirectory("orchard-company-plan-revision-state-")
+        val projects = createTempDirectory("orchard-company-plan-revision-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace)
+        val model = ScenarioStaffModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val codingAttempts = TransientCodingWorkerAttemptStore()
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            codingAttemptStore = codingAttempts,
+        )
+        val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
+
+        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick(runId).status)
+        assertEquals(emptyList(), analysis.eligibleRunIds())
+        val blockedPlan = analysis.plans().single()
+        val diagnostic = "The accepted plan requires a cosmetic source mutation."
+        codingAttempts.appendNext { attemptId ->
+            CodingWorkerAttempt(
+                attemptId = attemptId,
+                runId = runId,
+                executionPlanId = blockedPlan.planId,
+                executionPlanHash = blockedPlan.hash,
+                state = CODING_ATTEMPT_BLOCKED,
+                resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                diagnostic = diagnostic,
+            )
+        }
+
+        assertEquals(listOf(runId), analysis.eligibleRunIds())
+        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick(runId).status)
+        assertEquals(listOf(1, 2), analysis.plans().map { it.revision })
+        assertTrue(model.analysisPrompts.last().contains(diagnostic))
+        assertEquals(emptyList(), analysis.eligibleRunIds())
     }
 
     @Test
@@ -778,6 +827,7 @@ class CompanyCircuitTest {
         private var analysisCalls = 0
         val codingCallCount: Int get() = codingCalls
         val auditCallCount: Int get() = auditCalls
+        val analysisPrompts = mutableListOf<String>()
         var auditMaxOutputTokens: Int? = null
             private set
         var auditContextWindowTokens: Int? = null
@@ -840,6 +890,7 @@ class CompanyCircuitTest {
             maxOutputTokens: Int,
             contextWindowTokens: Int,
         ): ModelGeneration {
+            analysisPrompts += prompt
             val contentHash = requireNotNull(
                 Regex("\\\"path\\\":\\\"build\\.gradle\\.kts\\\",\\\"content\\\":.*?\\\"contentHash\\\":\\\"([0-9a-f]{64})\\\"")
                     .find(prompt)

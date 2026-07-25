@@ -64,6 +64,8 @@ Work definitions may include `repositoryEvidenceSelectors`. Each selector binds 
 
 Deterministic analysis rejection and model failure append a blocked attempt tied to the run and pinned repository revision. Blocked runs are excluded from automatic reconciliation until the retry endpoint appends explicit successor authority; each unsuccessful successor blocks again without deleting prior attempts.
 
+A terminal coding block tied to the exact current plan ID and hash makes repository analysis eligible to produce a successor plan on the same pinned repository revision. The coding rejection diagnostic is included in the authoritative analysis envelope. Retry authorization on the blocked plan suppresses reanalysis until that authorized coding attempt reaches a terminal outcome.
+
 ## Standards, Campaigns, and Resolution
 
 | Method | Path | Purpose |

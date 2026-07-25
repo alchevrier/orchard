@@ -2,7 +2,10 @@ package com.orchard.backend.analysis
 
 import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
+import com.orchard.backend.agent.CodingWorkerAttempt
+import com.orchard.backend.agent.CodingWorkerAttemptStore
 import com.orchard.backend.agent.CodingWorkspaceGateway
+import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
@@ -101,6 +104,7 @@ private data class RepositoryAnalysisEnvelope(
     val requiredEvidencePathGroups: List<RequiredEvidencePathGroup>,
     val requiredScopeEvidencePathGroupIds: List<List<String>>,
     val priorRejectedAnalysisDiagnostic: String?,
+    val priorRejectedCodingPlanDiagnostic: String?,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
 )
@@ -115,6 +119,7 @@ class RepositoryAnalysisService(
     private val systemPrompt: String = loadPrompt(),
     private val companyControl: CompanyControlService? = null,
     private val attemptStore: RepositoryAnalysisAttemptStore = TransientRepositoryAnalysisAttemptStore(),
+    private val codingAttemptStore: CodingWorkerAttemptStore? = null,
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
@@ -218,6 +223,7 @@ class RepositoryAnalysisService(
 
     fun eligibleRunIds(): List<Long> {
         val plans = planStore.load()
+        val codingAttempts = codingAttemptStore?.load().orEmpty()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
             .sortedBy { it.runId }
@@ -238,7 +244,8 @@ class RepositoryAnalysisService(
                         candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
                     )
                 }.getOrNull() ?: return@filter true
-                staticCandidates.none { it.coversAcceptedScope(candidate, context) }
+                val currentPlan = staticCandidates.filter { it.coversAcceptedScope(candidate, context) }.maxByOrNull { it.revision }
+                currentPlan == null || repositoryPlanRequiresRevision(currentPlan, codingAttempts)
             }
             .map { it.runId }
             .toList()
@@ -340,7 +347,13 @@ class RepositoryAnalysisService(
         )?.let { diagnostic ->
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = diagnostic)
         }
-        if (plans.any { it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) }) {
+        val currentPlan = plans.asSequence()
+            .filter { it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) }
+            .maxByOrNull { it.revision }
+        val rejectedCodingPlanDiagnostic = currentPlan?.let {
+            repositoryPlanRevisionDiagnostic(it, codingAttemptStore?.load().orEmpty())
+        }
+        if (currentPlan != null && rejectedCodingPlanDiagnostic == null) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, run.runId)
         }
         val profile = DefaultModelExecutionProfiles.broadRepositoryAnalysis
@@ -370,6 +383,7 @@ class RepositoryAnalysisService(
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             ),
             attemptStore.retryDiagnostic(run.runId, baseRevision),
+            rejectedCodingPlanDiagnostic,
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
@@ -615,7 +629,7 @@ class RepositoryAnalysisService(
             DISPOSITION_COMPLETE,
             DISPOSITION_CONFLICTING,
         )
-        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, unresolvedQuestions)"
+        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage(scope, evidencePaths, operationOrders, compliantEvidencePaths), operations, verificationCommands, unresolvedQuestions)"
         const val LEGACY_IDENTICAL_OUTCOME_BLOCK_THRESHOLD = 2
 
         fun loadPrompt(): String = requireNotNull(
@@ -668,6 +682,20 @@ internal fun repositoryAnalysisIdentityDiagnostic(
 private fun RepositoryExecutionPlan.coversAcceptedScope(run: WorkflowRunView): Boolean {
     return repositoryScopeCoverageDiagnostic(run.workDefinition?.definition?.scope.orEmpty(), content) == null
 }
+
+internal fun repositoryPlanRequiresRevision(
+    currentPlan: RepositoryExecutionPlan,
+    codingAttempts: List<CodingWorkerAttempt>,
+): Boolean = repositoryPlanRevisionDiagnostic(currentPlan, codingAttempts) != null
+
+private fun repositoryPlanRevisionDiagnostic(
+    currentPlan: RepositoryExecutionPlan,
+    codingAttempts: List<CodingWorkerAttempt>,
+): String? = codingAttempts.lastOrNull {
+    it.runId == currentPlan.runId &&
+        it.executionPlanId == currentPlan.planId &&
+        it.executionPlanHash == currentPlan.hash
+}?.takeIf { it.state == CODING_ATTEMPT_BLOCKED }?.diagnostic
 
 private fun RepositoryExecutionPlan.coversAcceptedScope(
     run: WorkflowRunView,

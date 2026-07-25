@@ -216,6 +216,7 @@ fun main() {
         repositoryBindings,
     )
     val companyCircuit = CompanyCircuitService(workspace, companyControl, OrchardPaths.LOCAL_REPOSITORIES_DIR)
+    val codingWorkerAttemptStore = FileCodingWorkerAttemptStore(OrchardPaths.WORKSPACE_DIR)
     val repositoryAnalysis = RepositoryAnalysisService(
         workspace,
         modelProviders,
@@ -224,6 +225,7 @@ fun main() {
         resourceController,
         companyControl = companyControl,
         attemptStore = FileRepositoryAnalysisAttemptStore(OrchardPaths.WORKSPACE_DIR),
+        codingAttemptStore = codingWorkerAttemptStore,
     )
     val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
     val standardsPolicy = StandardsPolicyService(
@@ -269,7 +271,7 @@ fun main() {
         companyControl = companyControl,
         repositoryAnalysis = repositoryAnalysis,
         profileSettingsStore = modelProfileSettingsStore,
-        attemptStore = FileCodingWorkerAttemptStore(OrchardPaths.WORKSPACE_DIR),
+        attemptStore = codingWorkerAttemptStore,
     )
     val companyAudit = CompanyAuditService(
         workspace,
