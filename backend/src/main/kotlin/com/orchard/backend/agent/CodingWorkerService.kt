@@ -298,7 +298,8 @@ class CodingWorkerService(
         val planContextBudget = executionPlan?.let {
             val emptyContext = CodingRepositoryContext(emptyList(), 0)
             profile.inputBudgetTokens - estimateModelTokens(prompt(emptyContext)) +
-                estimateModelTokens(json.encodeToString(emptyContext))
+                estimateModelTokens(json.encodeToString(emptyContext)) -
+                if (priorRejectedCodingDiagnostic == null) 0 else SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES
         }
         if (planContextBudget != null && planContextBudget <= 0) {
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding envelope exceeds the model input budget.")
@@ -1174,6 +1175,7 @@ internal fun sourceBackedDeclarationAnchors(contextFile: CodingContextFile): Lis
             sourceLines.subList(index, minOf(index + SOURCE_ANCHOR_LINES, sourceLines.size))
                 .joinToString("\n")
                 .trimEnd()
+                .let { takeUtf8Prefix(it, MAX_SOURCE_ANCHOR_BYTES) }
         }
     }.filter(String::isNotEmpty)
         .distinct()
@@ -1191,6 +1193,7 @@ internal fun sourceGroundedRetryDiagnostic(
         .mapNotNull { contextFile ->
             sourceBackedDeclarationAnchors(contextFile).firstOrNull()?.let { contextFile.path to it }
         }
+        .take(1)
         .toList()
     if (anchors.isEmpty()) return diagnostic
     return buildString {
@@ -1198,6 +1201,20 @@ internal fun sourceGroundedRetryDiagnostic(
         append(anchors.joinToString(" | ") { (path, anchor) -> "$path ${Json.encodeToString(anchor)}" })
         append('.')
     }
+}
+
+private fun takeUtf8Prefix(value: String, maxBytes: Int): String {
+    var bytes = 0
+    var end = 0
+    while (end < value.length) {
+        val codePoint = value.codePointAt(end)
+        val charCount = Character.charCount(codePoint)
+        val encodedBytes = value.substring(end, end + charCount).encodeToByteArray().size
+        if (bytes + encodedBytes > maxBytes) break
+        bytes += encodedBytes
+        end += charCount
+    }
+    return value.substring(0, end)
 }
 
 internal fun codingProposalAuthorizationDiagnostic(
@@ -1250,3 +1267,5 @@ private const val MAX_REJECTED_ANCHOR_DECLARATIONS = 5
 private const val MAX_REJECTED_ANCHOR_EXAMPLES = 2
 private const val SOURCE_ANCHOR_LINES = 4
 private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
+private const val MAX_SOURCE_ANCHOR_BYTES = 1_024
+private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096

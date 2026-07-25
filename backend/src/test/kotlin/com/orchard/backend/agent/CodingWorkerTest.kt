@@ -389,6 +389,10 @@ class CodingWorkerTest {
     val groundedLegacyDiagnostic = sourceGroundedRetryDiagnostic(attempts.single().diagnostic, context)
     assertTrue(requireNotNull(groundedLegacyDiagnostic).contains("Exact contiguous source text for this correction"))
     assertTrue(groundedLegacyDiagnostic.contains("MaterialTheme.colors.copy"))
+        assertTrue(
+            Json.encodeToString(groundedLegacyDiagnostic).encodeToByteArray().size -
+                Json.encodeToString(attempts.single().diagnostic).encodeToByteArray().size < 4_096,
+        )
     assertEquals(groundedLegacyDiagnostic, sourceGroundedRetryDiagnostic(groundedLegacyDiagnostic, context))
         assertNull(codingRejectedAnchorDiagnostic(
             proposal,
