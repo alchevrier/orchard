@@ -450,7 +450,7 @@ class EngineeringStandardsService(
         .any { it.id == projectId && it.type == com.orchard.backend.workspace.ENTITY_PROJECT }
 
     private fun verificationCommands(buildSystem: String): List<String> = when (buildSystem.lowercase()) {
-        "gradle" -> listOf("./gradlew build --no-daemon", "./gradlew test --no-daemon")
+        "gradle" -> listOf("./gradlew build --no-daemon", "./gradlew check --no-daemon")
         "maven" -> listOf("./mvnw test")
         "cargo" -> listOf("cargo test")
         "meson" -> listOf("meson test -C build")

@@ -152,6 +152,20 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
+    fun `automatic correction is available only once per execution plan`() {
+        val firstBlock = attempt(1, CODING_ATTEMPT_BLOCKED, "First defect.")
+        val authorization = attempt(2, CODING_ATTEMPT_RETRY_AUTHORIZED, "One correction.")
+        val consumed = attempt(3, CODING_ATTEMPT_RETRY_CONSUMED, "Correction consumed.")
+
+        assertTrue(automaticCodingCorrectionAvailable(listOf(firstBlock), RUN_ID, PLAN_ID, PLAN_HASH))
+        assertEquals(
+            false,
+            automaticCodingCorrectionAvailable(listOf(firstBlock, authorization, consumed), RUN_ID, PLAN_ID, PLAN_HASH),
+        )
+        assertTrue(automaticCodingCorrectionAvailable(listOf(firstBlock, authorization, consumed), RUN_ID, PLAN_ID + 1, PLAN_HASH))
+    }
+
+    @Test
     fun `restart supersedes legacy authorization for a recurrent diagnostic`() {
         val store = TransientCodingWorkerAttemptStore()
         store.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_BLOCKED, "Repeated defect.") }
@@ -204,7 +218,7 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
-    fun `scope accepted application failure bootstraps one corrective successor`() {
+    fun `scope accepted application failure does not bootstrap a second corrective successor`() {
         val directory = createTempDirectory("orchard-application-failure-attempts-")
         val attemptStore = FileCodingWorkerAttemptStore(directory)
         attemptStore.appendNext { attemptId ->
@@ -229,8 +243,8 @@ class CodingWorkerAttemptStoreTest {
         )
 
         val recovered = attemptStore.load()
-        assertEquals(listOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_AUTHORIZED), recovered.takeLast(2).map { it.state })
-        assertTrue(requireNotNull(attemptStore.retryDiagnostic(RUN_ID, PLAN_ID, PLAN_HASH)).contains("REPLACE old text must occur exactly once"))
+        assertEquals(CODING_ATTEMPT_BLOCKED, recovered.last().state)
+        assertEquals(null, attemptStore.retryDiagnostic(RUN_ID, PLAN_ID, PLAN_HASH))
 
         CodingWorkerService(
             workspace = WorkspaceStore(),

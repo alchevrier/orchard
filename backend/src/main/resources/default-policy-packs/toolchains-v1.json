@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packId": "orchard.default-toolchains",
-  "packVersion": 1,
+  "packVersion": 2,
   "profiles": [
     {
       "id": "gradle-wrapper",
@@ -9,7 +9,7 @@
       "allFiles": ["gradlew"],
       "commands": {
         "BUILD": { "executable": "./gradlew", "arguments": ["assemble", "--no-daemon"] },
-        "TEST": { "executable": "./gradlew", "arguments": ["test", "--no-daemon"] }
+        "TEST": { "executable": "./gradlew", "arguments": ["check", "--no-daemon"] }
       }
     },
     {

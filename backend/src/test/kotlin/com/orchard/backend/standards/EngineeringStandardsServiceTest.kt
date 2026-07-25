@@ -166,13 +166,13 @@ class EngineeringStandardsServiceTest {
             "citations": [{"path":"README.md","contentHash":"$contentHash","observation":"README declares append-only authority."}],
             "affectedPaths": ["README.md"],
             "acceptanceCriteria": ["Corrupt authority records are rejected."],
-            "verificationCommands": ["./gradlew test --no-daemon"],
+            "verificationCommands": ["./gradlew check --no-daemon"],
             "confidence": 0.9
           }],
           "proposedBacklog": [
             {"nodeId":"EPIC","parentNodeId":null,"type":"EPIC","title":"Harden authority","description":"Make authority recovery verifiable.","findingIds":["FINDING_AUTHORITY"],"acceptanceCriteria":[],"verificationCommands":[]},
             {"nodeId":"STORY","parentNodeId":"EPIC","type":"STORY","title":"Verify recovery","description":"Prove corruption handling.","findingIds":["FINDING_AUTHORITY"],"acceptanceCriteria":[],"verificationCommands":[]},
-            {"nodeId":"TASK","parentNodeId":"STORY","type":"TASK","title":"Add recovery test","description":"Exercise corrupt persisted state.","findingIds":["FINDING_AUTHORITY"],"acceptanceCriteria":["Corrupt authority records are rejected."],"verificationCommands":["./gradlew test --no-daemon"]}
+            {"nodeId":"TASK","parentNodeId":"STORY","type":"TASK","title":"Add recovery test","description":"Exercise corrupt persisted state.","findingIds":["FINDING_AUTHORITY"],"acceptanceCriteria":["Corrupt authority records are rejected."],"verificationCommands":["./gradlew check --no-daemon"]}
           ]
         }
     """.trimIndent()

@@ -545,6 +545,23 @@ class CodingWorkerTest {
         }
     }
 
+    @Test
+    fun `built in Gradle policy uses the cross project check lifecycle`() {
+        val repository = initializedRepository()
+        val gradle = repository.resolve("gradlew")
+        Files.writeString(gradle, "#!/bin/sh\nexit 0\n")
+        gradle.toFile().setExecutable(true)
+        run(repository, "git", "add", "gradlew")
+        run(repository, "git", "commit", "-m", "Add Gradle wrapper")
+
+        val policy = requireNotNull(FileToolchainPolicyCatalog().resolve(repository))
+
+        assertEquals("orchard.default-toolchains", policy.packId)
+        assertEquals(2, policy.packVersion)
+        assertEquals("gradle-wrapper", policy.profileId)
+        assertEquals("./gradlew check --no-daemon", policy.commands.getValue("TEST").canonical())
+    }
+
         @Test
         fun `external toolchain pack adds verification without rebuilding Orchard`() {
                 val repository = initializedRepository()

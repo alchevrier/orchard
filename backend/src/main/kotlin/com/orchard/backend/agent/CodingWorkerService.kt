@@ -646,8 +646,9 @@ class CodingWorkerService(
         proposalHash: String,
         diagnostic: String,
     ): String? {
+        val attempts = attemptStore.load()
         val repeatedRejection = codingRejectionIsRepeated(
-            attemptStore.load(),
+            attempts,
             runId,
             planId,
             planHash,
@@ -667,7 +668,7 @@ class CodingWorkerService(
                     proposalHash = proposalHash,
                 )
             }
-            if (!repeatedRejection) {
+            if (!repeatedRejection && automaticCodingCorrectionAvailable(attempts, runId, planId, planHash)) {
                 attemptStore.appendNext { attemptId ->
                     CodingWorkerAttempt(
                         attemptId = attemptId,
@@ -989,6 +990,18 @@ internal fun codingRejectionIsRepeated(
         it.executionPlanHash == planHash &&
         it.state == CODING_ATTEMPT_BLOCKED &&
         (it.proposalHash == proposalHash || it.diagnostic == diagnostic)
+}
+
+internal fun automaticCodingCorrectionAvailable(
+    attempts: List<CodingWorkerAttempt>,
+    runId: Long,
+    planId: Long,
+    planHash: String,
+): Boolean = attempts.none {
+    it.runId == runId &&
+        it.executionPlanId == planId &&
+        it.executionPlanHash == planHash &&
+        it.state == CODING_ATTEMPT_RETRY_AUTHORIZED
 }
 
 internal fun codingProposalShapeDiagnostic(proposal: CodingPatchProposal): String? {

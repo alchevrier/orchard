@@ -272,7 +272,7 @@ class CompanyCircuitService(
         .orEmpty()
         .firstOrNull { it.isNotBlank() }
         ?: when (blueprint?.toolchain?.trim()?.lowercase()) {
-            "gradle", "kotlin", "java" -> "./gradlew test --no-daemon"
+            "gradle", "kotlin", "java" -> "./gradlew check --no-daemon"
             "maven" -> "./mvnw test"
             "cargo", "rust" -> "cargo test"
             "meson" -> "meson test -C build"
@@ -285,7 +285,7 @@ class CompanyCircuitService(
         val root = repositoryPath?.let(Path::of)
             ?: throw IllegalArgumentException("Repository verification must be selected before delivery starts.")
         return when {
-            Files.isRegularFile(root.resolve("gradlew")) -> "./gradlew test --no-daemon"
+            Files.isRegularFile(root.resolve("gradlew")) -> "./gradlew check --no-daemon"
             Files.isRegularFile(root.resolve("mvnw")) -> "./mvnw test"
             Files.isRegularFile(root.resolve("Cargo.toml")) -> "cargo test"
             Files.isRegularFile(root.resolve("package.json")) -> "npm test"
