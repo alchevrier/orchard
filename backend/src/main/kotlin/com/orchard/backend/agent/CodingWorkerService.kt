@@ -265,13 +265,41 @@ class CodingWorkerService(
         )
 
         val contextQuery = run.context.title + "\n" + run.context.content
+        val planPaths = executionPlan?.content?.operations
+            ?.filter { it.action != "VERIFY" }
+            ?.map { it.path }
+            .orEmpty()
+        fun envelope(repositoryContext: CodingRepositoryContext) = CodingWorkerModelEnvelope(
+            executionProfile = profile,
+            workflowStepId = CODING_WORKFLOW_STEP_ID,
+            allowedActions = listOf(CODING_FILE_WRITE, CODING_FILE_REPLACE, CODING_FILE_DELETE),
+            forbiddenActions = listOf("EXECUTE_COMMAND", "APPROVE_CRITERION", "COMPLETE_WORKFLOW", "PUSH", "MERGE"),
+            requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
+            run = run,
+            executionPlan = executionPlan,
+            priorRejectedCodingDiagnostic = priorRejectedCodingDiagnostic,
+            repositoryContext = repositoryContext,
+        )
+        fun prompt(repositoryContext: CodingRepositoryContext): String {
+            val envelopeJson = json.encodeToString(envelope(repositoryContext))
+            return "$systemPrompt\n\nAuthoritative coding execution envelope:\n$envelopeJson"
+        }
+        val planContextBudget = executionPlan?.let {
+            val emptyContext = CodingRepositoryContext(emptyList(), 0)
+            profile.inputBudgetTokens - estimateModelTokens(prompt(emptyContext)) +
+                estimateModelTokens(json.encodeToString(emptyContext))
+        }
+        if (planContextBudget != null && planContextBudget <= 0) {
+            return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding envelope exceeds the model input budget.")
+        }
         val repositoryContext = runCatching {
             executionPlan?.let { plan ->
                 workspaceGateway.collectPlanContext(
                     workspacePath = workspacePath,
                     repositoryRevision = plan.baseRevision,
-                    paths = plan.content.operations.filter { it.action != "VERIFY" }.map { it.path },
+                    paths = planPaths,
                     query = contextQuery,
+                    maxSerializedBytes = requireNotNull(planContextBudget),
                 )
             } ?: workspaceGateway.collectContext(workspacePath, contextQuery)
         }.getOrElse { error ->
@@ -283,19 +311,9 @@ class CodingWorkerService(
             CodingWorkerTickStatus.APPLICATION_FAILED,
             "Accepted execution-plan paths are missing from the pinned coding context.",
         )
-        val envelope = CodingWorkerModelEnvelope(
-            executionProfile = profile,
-            workflowStepId = CODING_WORKFLOW_STEP_ID,
-            allowedActions = listOf(CODING_FILE_WRITE, CODING_FILE_REPLACE, CODING_FILE_DELETE),
-            forbiddenActions = listOf("EXECUTE_COMMAND", "APPROVE_CRITERION", "COMPLETE_WORKFLOW", "PUSH", "MERGE"),
-            requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
-            run = run,
-            executionPlan = executionPlan,
-            priorRejectedCodingDiagnostic = priorRejectedCodingDiagnostic,
-            repositoryContext = repositoryContext,
-        )
+        val envelope = envelope(repositoryContext)
         val envelopeJson = json.encodeToString(envelope)
-        val prompt = "$systemPrompt\n\nAuthoritative coding execution envelope:\n$envelopeJson"
+        val prompt = prompt(repositoryContext)
         if (estimateModelTokens(prompt) > profile.inputBudgetTokens) {
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding context exceeds the model input budget.")
         }

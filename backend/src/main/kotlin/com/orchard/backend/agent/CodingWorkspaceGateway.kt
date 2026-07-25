@@ -16,6 +16,8 @@ import java.security.MessageDigest
 import java.util.Comparator
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 const val CODING_FILE_WRITE = "WRITE"
 const val CODING_FILE_DELETE = "DELETE"
@@ -83,6 +85,13 @@ interface CodingWorkspaceGateway {
         paths: List<String>,
         query: String,
     ): CodingRepositoryContext = collectIntelligenceContext(workspacePath, repositoryRevision, paths)
+    fun collectPlanContext(
+        workspacePath: String,
+        repositoryRevision: String,
+        paths: List<String>,
+        query: String,
+        maxSerializedBytes: Int,
+    ): CodingRepositoryContext = collectPlanContext(workspacePath, repositoryRevision, paths, query)
     fun collectIntelligenceContext(workspacePath: String, repositoryRevision: String, paths: List<String>): CodingRepositoryContext =
         collectAnalysisContext(workspacePath, paths.joinToString(" "))
     fun currentRevision(workspacePath: String): String? = null
@@ -133,6 +142,20 @@ class LocalCodingWorkspaceGateway(
         repositoryRevision: String,
         paths: List<String>,
         query: String,
+    ): CodingRepositoryContext = collectPlanContext(
+        workspacePath,
+        repositoryRevision,
+        paths,
+        query,
+        MAX_CONTEXT_BYTES,
+    )
+
+    override fun collectPlanContext(
+        workspacePath: String,
+        repositoryRevision: String,
+        paths: List<String>,
+        query: String,
+        maxSerializedBytes: Int,
     ): CodingRepositoryContext {
         val root = validatedRoot(workspacePath)
         requireGitWorkspace(root)
@@ -141,23 +164,47 @@ class LocalCodingWorkspaceGateway(
         require(distinctPaths.isNotEmpty() && distinctPaths.size <= MAX_CONTEXT_FILES) {
             "Repository plan path count is invalid"
         }
+        require(maxSerializedBytes > 0) { "Repository plan context budget is invalid" }
         val queryTokens = tokens(query)
-        val maxFileBytes = minOf(MAX_CONTEXT_FILE_BYTES, MAX_CONTEXT_BYTES / distinctPaths.size)
-        val selected = distinctPaths.mapNotNull { relative ->
+        val sources = distinctPaths.mapNotNull { relative ->
             runCatching { validatedRelative(root, relative, mustExist = false) }.getOrNull() ?: return@mapNotNull null
             val bytes = runCatching {
                 readGitBlob(root, repositoryRevision, relative, MAX_CONTEXT_SOURCE_BYTES)
             }.getOrNull() ?: return@mapNotNull null
             if (bytes.any { it == 0.toByte() }) return@mapNotNull null
-            val source = bytes.toString(Charsets.UTF_8)
-            CodingContextFile(
-                path = relative,
-                content = focusedContextExcerpt(source, queryTokens, maxFileBytes),
-                contentHash = sha256Content(source),
-                matchedDeclarations = matchedSourceDeclarations(source, queryTokens),
-            )
+            relative to bytes.toString(Charsets.UTF_8)
         }
-        return CodingRepositoryContext(selected, distinctPaths.size - selected.size)
+        if (sources.size != distinctPaths.size) {
+            return CodingRepositoryContext(emptyList(), distinctPaths.size - sources.size)
+        }
+        fun context(maxFileBytes: Int): CodingRepositoryContext = CodingRepositoryContext(
+            files = sources.map { (relative, source) ->
+                val content = focusedContextExcerpt(source, queryTokens, maxFileBytes)
+                CodingContextFile(
+                    path = relative,
+                    content = content,
+                    contentHash = sha256Content(source),
+                    matchedDeclarations = matchedSourceDeclarations(content, queryTokens),
+                )
+            },
+            omittedFileCount = 0,
+        )
+        var maxFileBytes = minOf(MAX_CONTEXT_FILE_BYTES, maxSerializedBytes / distinctPaths.size)
+        require(maxFileBytes >= MIN_PLAN_CONTEXT_FILE_BYTES) { "Repository plan context budget is too small" }
+        var selected = context(maxFileBytes)
+        var serializedBytes = CONTEXT_JSON.encodeToString(selected).encodeToByteArray().size
+        while (serializedBytes > maxSerializedBytes && maxFileBytes > MIN_PLAN_CONTEXT_FILE_BYTES) {
+            maxFileBytes = maxOf(
+                MIN_PLAN_CONTEXT_FILE_BYTES,
+                minOf(maxFileBytes - 1, maxFileBytes * maxSerializedBytes / serializedBytes),
+            )
+            selected = context(maxFileBytes)
+            serializedBytes = CONTEXT_JSON.encodeToString(selected).encodeToByteArray().size
+        }
+        require(serializedBytes <= maxSerializedBytes && selected.files.all { it.content.isNotEmpty() }) {
+            "Repository plan context does not fit the model input budget"
+        }
+        return selected
     }
 
     override fun collectIntelligenceContext(
@@ -621,6 +668,7 @@ class LocalCodingWorkspaceGateway(
         const val MAX_CONTEXT_FILE_BYTES = 64 * 1024
         const val MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024L
         const val MAX_CONTEXT_BYTES = 256 * 1024
+        const val MIN_PLAN_CONTEXT_FILE_BYTES = 512
         const val MAX_ANALYSIS_CONTEXT_FILES = 96
         const val MAX_ANALYSIS_CONTEXT_BYTES = 768 * 1024
         const val MAX_ANALYSIS_CONTEXT_FILE_BYTES = 12 * 1024
@@ -651,6 +699,7 @@ class LocalCodingWorkspaceGateway(
         val DOCUMENTATION_INDEX_FILES = setOf(
             "docs/README.md", "docs/user-guide/README.md", "docs/developer/README.md"
         )
+        val CONTEXT_JSON = Json { encodeDefaults = true }
     }
 }
 
@@ -698,7 +747,7 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
             }
         }
         selected
-    }.ifEmpty { mutableListOf(0..minOf(lines.lastIndex, EXCERPT_CONTEXT_LINES * 2)) }
+    }
     val excerpt = StringBuilder()
     windows.sortedBy { it.first }.forEach { window -> excerpt.append(excerptSection(lines, window)) }
     return excerpt.toString().ifBlank {

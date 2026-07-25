@@ -7,6 +7,8 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class CodingWorkspaceGatewayTest {
     @Test
@@ -104,12 +106,18 @@ class CodingWorkspaceGatewayTest {
             revision,
             paths,
             "native platform typography",
+            12 * 1024,
         )
 
         assertEquals(paths, context.files.map { it.path })
         assertEquals(0, context.omittedFileCount)
         assertTrue(context.files.all { it.contentHash.matches(Regex("[0-9a-f]{64}")) })
-        assertTrue(context.files.sumOf { it.content.encodeToByteArray().size } <= 256 * 1024)
+        assertTrue(context.files.all { it.content.isNotEmpty() })
+        assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 12 * 1024)
+    }
+
+    private companion object {
+        val contextJson = Json { encodeDefaults = true }
     }
 
     private fun git(directory: Path, vararg arguments: String) {
