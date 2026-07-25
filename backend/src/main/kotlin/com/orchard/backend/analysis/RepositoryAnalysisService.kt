@@ -4,9 +4,13 @@ import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CodingWorkerAttempt
 import com.orchard.backend.agent.CodingWorkerAttemptStore
+import com.orchard.backend.agent.CodingWorkerEvent
+import com.orchard.backend.agent.CodingWorkerStore
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
+import com.orchard.backend.agent.CODING_EXECUTION_FAILED
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
+import com.orchard.backend.agent.codingWorkerExecutions
 import com.orchard.backend.agent.focusedContextExcerpt
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
@@ -121,6 +125,7 @@ class RepositoryAnalysisService(
     private val companyControl: CompanyControlService? = null,
     private val attemptStore: RepositoryAnalysisAttemptStore = TransientRepositoryAnalysisAttemptStore(),
     private val codingAttemptStore: CodingWorkerAttemptStore? = null,
+    private val codingWorkerStore: CodingWorkerStore? = null,
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
@@ -478,7 +483,11 @@ class RepositoryAnalysisService(
             boundedContext,
             output,
         )
-        val invalid = validateOutput(run, boundedContext, compiledOutput)
+        val failedCandidatePaths = failedCandidateCorrectionPaths(
+            baseRevision,
+            codingWorkerStore?.loadEvents().orEmpty(),
+        )
+        val invalid = validateOutput(run, boundedContext, compiledOutput, failedCandidatePaths)
         if (invalid != null) return blockAttempt(
             run.runId,
             baseRevision,
@@ -519,6 +528,7 @@ class RepositoryAnalysisService(
         run: WorkflowRunView,
         context: CodingRepositoryContext,
         output: RepositoryAnalysisPlanContent,
+        failedCandidatePaths: Set<String>,
     ): String? {
         repositoryScopeAuthorityDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
@@ -532,6 +542,7 @@ class RepositoryAnalysisService(
             output,
         )?.let { return it }
         repositoryOperationShapeDiagnostic(context, output)?.let { return it }
+        failedCandidateCorrectionDiagnostic(failedCandidatePaths, output)?.let { return it }
         val admittedCommands = run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }?.toSet().orEmpty()
         if (output.verificationCommands.toSet() != admittedCommands) return "Execution plan verification differs from admitted commands."
         return null
@@ -698,6 +709,26 @@ internal fun repositoryPlanRequiresRevision(
     currentPlan: RepositoryExecutionPlan,
     codingAttempts: List<CodingWorkerAttempt>,
 ): Boolean = repositoryPlanRevisionDiagnostic(currentPlan, codingAttempts) != null
+
+internal fun failedCandidateCorrectionPaths(
+    baseRevision: String,
+    codingWorkerEvents: List<CodingWorkerEvent>,
+): Set<String> = codingWorkerExecutions(codingWorkerEvents).asReversed().firstOrNull { execution ->
+    execution.result?.status == CODING_EXECUTION_FAILED && execution.result.revision == baseRevision
+}?.result?.changedPaths.orEmpty().toSet()
+
+internal fun failedCandidateCorrectionDiagnostic(
+    requiredPaths: Set<String>,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val sourceOperationPaths = output.operations.asSequence()
+        .filter { it.action != PLAN_OPERATION_VERIFY }
+        .mapTo(hashSetOf()) { it.path }
+    val missingPaths = (requiredPaths - sourceOperationPaths).sorted()
+    return missingPaths.takeIf { it.isNotEmpty() }?.let {
+        "A verification-failed candidate requires corrective source operations for every changed path: ${it.joinToString(", ")}."
+    }
+}
 
 private fun repositoryPlanRevisionDiagnostic(
     currentPlan: RepositoryExecutionPlan,

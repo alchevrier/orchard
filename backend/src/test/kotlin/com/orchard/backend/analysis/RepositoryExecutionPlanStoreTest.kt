@@ -495,6 +495,32 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `verification failed candidate paths require corrective source operations`() {
+        val content = plan(1, 1, "a".repeat(40)).content.copy(
+            operations = listOf(
+                ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/Test.kt", null, "Repair test.", listOf("Behavior works.")),
+                ExecutionPlanOperation(2, PLAN_OPERATION_VERIFY, ".", null, "Verify.", listOf("Behavior works.")),
+            ),
+        )
+
+        assertEquals(
+            "A verification-failed candidate requires corrective source operations for every changed path: src/Main.kt.",
+            failedCandidateCorrectionDiagnostic(setOf("src/Main.kt", "src/Test.kt"), content),
+        )
+        assertNull(
+            failedCandidateCorrectionDiagnostic(
+                setOf("src/Main.kt", "src/Test.kt"),
+                content.copy(
+                    operations = listOf(
+                        ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/Main.kt", null, "Repair source.", listOf("Behavior works.")),
+                        ExecutionPlanOperation(2, PLAN_OPERATION_MODIFY, "src/Test.kt", null, "Repair test.", listOf("Behavior works.")),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `repository selectors require every matched owner and an affine test operation`() {
         val context = CodingRepositoryContext(
             listOf(

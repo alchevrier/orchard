@@ -217,6 +217,7 @@ fun main() {
     )
     val companyCircuit = CompanyCircuitService(workspace, companyControl, OrchardPaths.LOCAL_REPOSITORIES_DIR)
     val codingWorkerAttemptStore = FileCodingWorkerAttemptStore(OrchardPaths.WORKSPACE_DIR)
+    val codingWorkerStore = FileCodingWorkerStore(OrchardPaths.WORKSPACE_DIR)
     val repositoryAnalysis = RepositoryAnalysisService(
         workspace,
         modelProviders,
@@ -226,6 +227,7 @@ fun main() {
         companyControl = companyControl,
         attemptStore = FileRepositoryAnalysisAttemptStore(OrchardPaths.WORKSPACE_DIR),
         codingAttemptStore = codingWorkerAttemptStore,
+        codingWorkerStore = codingWorkerStore,
     )
     val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
     val standardsPolicy = StandardsPolicyService(
@@ -265,7 +267,7 @@ fun main() {
     val codingWorker = CodingWorkerService(
         workspace,
         modelProviders,
-        FileCodingWorkerStore(OrchardPaths.WORKSPACE_DIR),
+        codingWorkerStore,
         codingWorkspaceGateway,
         resourceController,
         companyControl = companyControl,
