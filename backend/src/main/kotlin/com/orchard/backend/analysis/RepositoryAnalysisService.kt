@@ -503,6 +503,7 @@ class RepositoryAnalysisService(
             prompt,
             RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
             invalid,
+            compiledOutput,
         )
         if (workspaceGateway.currentRevision(workspacePath) != baseRevision) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.PLAN_STALE, run.runId, diagnostic = "Repository changed during analysis.")
@@ -594,6 +595,7 @@ class RepositoryAnalysisService(
         prompt: String,
         status: RepositoryAnalysisTickStatus,
         diagnostic: String,
+        rejectedPlan: RepositoryAnalysisPlanContent? = null,
     ): RepositoryAnalysisTickResult = runCatching {
         attemptStore.appendNext { attemptId ->
             RepositoryAnalysisAttempt(
@@ -604,6 +606,7 @@ class RepositoryAnalysisService(
                 resultStatus = status.name,
                 diagnostic = diagnostic,
                 promptHash = sha256(prompt),
+                rejectedPlan = rejectedPlan,
             )
         }
     }.fold(

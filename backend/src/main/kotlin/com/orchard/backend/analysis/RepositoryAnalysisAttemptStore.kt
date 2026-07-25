@@ -24,6 +24,7 @@ data class RepositoryAnalysisAttempt(
     val diagnostic: String,
     val promptHash: String? = null,
     val recordedAt: String = Instant.now().toString(),
+    val rejectedPlan: RepositoryAnalysisPlanContent? = null,
 )
 
 interface RepositoryAnalysisAttemptStore {
@@ -110,8 +111,8 @@ fun RepositoryAnalysisAttemptStore.blockedAttempt(runId: Long, baseRevision: Str
 fun RepositoryAnalysisAttemptStore.retryDiagnostic(runId: Long, baseRevision: String): String? {
     val attempts = load().filter { it.runId == runId && it.baseRevision == baseRevision }
     if (attempts.lastOrNull()?.state != ANALYSIS_ATTEMPT_RETRY_AUTHORIZED) return null
-    val blockedDiagnostics = attempts.dropLast(1)
-        .filter { it.state == ANALYSIS_ATTEMPT_BLOCKED }
+    val blockedAttempts = attempts.dropLast(1).filter { it.state == ANALYSIS_ATTEMPT_BLOCKED }
+    val blockedDiagnostics = blockedAttempts
         .map { it.diagnostic }
     val current = blockedDiagnostics.lastOrNull() ?: return null
     val previous = blockedDiagnostics.distinct().filter { it != current }
@@ -124,6 +125,10 @@ fun RepositoryAnalysisAttemptStore.retryDiagnostic(runId: Long, baseRevision: St
         if (previous.isNotEmpty()) {
             append("\nPreviously rejected defects that must remain fixed:")
             previous.forEach { append("\n- ").append(it) }
+        }
+        blockedAttempts.lastOrNull { it.rejectedPlan != null }?.rejectedPlan?.let { rejectedPlan ->
+            append("\nLatest schema-valid rejected plan candidate; preserve valid authority and correct only the diagnosed defects:\n")
+            append(Json.encodeToString(rejectedPlan))
         }
     }
 }
@@ -144,6 +149,9 @@ private fun validateRepositoryAnalysisAttempt(
     }
     require(attempt.promptHash == null || attempt.promptHash.matches(Regex("[0-9a-f]{64}"))) {
         "Repository analysis attempt prompt hash is invalid"
+    }
+    require(attempt.state == ANALYSIS_ATTEMPT_BLOCKED || attempt.rejectedPlan == null) {
+        "Only blocked repository analysis attempts may retain a rejected plan"
     }
     if (attempt.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED) {
         require(previous.lastOrNull { it.runId == attempt.runId && it.baseRevision == attempt.baseRevision }?.state == ANALYSIS_ATTEMPT_BLOCKED) {

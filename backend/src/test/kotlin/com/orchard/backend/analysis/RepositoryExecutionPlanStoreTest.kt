@@ -143,6 +143,43 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `repository analysis retry retains the latest schema valid rejected plan`() {
+        val directory = createTempDirectory("orchard-rejected-analysis-plan-")
+        val store = FileRepositoryAnalysisAttemptStore(directory)
+        val revision = "a".repeat(40)
+        val rejectedPlan = plan(1, 1, revision).content
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = 11,
+                baseRevision = revision,
+                state = ANALYSIS_ATTEMPT_BLOCKED,
+                resultStatus = RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                diagnostic = "The plan omitted explicit compliant evidence.",
+                promptHash = "b".repeat(64),
+                rejectedPlan = rejectedPlan,
+            )
+        }
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = 11,
+                baseRevision = revision,
+                state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
+                diagnostic = "One successor is authorized.",
+            )
+        }
+
+        val restored = FileRepositoryAnalysisAttemptStore(directory)
+        assertEquals(rejectedPlan, restored.load().first().rejectedPlan)
+        val diagnostic = requireNotNull(restored.retryDiagnostic(11, revision))
+        assertTrue(diagnostic.contains("Latest schema-valid rejected plan candidate"))
+        assertTrue(diagnostic.contains("\"operations\""))
+        assertTrue(diagnostic.contains("\"path\":\"src/Main.kt\""))
+    }
+
+    @Test
     fun `repository analysis trusts measured generation tokens instead of utf8 byte size`() {
         val generation = com.orchard.backend.vector.ModelGeneration("x".repeat(10_000), 18_343, 2_722)
 
