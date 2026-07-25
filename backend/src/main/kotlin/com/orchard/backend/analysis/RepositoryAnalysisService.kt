@@ -410,7 +410,10 @@ class RepositoryAnalysisService(
         val envelopeJson = json.encodeToString(envelope)
         val prompt = "$systemPrompt\n\nAuthoritative repository analysis envelope:\n$envelopeJson"
         val binding = provider.bindingProfile()
-        val admission = resourceController.acquire(provider.resourceDemand(profile), ModelWorkPriority.DELIVERY)
+        val admission = resourceController.acquire(
+            provider.resourceDemand(profile, estimateModelTokens(prompt)),
+            ModelWorkPriority.DELIVERY,
+        )
         val lease = admission.lease ?: return RepositoryAnalysisTickResult(
             RepositoryAnalysisTickStatus.RESOURCE_BLOCKED,
             run.runId,
