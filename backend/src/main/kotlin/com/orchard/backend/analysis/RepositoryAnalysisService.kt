@@ -555,7 +555,12 @@ class RepositoryAnalysisService(
         )?.let { return it }
         repositoryOperationShapeDiagnostic(context, output)?.let { return it }
         failedCandidateCorrectionDiagnostic(failedCandidatePaths, output)?.let { return it }
-        correctivePlanAuthorityDiagnostic(rejectedPlan, rejectedCodingPlanDiagnostic, output)?.let { return it }
+        correctivePlanAuthorityDiagnostic(
+            rejectedPlan,
+            rejectedCodingPlanDiagnostic,
+            failedCandidatePaths,
+            output,
+        )?.let { return it }
         val admittedCommands = run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }?.toSet().orEmpty()
         if (output.verificationCommands.toSet() != admittedCommands) return "Execution plan verification differs from admitted commands."
         return null
@@ -762,9 +767,10 @@ internal fun failedCandidateCorrectionDiagnostic(
 internal fun correctivePlanAuthorityDiagnostic(
     rejectedPlan: RepositoryAnalysisPlanContent?,
     rejectedCodingPlanDiagnostic: String?,
+    failedCandidatePaths: Set<String>,
     correction: RepositoryAnalysisPlanContent,
 ): String? {
-    if (rejectedPlan == null || rejectedCodingPlanDiagnostic == null) return null
+    if (rejectedPlan == null || rejectedCodingPlanDiagnostic == null || failedCandidatePaths.isNotEmpty()) return null
     val requiresAuthorityRevision = rejectedCodingPlanDiagnostic.contains("contains no coding operations") ||
         rejectedCodingPlanDiagnostic.contains("only changes line comments on unchanged source")
     if (!requiresAuthorityRevision) return null

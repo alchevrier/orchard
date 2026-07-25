@@ -583,13 +583,14 @@ class RepositoryExecutionPlanStoreTest {
 
         assertEquals(
             expected,
-            correctivePlanAuthorityDiagnostic(rejected, "The proposal contains no coding operations.", unchanged),
+            correctivePlanAuthorityDiagnostic(rejected, "The proposal contains no coding operations.", emptySet(), unchanged),
         )
         assertEquals(
             expected,
             correctivePlanAuthorityDiagnostic(
                 rejected,
                 "REPLACE src/Main.kt only changes line comments on unchanged source",
+                emptySet(),
                 unchanged,
             ),
         )
@@ -597,10 +598,19 @@ class RepositoryExecutionPlanStoreTest {
             correctivePlanAuthorityDiagnostic(
                 rejected,
                 "The proposal contains no coding operations.",
+                emptySet(),
                 unchanged.copy(operations = unchanged.operations.filter { it.action == PLAN_OPERATION_VERIFY }),
             ),
         )
-        assertNull(correctivePlanAuthorityDiagnostic(rejected, "An exact anchor was ambiguous.", unchanged))
+        assertNull(correctivePlanAuthorityDiagnostic(rejected, "An exact anchor was ambiguous.", emptySet(), unchanged))
+        assertNull(
+            correctivePlanAuthorityDiagnostic(
+                rejected,
+                "The proposal contains no coding operations.",
+                setOf("src/Main.kt"),
+                unchanged,
+            ),
+        )
     }
 
     @Test
