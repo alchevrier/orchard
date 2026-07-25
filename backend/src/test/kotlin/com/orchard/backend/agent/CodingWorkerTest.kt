@@ -4,6 +4,7 @@ import com.orchard.backend.analysis.AnalysisExecutionProvenance
 import com.orchard.backend.analysis.DISPOSITION_PARTIALLY_IMPLEMENTED
 import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
 import com.orchard.backend.analysis.RepositoryExecutionPlan
+import com.orchard.backend.analysis.repositoryPlanRequiresRevision
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
@@ -284,6 +285,74 @@ class CodingWorkerTest {
             attempts.retryBasisForTerminalFailure(listOf(failed), 19, plan)?.state,
         )
         assertEquals(2, attempts.load().size)
+    }
+
+    @Test
+    fun `terminal plan context block after consumed retry requests reanalysis and recovers idempotently`() {
+        val planHash = "d".repeat(64)
+        val claimDraft = claim(executionId = 1, runId = 19, attempt = 1).copy(
+            executionPlanId = 23,
+            executionPlanHash = planHash,
+            hash = "",
+        )
+        val boundClaim = claimDraft.copy(hash = codingWorkerClaimHash(claimDraft))
+        val resultDraft = CodingWorkerResult(
+            executionId = boundClaim.executionId,
+            status = CODING_EXECUTION_BLOCKED,
+            diagnostic = "Repository plan context budget is too small",
+            completedAt = "2026-06-21T00:05:00Z",
+            hash = "",
+        )
+        val blockedResult = resultDraft.copy(hash = codingWorkerResultHash(resultDraft))
+        val workerStore = TransientCodingWorkerStore().apply {
+            append(CodingWorkerEvent(eventId = 1, claim = boundClaim))
+            append(CodingWorkerEvent(eventId = 2, result = blockedResult))
+        }
+        val attempts = TransientCodingWorkerAttemptStore().apply {
+            appendNext { attemptId -> codingAttempt(attemptId, CODING_ATTEMPT_BLOCKED, "Rejected cosmetic mutation.", planHash) }
+            appendNext { attemptId -> codingAttempt(attemptId, CODING_ATTEMPT_RETRY_AUTHORIZED, "One correction authorized.", planHash) }
+            appendNext { attemptId -> codingAttempt(attemptId, CODING_ATTEMPT_RETRY_CONSUMED, "Correction consumed.", planHash) }
+        }
+        val plan = RepositoryExecutionPlan(
+            planId = 23,
+            runId = 19,
+            revision = 1,
+            projectId = 1,
+            baseRevision = "e".repeat(40),
+            content = RepositoryAnalysisPlanContent(
+                disposition = DISPOSITION_PARTIALLY_IMPLEMENTED,
+                summary = "Apply the admitted change.",
+                evidence = emptyList(),
+                reuse = emptyList(),
+                preservedInvariants = emptyList(),
+                nonGoals = emptyList(),
+                operations = emptyList(),
+                verificationCommands = emptyList(),
+            ),
+            provenance = AnalysisExecutionProvenance(
+                executionProfileId = "test-analysis",
+                bindingFingerprint = "f".repeat(64),
+                promptHash = "1".repeat(64),
+                contextHash = "2".repeat(64),
+                outputHash = "3".repeat(64),
+                modelExecutionId = 1,
+            ),
+            hash = planHash,
+        )
+
+        repeat(2) {
+            CodingWorkerService(
+                workspace = WorkspaceStore(),
+                modelProviders = emptyList(),
+                workerStore = workerStore,
+                attemptStore = attempts,
+            )
+        }
+
+        assertEquals(4, attempts.load().size)
+        assertEquals(CODING_ATTEMPT_BLOCKED, attempts.load().last().state)
+        assertEquals(blockedResult.diagnostic, attempts.load().last().diagnostic)
+        assertTrue(repositoryPlanRequiresRevision(plan, attempts.load()))
     }
 
     @Test
@@ -1200,6 +1269,21 @@ class CodingWorkerTest {
         )
         return draft.copy(hash = codingWorkerClaimHash(draft))
     }
+
+    private fun codingAttempt(
+        attemptId: Long,
+        state: String,
+        diagnostic: String,
+        planHash: String,
+    ) = CodingWorkerAttempt(
+        attemptId = attemptId,
+        runId = 19,
+        executionPlanId = 23,
+        executionPlanHash = planHash,
+        state = state,
+        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+        diagnostic = diagnostic,
+    )
 
     private fun intent(
         type: Int,

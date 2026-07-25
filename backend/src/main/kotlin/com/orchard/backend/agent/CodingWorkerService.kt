@@ -107,6 +107,7 @@ class CodingWorkerService(
         attemptStore.load()
         bootstrapLegacyAttemptBlocks()
         bootstrapApplicationFailureBlocks()
+        bootstrapTerminalPlanBlocks()
         bootstrapRecurrentRetryBlocks()
     }
 
@@ -802,7 +803,13 @@ class CodingWorkerService(
             candidate = candidate,
             retryAfter = retryAfter,
         )
-        return appendResult(workerStore.loadEvents(), claim, result, tickStatus)
+        val blockStorageDiagnostic = recordTerminalPlanBlock(claim, result)
+        return appendResult(
+            workerStore.loadEvents(),
+            claim,
+            result,
+            if (blockStorageDiagnostic == null) tickStatus else CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+        )
     }
 
     private fun terminalResult(
@@ -926,6 +933,38 @@ class CodingWorkerService(
                     )
                 }
             }
+    }
+
+    private fun bootstrapTerminalPlanBlocks() {
+        codingWorkerExecutions(workerStore.loadEvents())
+            .filter { it.claim.executionPlanId != null && it.claim.executionPlanHash != null }
+            .groupBy { Triple(it.claim.runId, it.claim.executionPlanId, it.claim.executionPlanHash) }
+            .values
+            .mapNotNull { executions -> executions.maxByOrNull { it.claim.executionId } }
+            .filter { it.result?.status == CODING_EXECUTION_BLOCKED }
+            .forEach { execution -> recordTerminalPlanBlock(execution.claim, requireNotNull(execution.result)) }
+    }
+
+    private fun recordTerminalPlanBlock(claim: CodingWorkerClaim, result: CodingWorkerResult): String? {
+        val planId = claim.executionPlanId ?: return null
+        val planHash = claim.executionPlanHash ?: return null
+        if (result.status != CODING_EXECUTION_BLOCKED) return null
+        val latest = attemptStore.latestAttempt(claim.runId, planId, planHash)
+        if (latest?.state in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_AUTHORIZED)) return null
+        return runCatching {
+            attemptStore.appendNext { attemptId ->
+                CodingWorkerAttempt(
+                    attemptId = attemptId,
+                    runId = claim.runId,
+                    executionPlanId = planId,
+                    executionPlanHash = planHash,
+                    state = CODING_ATTEMPT_BLOCKED,
+                    resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                    diagnostic = result.diagnostic,
+                    proposalHash = result.proposalHash,
+                )
+            }
+        }.exceptionOrNull()?.message.orEmpty().ifBlank { null }
     }
 
     private fun bootstrapRecurrentRetryBlocks() {
