@@ -7,6 +7,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.time.Instant
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -14,6 +16,7 @@ import kotlinx.serialization.json.Json
 const val ANALYSIS_ATTEMPT_BLOCKED = "BLOCKED"
 const val ANALYSIS_ATTEMPT_RETRY_AUTHORIZED = "RETRY_AUTHORIZED"
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class RepositoryAnalysisAttempt(
     val attemptId: Long,
@@ -24,6 +27,7 @@ data class RepositoryAnalysisAttempt(
     val diagnostic: String,
     val promptHash: String? = null,
     val recordedAt: String = Instant.now().toString(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
     val rejectedPlan: RepositoryAnalysisPlanContent? = null,
 )
 

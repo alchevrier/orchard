@@ -8,6 +8,7 @@ import com.orchard.backend.agent.CODING_ATTEMPT_RETRY_AUTHORIZED
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import java.nio.file.Files
+import kotlin.io.path.writeText
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -177,6 +178,22 @@ class RepositoryExecutionPlanStoreTest {
         assertTrue(diagnostic.contains("Latest schema-valid rejected plan candidate"))
         assertTrue(diagnostic.contains("\"operations\""))
         assertTrue(diagnostic.contains("\"path\":\"src/Main.kt\""))
+    }
+
+    @Test
+    fun `repository analysis attempt store reads legacy records without rejected plan field`() {
+        val directory = createTempDirectory("orchard-legacy-analysis-attempt-")
+        val value = """{"attemptId":1,"runId":11,"baseRevision":"${"a".repeat(40)}","state":"BLOCKED","resultStatus":"INVALID_ANALYSIS","diagnostic":"Legacy rejection.","promptHash":"${"b".repeat(64)}","recordedAt":"2026-07-26T00:00:00Z"}"""
+        val checksum = com.orchard.backend.workspace.stagedPlanHash(value)
+        directory.resolve("repository-analysis-attempts.jsonl").writeText(
+            """{"version":1,"value":$value,"checksum":"$checksum"}
+""",
+        )
+
+        val restored = FileRepositoryAnalysisAttemptStore(directory).load().single()
+
+        assertEquals("Legacy rejection.", restored.diagnostic)
+        assertNull(restored.rejectedPlan)
     }
 
     @Test
