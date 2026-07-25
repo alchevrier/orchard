@@ -7,6 +7,7 @@ import com.orchard.backend.workspace.AcceptanceCriterion
 import com.orchard.backend.workspace.CRITERION_AUTOMATED
 import com.orchard.backend.workspace.CRITERION_HUMAN
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
+import com.orchard.backend.workspace.DefaultDeliveryWorkflow
 import com.orchard.backend.workspace.DESIGN_STATUS_ADMITTED
 import com.orchard.backend.workspace.DESIGN_STATUS_REJECTED
 import com.orchard.backend.workspace.DesignCriterionSubmission
@@ -105,6 +106,27 @@ class DesignGovernanceTest {
         val workspace = governedWorkspace()
         admitHierarchy(workspace, listOf(4))
         val runId = workspace.startWorkflow(4).snapshot.workflowRuns.single().runId
+        val admittedRun = workspace.snapshot(0).workflowRuns.single()
+        val historicalEvidenceContract = admittedRun.workflow.evidenceContract.copy(
+            version = 3,
+            requirements = admittedRun.workflow.evidenceContract.requirements.map { requirement ->
+                if (requirement.kind == "ACCEPTANCE") requirement.copy(verification = null) else requirement
+            },
+        )
+        val historicalWorkflow = admittedRun.workflow.copy(
+            version = 3,
+            evidenceContract = historicalEvidenceContract,
+            stepDefinitions = admittedRun.workflow.stepDefinitions.map {
+                it.copy(evidenceContract = historicalEvidenceContract)
+            },
+        )
+        assertEquals(4, admittedRun.workflow.version)
+        assertTrue(DefaultDeliveryWorkflow.isCompatible(
+            historicalWorkflow,
+            admittedRun.context.workItemType,
+            admittedRun.workDefinition,
+            admittedRun.context.acceptanceContract,
+        ))
         val revision = "b".repeat(40)
 
         listOf(

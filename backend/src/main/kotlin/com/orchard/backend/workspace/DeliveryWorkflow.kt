@@ -20,6 +20,18 @@ object DefaultDeliveryWorkflow {
         workItemType: Int,
         workDefinition: WorkDefinitionManifest? = null,
         acceptanceContract: AcceptanceContract? = null,
+    ): ResolvedWorkflow = resolve(
+        workItemType,
+        workDefinition,
+        acceptanceContract,
+        acceptanceVerificationEnabled = true,
+    )
+
+    private fun resolve(
+        workItemType: Int,
+        workDefinition: WorkDefinitionManifest?,
+        acceptanceContract: AcceptanceContract?,
+        acceptanceVerificationEnabled: Boolean,
     ): ResolvedWorkflow {
         require(workItemType == ENTITY_TASK || workItemType == ENTITY_BUG) { "Only tasks and bugs can start a workflow" }
         val requirements = buildList {
@@ -30,11 +42,13 @@ object DefaultDeliveryWorkflow {
             add(EvidenceRequirement("BUILD", "A successful build against the resulting revision."))
             add(EvidenceRequirement("TEST", "A successful relevant test suite against the resulting revision."))
             workDefinition?.let { manifest ->
-                val acceptanceVerification = manifest.definition.acceptanceCriteria
-                    .map { it.verification.trim() }
-                    .filter(String::isNotBlank)
-                    .distinct()
-                    .singleOrNull()
+                val acceptanceVerification = if (acceptanceVerificationEnabled) {
+                    manifest.definition.acceptanceCriteria
+                        .map { it.verification.trim() }
+                        .filter(String::isNotBlank)
+                        .distinct()
+                        .singleOrNull()
+                } else null
                 add(
                     EvidenceRequirement(
                         "ACCEPTANCE",
@@ -61,6 +75,7 @@ object DefaultDeliveryWorkflow {
         val evidenceContract = EvidenceContract(
             id = "${if (workItemType == ENTITY_BUG) "bug" else "task"}-completion",
             version = when {
+                acceptanceVerificationEnabled && workDefinition != null -> 4
                 acceptanceContract != null -> 3
                 workDefinition != null -> 2
                 else -> 1
@@ -117,6 +132,12 @@ object DefaultDeliveryWorkflow {
         workDefinition: WorkDefinitionManifest?,
         acceptanceContract: AcceptanceContract? = null,
     ): Boolean = workflow == resolve(workItemType, workDefinition, acceptanceContract) ||
+        (workDefinition != null && workflow == resolve(
+            workItemType,
+            workDefinition,
+            acceptanceContract,
+            acceptanceVerificationEnabled = false,
+        )) ||
         (workDefinition == null && workflow == legacy(workItemType))
 
     fun criterionEvidenceKind(criterionId: String): String = "CRITERION:$criterionId"
