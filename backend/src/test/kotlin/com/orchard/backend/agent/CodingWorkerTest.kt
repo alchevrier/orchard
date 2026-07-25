@@ -173,6 +173,24 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `background tick recovers the oldest interrupted claim before candidate selection`() = runTest {
+        val store = TransientCodingWorkerStore()
+        val claim = claim(executionId = 1, runId = 17, attempt = 1)
+        store.append(CodingWorkerEvent(eventId = 1, claim = claim))
+        val worker = CodingWorkerService(
+            workspace = WorkspaceStore(),
+            modelProviders = emptyList(),
+            workerStore = store,
+        )
+
+        val result = worker.tick()
+
+        assertEquals(CodingWorkerTickStatus.INTERRUPTED_RECOVERED, result.status)
+        assertEquals(CODING_EXECUTION_INTERRUPTED, result.execution?.result?.status)
+        assertEquals(1, result.execution?.claim?.executionId)
+    }
+
+    @Test
     fun `worker journal preserves deferred retry timing without breaking attempt sequence`() {
         val store = TransientCodingWorkerStore()
         val firstClaim = claim(executionId = 1, runId = 21, attempt = 1)

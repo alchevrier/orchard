@@ -113,7 +113,14 @@ class CodingWorkerService(
     fun attempts(): List<CodingWorkerAttempt> = attemptStore.load()
 
     suspend fun tick(): CodingWorkerTickResult {
-        val runId = eligibleRunIds().firstOrNull() ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
+        val executions = codingWorkerExecutions(workerStore.loadEvents())
+        val runId = executions.asSequence()
+            .filter { it.result == null }
+            .minByOrNull { it.claim.executionId }
+            ?.claim
+            ?.runId
+            ?: candidateRuns(executions).firstOrNull()?.runId
+            ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
         return tick(runId)
     }
 
