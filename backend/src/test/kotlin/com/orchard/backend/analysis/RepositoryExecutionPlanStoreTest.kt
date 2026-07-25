@@ -412,8 +412,8 @@ class RepositoryExecutionPlanStoreTest {
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )
         assertEquals(
-            "Scope coverage 2 cites paths without source operations or explicit compliant evidence: src/MainTest.kt. " +
-                "Linked source operation paths: <none>.",
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: src/MainTest.kt. " +
+                "DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(scope, verifyOnly),
         )
         assertEquals(
@@ -426,7 +426,8 @@ class RepositoryExecutionPlanStoreTest {
             ),
         )
         assertEquals(
-            "Scope coverage 2 requires a test source operation.",
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: src/MainTest.kt. " +
+                "DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(
                 scope,
                 verifyOnly.copy(scopeCoverage = verifyOnly.scopeCoverage.mapIndexed { index, coverage ->
@@ -438,7 +439,8 @@ class RepositoryExecutionPlanStoreTest {
             "Deterministic typography regression coverage in frontend/src/desktopTest/kotlin/TypographyTest.kt"
         )
         assertEquals(
-            "Scope coverage 1 requires a test source operation.",
+            "Scope coverage 1 requires a CREATE or MODIFY operation for its pinned test source path: src/MainTest.kt. " +
+                "DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(
                 declarativeRegressionScope,
                 verifyOnly.copy(
@@ -453,13 +455,26 @@ class RepositoryExecutionPlanStoreTest {
                 ),
             ),
         )
+        val deleteRegressionTest = verifyOnly.copy(
+            scopeCoverage = verifyOnly.scopeCoverage.mapIndexed { index, coverage ->
+                if (index == 1) coverage.copy(operationOrders = listOf(1)) else coverage
+            },
+            operations = listOf(
+                ExecutionPlanOperation(1, PLAN_OPERATION_DELETE, "src/MainTest.kt", null, "Delete it.", listOf("Behavior works.")),
+            ),
+        )
+        assertEquals(
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: src/MainTest.kt. " +
+                "DELETE and compliant evidence cannot satisfy regression scope.",
+            repositoryScopeCoverageDiagnostic(scope, deleteRegressionTest),
+        )
         val unmatchedEvidence = content.copy(
             evidence = content.evidence + RepositoryEvidenceCitation("src/Other.kt", null, "Another owner.", "d".repeat(64)),
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
         )
         assertEquals(
-            "Scope coverage 2 cites paths without source operations or explicit compliant evidence: src/Other.kt. " +
-                "Linked source operation paths: src/Main.kt.",
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: <none selected>. " +
+                "DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(scope, unmatchedEvidence),
         )
         assertNull(
@@ -637,14 +652,19 @@ class RepositoryExecutionPlanStoreTest {
         )
         assertEquals(listOf(listOf(1, 2), listOf(3)), compiledMissingTest.scopeCoverage.map { it.operationOrders })
         assertEquals(
-            "Required repository paths omit source operations or explicit compliant evidence: " +
-                "frontend/src/test/TypographyTest.kt.",
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
+                "frontend/src/test/TypographyTest.kt. DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledMissingTest),
         )
         assertEquals(
-            "Scope coverage 2 cites paths without source operations or explicit compliant evidence: " +
-                "frontend/src/test/TypographyTest.kt. Linked source operation paths: <none>.",
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
+                "frontend/src/test/TypographyTest.kt. DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(scope, compiledMissingTest),
+        )
+        assertEquals(
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
+                "frontend/src/test/TypographyTest.kt. DELETE and compliant evidence cannot satisfy regression scope.",
+            repositoryScopeAuthorityDiagnostic(scope, selectors, context, compiledMissingTest),
         )
         assertNull(repositoryAcceptanceCoverageDiagnostic(listOf("Behavior works."), compiledMissingTest))
         assertNull(repositoryOperationShapeDiagnostic(context, compiledMissingTest))
@@ -670,7 +690,8 @@ class RepositoryExecutionPlanStoreTest {
             repositoryScopeAuthorityDiagnostic(scope, selectors, context, missingPinnedOwner),
         )
         assertEquals(
-            "Scope coverage 2 requires a test source operation.",
+            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
+                "<none selected>. DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(
                 scope,
                 complete.copy(

@@ -734,9 +734,11 @@ internal fun repositoryScopeCoverageDiagnostic(
             return "Scope coverage ${index + 1} uses compliant evidence classification for evidence-only scope."
         }
         if (requiresSourceOperation(coverage.scope)) {
-            val linkedSourcePaths = coverage.operationOrders.asSequence()
+            val linkedSourceOperations = coverage.operationOrders.asSequence()
                 .mapNotNull(operations::get)
                 .filter { it.action != PLAN_OPERATION_VERIFY }
+                .toList()
+            val linkedSourcePaths = linkedSourceOperations.asSequence()
                 .mapTo(hashSetOf()) { it.path }
             val unpinnedCompliantPaths = coverage.compliantEvidencePaths.filter { it !in evidencePaths }.distinct().sorted()
             if (unpinnedCompliantPaths.isNotEmpty()) {
@@ -748,6 +750,13 @@ internal fun repositoryScopeCoverageDiagnostic(
                 return "Scope coverage ${index + 1} marks source-operation paths as already compliant: " +
                     "${conflictingPaths.joinToString(", ")}."
             }
+            val requiredTestPaths = coverage.evidencePaths.filter(::isTestSourcePath).distinct().sorted()
+            val changedTestPaths = linkedSourceOperations.asSequence()
+                .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) }
+                .mapTo(hashSetOf()) { it.path }
+            if (requiresTestSource(coverage.scope) && requiredTestPaths.none { it in changedTestPaths }) {
+                return testSourceOperationDiagnostic(index, requiredTestPaths)
+            }
             val unsatisfiedPaths = coverage.evidencePaths
                 .filter { it !in linkedSourcePaths && it !in coverage.compliantEvidencePaths }
                 .distinct()
@@ -756,9 +765,6 @@ internal fun repositoryScopeCoverageDiagnostic(
                 val linked = linkedSourcePaths.sorted().joinToString(", ").ifBlank { "<none>" }
                 return "Scope coverage ${index + 1} cites paths without source operations or explicit compliant evidence: " +
                     "${unsatisfiedPaths.joinToString(", ")}. Linked source operation paths: $linked."
-            }
-            if (requiresTestSource(coverage.scope) && linkedSourcePaths.none(::isTestSourcePath)) {
-                return "Scope coverage ${index + 1} requires a test source operation."
             }
         }
     }
@@ -810,8 +816,20 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
     val sourceOperationPaths = output.operations.asSequence()
         .filter { it.action != PLAN_OPERATION_VERIFY }
         .mapTo(hashSetOf()) { it.path }
+    val changedTestPaths = output.operations.asSequence()
+        .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path) }
+        .mapTo(hashSetOf()) { it.path }
     val compliantEvidencePaths = output.scopeCoverage.flatMapTo(hashSetOf()) { it.compliantEvidencePaths }
     val unsatisfiedPaths = requiredPaths - sourceOperationPaths - compliantEvidencePaths
+    acceptedScope.forEachIndexed { index, scope ->
+        if (!requiresTestSource(scope)) return@forEachIndexed
+        val requiredTestPaths = requiredRepositoryScopeEvidencePathGroupIds(acceptedScope, selectors)[index]
+            .flatMap { requiredRepositoryPathsBySelector(selectors, context)[it].orEmpty() }
+            .filter(::isTestSourcePath)
+            .distinct()
+            .sorted()
+        if (requiredTestPaths.none { it in changedTestPaths }) return testSourceOperationDiagnostic(index, requiredTestPaths)
+    }
     val diagnostics = listOfNotNull(
         missingEvidence.takeIf { it.isNotEmpty() }?.let {
             "Required repository paths omit evidence: ${it.joinToString(", ")}."
@@ -821,6 +839,12 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
         },
     )
     return diagnostics.takeIf { it.isNotEmpty() }?.joinToString("\n")
+}
+
+private fun testSourceOperationDiagnostic(scopeIndex: Int, requiredTestPaths: List<String>): String {
+    val paths = requiredTestPaths.joinToString(", ").ifBlank { "<none selected>" }
+    return "Scope coverage ${scopeIndex + 1} requires a CREATE or MODIFY operation for its pinned test source path: $paths. " +
+        "DELETE and compliant evidence cannot satisfy regression scope."
 }
 
 internal fun requiredRepositoryEvidencePaths(
