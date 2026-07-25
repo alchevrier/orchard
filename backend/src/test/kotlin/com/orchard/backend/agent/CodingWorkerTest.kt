@@ -386,6 +386,10 @@ class CodingWorkerTest {
     assertTrue(diagnostic.contains("Exact contiguous source text near matched declarations"))
     assertTrue(diagnostic.contains("MaterialTheme.colors.copy"))
     assertTrue(!diagnostic.contains("[Orchard excerpt lines"))
+    val groundedLegacyDiagnostic = sourceGroundedRetryDiagnostic(attempts.single().diagnostic, context)
+    assertTrue(requireNotNull(groundedLegacyDiagnostic).contains("Exact contiguous source text for this correction"))
+    assertTrue(groundedLegacyDiagnostic.contains("MaterialTheme.colors.copy"))
+    assertEquals(groundedLegacyDiagnostic, sourceGroundedRetryDiagnostic(groundedLegacyDiagnostic, context))
         assertNull(codingRejectedAnchorDiagnostic(
             proposal,
             attempts,

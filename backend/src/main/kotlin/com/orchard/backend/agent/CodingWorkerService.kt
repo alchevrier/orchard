@@ -274,7 +274,10 @@ class CodingWorkerService(
             ?.filter { it.action != "VERIFY" }
             ?.map { it.path }
             .orEmpty()
-        fun envelope(repositoryContext: CodingRepositoryContext) = CodingWorkerModelEnvelope(
+        fun envelope(
+            repositoryContext: CodingRepositoryContext,
+            retryDiagnostic: String? = priorRejectedCodingDiagnostic,
+        ) = CodingWorkerModelEnvelope(
             executionProfile = profile,
             workflowStepId = CODING_WORKFLOW_STEP_ID,
             allowedActions = listOf(CODING_FILE_WRITE, CODING_FILE_REPLACE, CODING_FILE_DELETE),
@@ -282,11 +285,14 @@ class CodingWorkerService(
             requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
             run = run,
             executionPlan = executionPlan,
-            priorRejectedCodingDiagnostic = priorRejectedCodingDiagnostic,
+            priorRejectedCodingDiagnostic = retryDiagnostic,
             repositoryContext = repositoryContext,
         )
-        fun prompt(repositoryContext: CodingRepositoryContext): String {
-            val envelopeJson = json.encodeToString(envelope(repositoryContext))
+        fun prompt(
+            repositoryContext: CodingRepositoryContext,
+            retryDiagnostic: String? = priorRejectedCodingDiagnostic,
+        ): String {
+            val envelopeJson = json.encodeToString(envelope(repositoryContext, retryDiagnostic))
             return "$systemPrompt\n\nAuthoritative coding execution envelope:\n$envelopeJson"
         }
         val planContextBudget = executionPlan?.let {
@@ -316,9 +322,10 @@ class CodingWorkerService(
             CodingWorkerTickStatus.APPLICATION_FAILED,
             "Accepted execution-plan paths are missing from the pinned coding context.",
         )
-        val envelope = envelope(repositoryContext)
+        val groundedRetryDiagnostic = sourceGroundedRetryDiagnostic(priorRejectedCodingDiagnostic, repositoryContext)
+        val envelope = envelope(repositoryContext, groundedRetryDiagnostic)
         val envelopeJson = json.encodeToString(envelope)
-        val prompt = prompt(repositoryContext)
+        val prompt = prompt(repositoryContext, groundedRetryDiagnostic)
         if (estimateModelTokens(prompt) > profile.inputBudgetTokens) {
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding context exceeds the model input budget.")
         }
@@ -1174,6 +1181,25 @@ internal fun sourceBackedDeclarationAnchors(contextFile: CodingContextFile): Lis
         .toList()
 }
 
+internal fun sourceGroundedRetryDiagnostic(
+    diagnostic: String?,
+    repositoryContext: CodingRepositoryContext,
+): String? {
+    if (diagnostic == null || SOURCE_GROUNDED_RETRY_MARKER in diagnostic) return diagnostic
+    val anchors = repositoryContext.files.asSequence()
+        .filter { it.path in diagnostic }
+        .mapNotNull { contextFile ->
+            sourceBackedDeclarationAnchors(contextFile).firstOrNull()?.let { contextFile.path to it }
+        }
+        .toList()
+    if (anchors.isEmpty()) return diagnostic
+    return buildString {
+        append(diagnostic).append(' ').append(SOURCE_GROUNDED_RETRY_MARKER).append(": ")
+        append(anchors.joinToString(" | ") { (path, anchor) -> "$path ${Json.encodeToString(anchor)}" })
+        append('.')
+    }
+}
+
 internal fun codingProposalAuthorizationDiagnostic(
     proposal: CodingPatchProposal,
     plan: RepositoryExecutionPlan,
@@ -1223,3 +1249,4 @@ internal fun codingProposalAuthorizationDiagnostic(
 private const val MAX_REJECTED_ANCHOR_DECLARATIONS = 5
 private const val MAX_REJECTED_ANCHOR_EXAMPLES = 2
 private const val SOURCE_ANCHOR_LINES = 4
+private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
