@@ -395,14 +395,21 @@ class LocalCodingWorkspaceGateway(
                     require(Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
                         "REPLACE target must be an existing regular file"
                     }
-                    var candidate = Files.readString(target, Charsets.UTF_8)
+                    val original = Files.readString(target, Charsets.UTF_8)
+                    var candidate = original
                     operation.replacements.forEachIndexed { index, replacement ->
                         require(replacement.old.isNotEmpty()) {
                             "REPLACE ${operation.path} replacement ${index + 1} old text is empty"
                         }
                         val occurrenceCount = exactOccurrenceCount(candidate, replacement.old)
                         require(occurrenceCount == 1) {
-                            "REPLACE ${operation.path} replacement ${index + 1} old text occurs $occurrenceCount times; expected exactly once"
+                            val originalOccurrenceCount = exactOccurrenceCount(original, replacement.old)
+                            if (occurrenceCount == 0 && originalOccurrenceCount == 1 && index > 0) {
+                                "REPLACE ${operation.path} replacement ${index + 1} old text occurs 0 times after prior replacements " +
+                                    "but once in the original source; replacements must use non-overlapping anchors ordered from bottom to top"
+                            } else {
+                                "REPLACE ${operation.path} replacement ${index + 1} old text occurs $occurrenceCount times; expected exactly once"
+                            }
                         }
                         candidate = candidate.replaceFirst(replacement.old, replacement.new)
                     }

@@ -130,6 +130,7 @@ class CodingWorkerTest {
         assertTrue(requireNotNull(result.execution?.claim?.toolchainPolicyHash).matches(Regex("[0-9a-f]{64}")))
         assertTrue(requireNotNull(model.prompt).contains("Plan instructions describe intent and do not prove that any literal exists."))
         assertTrue(model.prompt?.contains("Copy every REPLACE old value as one exact contiguous substring") == true)
+        assertTrue(model.prompt?.contains("pairwise non-overlapping old values and order replacements from the bottom") == true)
         assertTrue(model.prompt?.contains("excerpt headers are context metadata, not repository source") == true)
         assertEquals(RUN_STATE_DONE, run.state)
         assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST", "ACCEPTANCE"), run.evidence.mapTo(hashSetOf()) { it.kind })
@@ -454,6 +455,42 @@ class CodingWorkerTest {
             error.message,
         )
         assertEquals("fun answer() = 1\nfun answer() = 1\n", Files.readString(source))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
+    fun `workspace gateway identifies replacement anchors invalidated by an earlier replacement`() {
+        val repository = initializedRepository()
+        val source = repository.resolve("src/Main.kt")
+        val original = "fun heading() = \"serif\"\nfun label() = \"mono\"\n"
+        Files.writeString(source, original)
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add typography source")
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            LocalCodingWorkspaceGateway().applyAndCommit(
+                repository.toString(),
+                CodingPatchProposal(
+                    summary = "Attempt overlapping typography replacements.",
+                    operations = listOf(CodingFileOperation(
+                        action = CODING_FILE_REPLACE,
+                        path = "src/Main.kt",
+                        replacements = listOf(
+                            CodingTextReplacement(original, original.replace("serif", "sans").replace("mono", "sans")),
+                            CodingTextReplacement("fun label() = \"mono\"", "fun label() = \"sans\""),
+                        ),
+                    )),
+                ),
+                executionId = 12,
+            )
+        }
+
+        assertEquals(
+            "REPLACE src/Main.kt replacement 2 old text occurs 0 times after prior replacements but once in the original source; " +
+                "replacements must use non-overlapping anchors ordered from bottom to top",
+            error.message,
+        )
+        assertEquals(original, Files.readString(source))
         assertEquals("", run(repository, "git", "status", "--porcelain"))
     }
 
