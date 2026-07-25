@@ -58,7 +58,7 @@ class CatalogModelProvider(
     private val providerDiagnosticsEnabled: Boolean = System.getenv("ORCHARD_PROVIDER_DIAGNOSTICS") == "1",
     private val diagnosticSink: (String) -> Unit = ::println,
     private val nanoTime: () -> Long = System::nanoTime,
-    private val ollamaResidentProbe: (String, String) -> Boolean = ::probeOllamaModelResident,
+    private val ollamaResidentProbe: (String, String) -> Int? = ::probeOllamaResidentContextTokens,
 ) : ModelProvider {
     private val client = if (engine == null) HttpClient(CIO) { configure() } else HttpClient(engine) { configure() }
     private val triagePrompt = loadPrompt("architect_phase0_triage.md")
@@ -68,7 +68,7 @@ class CatalogModelProvider(
     @Volatile
     private var ollamaProbeUntilNanos = 0L
     @Volatile
-    private var ollamaProbeResident = false
+    private var ollamaResidentContextTokens = 0
 
     init {
         validateModelProviderCatalog(
@@ -135,9 +135,12 @@ class CatalogModelProvider(
 
     override fun resourceDemand(profile: ModelExecutionProfile, inputTokens: Int): ModelResourceDemand = if (endpoint.locality == PROVIDER_LOCALITY_LOCAL) {
         require(inputTokens in 0..profile.inputBudgetTokens) { "Model input token demand exceeds the execution profile" }
-        val residentDemand = if (ollamaModelRecentlyLoaded()) 0 else binding.residentMemoryBytes
+        val requiredContextTokens = inputTokens + profile.outputBudgetTokens
+        val residentContextTokens = ollamaResidentContextTokens()
+        val residentDemand = if (residentContextTokens == null) binding.residentMemoryBytes else 0
+        val incrementalContextTokens = (requiredContextTokens - (residentContextTokens ?: 0)).coerceAtLeast(0)
         ModelResourceDemand(
-            residentDemand + (inputTokens + profile.outputBudgetTokens).toLong() * KV_CACHE_BYTES_PER_TOKEN,
+            residentDemand + incrementalContextTokens.toLong() * KV_CACHE_BYTES_PER_TOKEN,
             binding.cpuUnits,
         )
     } else {
@@ -237,6 +240,7 @@ class CatalogModelProvider(
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
         return json.decodeFromString<OllamaCatalogResponse>(body).also { decoded ->
+            ollamaResidentContextTokens = contextWindowTokens
             ollamaResidentUntilNanos = nanoTime() + OLLAMA_RESIDENCY_WINDOW_NANOS
             if (providerDiagnosticsEnabled) {
                 diagnosticSink(
@@ -293,16 +297,16 @@ class CatalogModelProvider(
         JsonPrimitive(false)
     }
 
-    private fun ollamaModelRecentlyLoaded(): Boolean {
+    private fun ollamaResidentContextTokens(): Int? {
         val residentUntil = ollamaResidentUntilNanos
-        if (endpoint.protocol != PROVIDER_PROTOCOL_OLLAMA_NATIVE) return false
+        if (endpoint.protocol != PROVIDER_PROTOCOL_OLLAMA_NATIVE) return null
         val now = nanoTime()
-        if (residentUntil != 0L && residentUntil - now > 0) return true
-        if (ollamaProbeUntilNanos - now > 0) return ollamaProbeResident
-        val resident = ollamaResidentProbe(endpoint.baseUrl, binding.model)
-        ollamaProbeResident = resident
+        if (residentUntil != 0L && residentUntil - now > 0) return ollamaResidentContextTokens
+        if (ollamaProbeUntilNanos - now > 0) return ollamaResidentContextTokens.takeIf { it > 0 }
+        val residentContextTokens = ollamaResidentProbe(endpoint.baseUrl, binding.model) ?: 0
+        ollamaResidentContextTokens = residentContextTokens
         ollamaProbeUntilNanos = now + OLLAMA_RESIDENCY_PROBE_WINDOW_NANOS
-        return resident
+        return residentContextTokens.takeIf { it > 0 }
     }
 
     private fun loadPrompt(name: String): String = requireNotNull(
@@ -321,21 +325,21 @@ class CatalogModelProvider(
     }
 }
 
-private fun probeOllamaModelResident(baseUrl: String, model: String): Boolean = runCatching {
+private fun probeOllamaResidentContextTokens(baseUrl: String, model: String): Int? = runCatching {
     val connection = URI.create(baseUrl.trimEnd('/') + "/api/ps").toURL().openConnection() as HttpURLConnection
     connection.requestMethod = "GET"
     connection.connectTimeout = OLLAMA_RESIDENCY_PROBE_TIMEOUT_MILLIS
     connection.readTimeout = OLLAMA_RESIDENCY_PROBE_TIMEOUT_MILLIS
     try {
-        if (connection.responseCode !in 200..299) return@runCatching false
+        if (connection.responseCode !in 200..299) return@runCatching null
         val response = residencyJson.decodeFromString<OllamaModelsResponse>(
             connection.inputStream.bufferedReader().use { it.readText() }
         )
-        response.models.any { it.name == model || it.name.substringBefore('@') == model }
+        response.models.firstOrNull { it.name == model || it.name.substringBefore('@') == model }?.contextLength
     } finally {
         connection.disconnect()
     }
-}.getOrDefault(false)
+}.getOrNull()
 
 class ModelProviderRegistry(
     private val store: ModelProviderCatalogStore,
@@ -480,7 +484,10 @@ private data class OllamaAttemptDiagnostic(
 private data class OllamaModelsResponse(val models: List<OllamaModel>)
 
 @Serializable
-private data class OllamaModel(val name: String)
+private data class OllamaModel(
+    val name: String,
+    @SerialName("context_length") val contextLength: Int = 0,
+)
 
 private val residencyJson = Json { ignoreUnknownKeys = true }
 private const val OLLAMA_RESIDENCY_PROBE_TIMEOUT_MILLIS = 500

@@ -58,7 +58,7 @@ class ModelProviderCatalogTest {
             binding,
             engine = engine,
             nanoTime = { now },
-            ollamaResidentProbe = { _, _ -> false },
+            ollamaResidentProbe = { _, _ -> null },
         )
         val profile = DefaultModelExecutionProfiles.boundedDefinitionReasoning
         val coldDemand = provider.resourceDemand(profile, 100)
@@ -69,7 +69,7 @@ class ModelProviderCatalogTest {
         val expiredDemand = provider.resourceDemand(profile, 100)
         provider.close()
 
-        assertEquals(binding.residentMemoryBytes, coldDemand.memoryBytes - residentDemand.memoryBytes)
+        assertEquals(0, residentDemand.memoryBytes)
         assertEquals(coldDemand, expiredDemand)
     }
 
@@ -81,7 +81,7 @@ class ModelProviderCatalogTest {
         val provider = CatalogModelProvider(
             catalog.endpoints.single(),
             binding,
-            ollamaResidentProbe = { _, model -> probes++; model == binding.model },
+            ollamaResidentProbe = { _, model -> probes++; binding.contextWindowTokens.takeIf { model == binding.model } },
         )
         val profile = DefaultModelExecutionProfiles.boundedDefinitionReasoning
 
@@ -89,9 +89,26 @@ class ModelProviderCatalogTest {
         val cached = provider.resourceDemand(profile, 100)
         provider.close()
 
-        assertEquals((100 + profile.outputBudgetTokens).toLong() * 393_216L, first.memoryBytes)
+        assertEquals(0, first.memoryBytes)
         assertEquals(first, cached)
         assertEquals(1, probes)
+    }
+
+    @Test
+    fun `resident Ollama model charges only incremental context memory`() {
+        val catalog = defaultLocalModelProviderCatalog()
+        val binding = catalog.bindings.single()
+        val provider = CatalogModelProvider(
+            catalog.endpoints.single(),
+            binding,
+            ollamaResidentProbe = { _, _ -> 1_000 },
+        )
+        val profile = DefaultModelExecutionProfiles.boundedDefinitionReasoning
+
+        val demand = provider.resourceDemand(profile, 2_000)
+        provider.close()
+
+        assertEquals((2_000 + profile.outputBudgetTokens - 1_000).toLong() * 393_216L, demand.memoryBytes)
     }
 
     @Test
