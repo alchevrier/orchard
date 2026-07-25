@@ -132,7 +132,8 @@ class CodingWorkerService(
         .toList()
 
     fun authorizeRetry(runId: Long): CodingWorkerTickResult {
-        if (codingWorkerExecutions(workerStore.loadEvents()).any { it.claim.runId == runId && it.result == null }) {
+        val executions = codingWorkerExecutions(workerStore.loadEvents())
+        if (executions.any { it.claim.runId == runId && it.result == null }) {
             return CodingWorkerTickResult(
                 CodingWorkerTickStatus.BUSY,
                 diagnostic = "The coding run already has an active execution.",
@@ -143,8 +144,12 @@ class CodingWorkerService(
                 CodingWorkerTickStatus.IDLE,
                 diagnostic = "The coding run has no current accepted execution plan.",
             )
-        val latest = attemptStore.latestAttempt(runId, plan.planId, plan.hash)
-        if (latest?.state !in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_CONSUMED)) {
+        val retryBasis = runCatching {
+            attemptStore.retryBasisForTerminalFailure(executions, runId, plan)
+        }.getOrElse {
+            return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE, diagnostic = it.message.orEmpty())
+        }
+        if (retryBasis?.state !in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_CONSUMED)) {
             return CodingWorkerTickResult(
                 CodingWorkerTickStatus.IDLE,
                 diagnostic = "The coding run has no blocked attempt to retry.",
@@ -160,7 +165,7 @@ class CodingWorkerService(
                     state = CODING_ATTEMPT_RETRY_AUTHORIZED,
                     resultStatus = CodingWorkerTickStatus.RETRY_AUTHORIZED.name,
                     diagnostic = "A human explicitly authorized one successor coding attempt.",
-                    proposalHash = requireNotNull(latest).proposalHash,
+                    proposalHash = requireNotNull(retryBasis).proposalHash,
                 )
             }
         }.fold(
@@ -976,6 +981,39 @@ class CodingWorkerService(
 
 internal fun codingExecutionBlockRemains(executionStatus: String?, authorityState: String?): Boolean =
     executionStatus == CODING_EXECUTION_BLOCKED && authorityState != CODING_ATTEMPT_RETRY_AUTHORIZED
+
+internal fun codingRetryableTerminalFailure(
+    executions: List<CodingWorkerExecutionView>,
+    runId: Long,
+    planId: Long,
+    planHash: String,
+): CodingWorkerExecutionView? = executions.lastOrNull {
+    it.claim.runId == runId &&
+        it.claim.executionPlanId == planId &&
+        it.claim.executionPlanHash == planHash &&
+        it.result?.status == CODING_EXECUTION_FAILED
+}
+
+internal fun CodingWorkerAttemptStore.retryBasisForTerminalFailure(
+    executions: List<CodingWorkerExecutionView>,
+    runId: Long,
+    plan: RepositoryExecutionPlan,
+): CodingWorkerAttempt? {
+    latestAttempt(runId, plan.planId, plan.hash)?.let { return it }
+    val failure = codingRetryableTerminalFailure(executions, runId, plan.planId, plan.hash) ?: return null
+    return appendNext { attemptId ->
+        CodingWorkerAttempt(
+            attemptId = attemptId,
+            runId = runId,
+            executionPlanId = plan.planId,
+            executionPlanHash = plan.hash,
+            state = CODING_ATTEMPT_BLOCKED,
+            resultStatus = CodingWorkerTickStatus.MODEL_FAILED.name,
+            diagnostic = requireNotNull(failure.result).diagnostic,
+            proposalHash = failure.result.proposalHash,
+        )
+    }
+}
 
 internal fun codingRejectionIsRepeated(
     attempts: List<CodingWorkerAttempt>,

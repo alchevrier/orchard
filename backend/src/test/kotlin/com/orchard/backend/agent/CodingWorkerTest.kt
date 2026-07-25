@@ -1,5 +1,9 @@
 package com.orchard.backend.agent
 
+import com.orchard.backend.analysis.AnalysisExecutionProvenance
+import com.orchard.backend.analysis.DISPOSITION_PARTIALLY_IMPLEMENTED
+import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
+import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
@@ -201,6 +205,97 @@ class CodingWorkerTest {
         assertEquals(CodingWorkerTickStatus.INTERRUPTED_RECOVERED, result.status)
         assertEquals(CODING_EXECUTION_INTERRUPTED, result.execution?.result?.status)
         assertEquals(1, result.execution?.claim?.executionId)
+    }
+
+    @Test
+    fun `explicit retry can bind the latest terminal model failure to its current plan`() {
+        val planHash = "d".repeat(64)
+        val matchingClaimDraft = claim(executionId = 3, runId = 19, attempt = 3).copy(
+            executionPlanId = 23,
+            executionPlanHash = planHash,
+            hash = "",
+        )
+        val matchingClaim = matchingClaimDraft.copy(hash = codingWorkerClaimHash(matchingClaimDraft))
+        val failedResultDraft = CodingWorkerResult(
+            executionId = 3,
+            status = CODING_EXECUTION_FAILED,
+            diagnostic = "Provider rejected the structured request.",
+            completedAt = "2026-06-21T00:03:00Z",
+            hash = "",
+        )
+        val failed = CodingWorkerExecutionView(
+            matchingClaim,
+            failedResultDraft.copy(hash = codingWorkerResultHash(failedResultDraft)),
+        )
+        val deferred = failed.copy(result = failed.result?.copy(status = CODING_EXECUTION_DEFERRED))
+        val attempts = TransientCodingWorkerAttemptStore()
+        val plan = RepositoryExecutionPlan(
+            planId = 23,
+            runId = 19,
+            revision = 1,
+            projectId = 1,
+            baseRevision = "e".repeat(40),
+            content = RepositoryAnalysisPlanContent(
+                disposition = DISPOSITION_PARTIALLY_IMPLEMENTED,
+                summary = "Apply the admitted change.",
+                evidence = emptyList(),
+                reuse = emptyList(),
+                preservedInvariants = emptyList(),
+                nonGoals = emptyList(),
+                operations = emptyList(),
+                verificationCommands = emptyList(),
+            ),
+            provenance = AnalysisExecutionProvenance(
+                executionProfileId = "test-analysis",
+                bindingFingerprint = "f".repeat(64),
+                promptHash = "1".repeat(64),
+                contextHash = "2".repeat(64),
+                outputHash = "3".repeat(64),
+                modelExecutionId = 1,
+            ),
+            hash = planHash,
+        )
+
+        assertEquals(
+            failed,
+            codingRetryableTerminalFailure(listOf(deferred, failed), 19, 23, planHash),
+        )
+        assertEquals(null, codingRetryableTerminalFailure(listOf(failed), 19, 24, planHash))
+        assertEquals(null, codingRetryableTerminalFailure(listOf(deferred), 19, 23, planHash))
+        val blocked = attempts.retryBasisForTerminalFailure(listOf(deferred, failed), 19, plan)
+        assertEquals(CODING_ATTEMPT_BLOCKED, blocked?.state)
+        assertEquals(failed.result?.diagnostic, blocked?.diagnostic)
+        attempts.appendNext { attemptId ->
+            CodingWorkerAttempt(
+                attemptId = attemptId,
+                runId = 19,
+                executionPlanId = 23,
+                executionPlanHash = planHash,
+                state = CODING_ATTEMPT_RETRY_AUTHORIZED,
+                resultStatus = CodingWorkerTickStatus.RETRY_AUTHORIZED.name,
+                diagnostic = "A human explicitly authorized one successor coding attempt.",
+            )
+        }
+
+        assertEquals(
+            CODING_ATTEMPT_RETRY_AUTHORIZED,
+            attempts.retryBasisForTerminalFailure(listOf(failed), 19, plan)?.state,
+        )
+        assertEquals(2, attempts.load().size)
+    }
+
+    @Test
+    fun `explicit retry rejects an active coding execution before resolving its plan`() {
+        val store = TransientCodingWorkerStore()
+        store.append(CodingWorkerEvent(eventId = 1, claim = claim(executionId = 1, runId = 19, attempt = 1)))
+        val worker = CodingWorkerService(
+            workspace = WorkspaceStore(),
+            modelProviders = emptyList(),
+            workerStore = store,
+        )
+
+        assertEquals(CodingWorkerTickStatus.BUSY, worker.authorizeRetry(19).status)
+        assertTrue(worker.attempts().isEmpty())
     }
 
     @Test
