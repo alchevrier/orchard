@@ -528,6 +528,28 @@ class RepositoryExecutionPlanStoreTest {
         assertEquals(listOf(listOf(1, 2), listOf(3, 4)), compiledScopeAuthority.scopeCoverage.map { it.operationOrders })
         assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, compiledScopeAuthority))
         assertNull(repositoryScopeCoverageDiagnostic(scope, compiledScopeAuthority))
+        val missingTestOperation = complete.copy(operations = complete.operations.filter { it.order != 3 })
+        val compiledMissingTest = compileRepositoryScopeAuthority(
+            scope,
+            selectors,
+            context,
+            missingTestOperation,
+            listOf("Behavior works."),
+        )
+        assertEquals(
+            listOf(
+                Triple(1, PLAN_OPERATION_MODIFY, "frontend/src/main/Theme.kt"),
+                Triple(2, PLAN_OPERATION_MODIFY, "frontend/src/main/Inbox.kt"),
+                Triple(3, PLAN_OPERATION_MODIFY, "frontend/src/test/TypographyTest.kt"),
+                Triple(4, PLAN_OPERATION_VERIFY, "."),
+            ),
+            compiledMissingTest.operations.map { Triple(it.order, it.action, it.path) },
+        )
+        assertEquals(listOf(listOf(1, 2), listOf(3, 4)), compiledMissingTest.scopeCoverage.map { it.operationOrders })
+        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledMissingTest))
+        assertNull(repositoryScopeCoverageDiagnostic(scope, compiledMissingTest))
+        assertNull(repositoryAcceptanceCoverageDiagnostic(listOf("Behavior works."), compiledMissingTest))
+        assertNull(repositoryOperationShapeDiagnostic(context, compiledMissingTest))
         assertEquals(
             "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(evidence = complete.evidence.take(1))),

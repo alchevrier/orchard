@@ -452,6 +452,7 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             boundedContext,
             output,
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
         )
         val invalid = validateOutput(run, boundedContext, compiledOutput)
         if (invalid != null) return blockAttempt(
@@ -846,24 +847,48 @@ internal fun compileRepositoryScopeAuthority(
     selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
+    acceptedCriteria: List<String> = output.operations.flatMap { it.acceptanceCriteria }.distinct(),
 ): RepositoryAnalysisPlanContent {
     if (selectors.isEmpty() || repositoryScopeIdentityDiagnostic(acceptedScope, output) != null) return output
     val pathsBySelector = requiredRepositoryPathsBySelector(selectors, context)
     val selectorIdsByScope = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, selectors)
     val coverageByScope = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
-    val operationsByOrder = output.operations.associateBy { it.order }
+    val requiredPaths = pathsBySelector.values.flatten().distinct().sorted()
+    val existingSourcePaths = output.operations.asSequence()
+        .filter { it.action != PLAN_OPERATION_VERIFY }
+        .mapTo(hashSetOf()) { it.path }
+    val compiledOperations = (
+        output.operations.filter { it.action != PLAN_OPERATION_VERIFY } +
+            requiredPaths.filter { it !in existingSourcePaths }.map { path ->
+                val scopes = acceptedScope.filterIndexed { index, _ ->
+                    selectorIdsByScope[index].any { path in pathsBySelector[it].orEmpty() }
+                }
+                ExecutionPlanOperation(
+                    order = 0,
+                    action = PLAN_OPERATION_MODIFY,
+                    path = path,
+                    instruction = "Implement accepted scope for this required source path: ${scopes.joinToString(" | ")}",
+                    acceptanceCriteria = acceptedCriteria,
+                )
+            } +
+            output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
+        ).mapIndexed { index, operation -> operation.copy(order = index + 1) }
+    val verificationOrderMap = output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
+        .zip(compiledOperations.filter { it.action == PLAN_OPERATION_VERIFY })
+        .associate { (original, compiled) -> original.order to compiled.order }
     return output.copy(
+        operations = compiledOperations,
         scopeCoverage = acceptedScope.mapIndexed { index, scope ->
             val coverage = coverageByScope.getValue(canonicalAuthorityText(scope))
             val evidencePaths = selectorIdsByScope[index]
                 .flatMap { pathsBySelector[it].orEmpty() }
                 .distinct()
                 .sorted()
-            val sourceOperationOrders = output.operations.asSequence()
+            val sourceOperationOrders = compiledOperations.asSequence()
                 .filter { it.action != PLAN_OPERATION_VERIFY && it.path in evidencePaths }
                 .map { it.order }
             val verificationOperationOrders = coverage.operationOrders.asSequence()
-                .filter { operationsByOrder[it]?.action == PLAN_OPERATION_VERIFY }
+                .mapNotNull(verificationOrderMap::get)
             coverage.copy(
                 scope = scope,
                 evidencePaths = evidencePaths,
