@@ -55,6 +55,57 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
+    fun `same rejection diagnostic is recurrent even when proposal hash changes`() {
+        val blocked = attempt(1, CODING_ATTEMPT_BLOCKED, "The proposal contains no coding operations.")
+
+        assertTrue(
+            codingRejectionIsRepeated(
+                attempts = listOf(blocked),
+                runId = RUN_ID,
+                planId = PLAN_ID,
+                planHash = PLAN_HASH,
+                proposalHash = "4".repeat(64),
+                diagnostic = blocked.diagnostic,
+            )
+        )
+        assertEquals(
+            false,
+            codingRejectionIsRepeated(
+                attempts = listOf(blocked),
+                runId = RUN_ID,
+                planId = PLAN_ID,
+                planHash = PLAN_HASH,
+                proposalHash = "4".repeat(64),
+                diagnostic = "A different deterministic rejection.",
+            ),
+        )
+    }
+
+    @Test
+    fun `restart supersedes legacy authorization for a recurrent diagnostic`() {
+        val store = TransientCodingWorkerAttemptStore()
+        store.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_BLOCKED, "Repeated defect.") }
+        store.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_RETRY_AUTHORIZED, "First correction.") }
+        store.appendNext { attemptId -> attempt(attemptId, CODING_ATTEMPT_RETRY_CONSUMED, "First correction consumed.") }
+        store.appendNext { attemptId ->
+            attempt(attemptId, CODING_ATTEMPT_BLOCKED, "Repeated defect.").copy(proposalHash = "4".repeat(64))
+        }
+        store.appendNext { attemptId ->
+            attempt(attemptId, CODING_ATTEMPT_RETRY_AUTHORIZED, "Legacy hash-only correction.").copy(proposalHash = "4".repeat(64))
+        }
+
+        CodingWorkerService(
+            workspace = WorkspaceStore(),
+            modelProviders = emptyList(),
+            attemptStore = store,
+        )
+
+        assertEquals(CODING_ATTEMPT_BLOCKED, store.load().last().state)
+        assertEquals("Repeated defect.", store.load().last().diagnostic)
+        assertEquals("4".repeat(64), store.load().last().proposalHash)
+    }
+
+    @Test
     fun `legacy identical scope failures bootstrap one durable block without changing worker events`() {
         val directory = createTempDirectory("orchard-legacy-coding-attempts-")
         val workerStore = TransientCodingWorkerStore()

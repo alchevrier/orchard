@@ -106,6 +106,7 @@ class CodingWorkerService(
         attemptStore.load()
         bootstrapLegacyAttemptBlocks()
         bootstrapApplicationFailureBlocks()
+        bootstrapRecurrentRetryBlocks()
     }
 
     fun executions(): List<CodingWorkerExecutionView> = codingWorkerExecutions(workerStore.loadEvents())
@@ -607,13 +608,14 @@ class CodingWorkerService(
         proposalHash: String,
         diagnostic: String,
     ): String? {
-        val repeatedProposal = attemptStore.load().any {
-            it.runId == runId &&
-                it.executionPlanId == planId &&
-                it.executionPlanHash == planHash &&
-                it.state == CODING_ATTEMPT_BLOCKED &&
-                it.proposalHash == proposalHash
-        }
+        val repeatedRejection = codingRejectionIsRepeated(
+            attemptStore.load(),
+            runId,
+            planId,
+            planHash,
+            proposalHash,
+            diagnostic,
+        )
         return runCatching {
             attemptStore.appendNext { attemptId ->
                 CodingWorkerAttempt(
@@ -627,7 +629,7 @@ class CodingWorkerService(
                     proposalHash = proposalHash,
                 )
             }
-            if (!repeatedProposal) {
+            if (!repeatedRejection) {
                 attemptStore.appendNext { attemptId ->
                     CodingWorkerAttempt(
                         attemptId = attemptId,
@@ -888,6 +890,30 @@ class CodingWorkerService(
             }
     }
 
+    private fun bootstrapRecurrentRetryBlocks() {
+        attemptStore.load()
+            .groupBy { Triple(it.runId, it.executionPlanId, it.executionPlanHash) }
+            .values
+            .forEach { attempts ->
+                if (attempts.lastOrNull()?.state != CODING_ATTEMPT_RETRY_AUTHORIZED) return@forEach
+                val blocked = attempts.dropLast(1).filter { it.state == CODING_ATTEMPT_BLOCKED }
+                val current = blocked.lastOrNull() ?: return@forEach
+                if (blocked.dropLast(1).none { it.diagnostic == current.diagnostic }) return@forEach
+                attemptStore.appendNext { attemptId ->
+                    CodingWorkerAttempt(
+                        attemptId = attemptId,
+                        runId = current.runId,
+                        executionPlanId = current.executionPlanId,
+                        executionPlanHash = current.executionPlanHash,
+                        state = CODING_ATTEMPT_BLOCKED,
+                        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                        diagnostic = current.diagnostic,
+                        proposalHash = current.proposalHash,
+                    )
+                }
+            }
+    }
+
     private companion object {
         const val CODING_WORKFLOW_STEP_ID = "DELIVER_CHANGE:CODING_PATCH"
         const val CODING_PROPOSAL_SCHEMA = "coding-patch-proposal-v2"
@@ -907,6 +933,21 @@ class CodingWorkerService(
             return stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         }
     }
+}
+
+internal fun codingRejectionIsRepeated(
+    attempts: List<CodingWorkerAttempt>,
+    runId: Long,
+    planId: Long,
+    planHash: String,
+    proposalHash: String,
+    diagnostic: String,
+): Boolean = attempts.any {
+    it.runId == runId &&
+        it.executionPlanId == planId &&
+        it.executionPlanHash == planHash &&
+        it.state == CODING_ATTEMPT_BLOCKED &&
+        (it.proposalHash == proposalHash || it.diagnostic == diagnostic)
 }
 
 internal fun codingProposalAuthorizationDiagnostic(
