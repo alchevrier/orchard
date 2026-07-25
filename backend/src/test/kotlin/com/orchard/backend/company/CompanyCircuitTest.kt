@@ -149,6 +149,33 @@ class CompanyCircuitTest {
     }
 
     @Test
+    fun `repository analysis compacts required evidence excerpts after declarations`() {
+        val context = CodingRepositoryContext(
+            files = (1..2).map { index ->
+                CodingContextFile("src/Required$index.kt", "owner $index\n" + "x".repeat(20_000))
+            },
+            omittedFileCount = 0,
+        )
+        val requiredPaths = context.files.mapTo(hashSetOf()) { it.path }
+        val budget = estimateModelTokens(Json.encodeToString(context.copy(
+            files = context.files.map { it.copy(content = it.content.take(1_000)) },
+        )))
+
+        val compacted = requireNotNull(
+            compactRepositoryContextToBudget(
+                context,
+                budget,
+                requiredPaths,
+                contentCompactor = { content, maxBytes -> content.take(maxBytes) },
+            ) { Json.encodeToString(it) }
+        )
+
+        assertEquals(context.files.map { it.path }, compacted.files.map { it.path })
+        assertTrue(compacted.files.all { it.content.length < 20_000 })
+        assertEquals(context.files.map { it.contentHash }, compacted.files.map { it.contentHash })
+    }
+
+    @Test
     fun `deterministic repository analysis rejection requires explicit retry`() = runTest {
         val state = createTempDirectory("orchard-company-analysis-retry-state-")
         val projects = createTempDirectory("orchard-company-analysis-retry-projects-")

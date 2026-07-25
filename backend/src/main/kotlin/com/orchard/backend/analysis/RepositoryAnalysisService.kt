@@ -7,6 +7,7 @@ import com.orchard.backend.agent.CodingWorkerAttemptStore
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
+import com.orchard.backend.agent.focusedContextExcerpt
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.RISK_HIGH
@@ -329,10 +330,11 @@ class RepositoryAnalysisService(
                 diagnostic = blocked.diagnostic,
             )
         }
+        val query = analysisQuery(run)
         val context = runCatching {
             workspaceGateway.collectAnalysisContext(
                 workspacePath,
-                analysisQuery(run),
+            query,
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             )
         }.getOrElse {
@@ -391,7 +393,13 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
         ).toSet()
-        val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens, requiredEvidencePaths) { candidate ->
+        val queryTokens = repositoryAnalysisTokens(query)
+        val boundedContext = compactRepositoryContextToBudget(
+            context,
+            profile.inputBudgetTokens,
+            requiredEvidencePaths,
+            contentCompactor = { content, maxBytes -> focusedContextExcerpt(content, queryTokens, maxBytes) },
+        ) { candidate ->
             "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
         } ?: return RepositoryAnalysisTickResult(
             RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
@@ -1010,6 +1018,7 @@ internal fun compactRepositoryContextToBudget(
     context: CodingRepositoryContext,
     inputBudgetTokens: Int,
     requiredPaths: Set<String> = emptySet(),
+    contentCompactor: ((String, Int) -> String)? = null,
     promptFor: (CodingRepositoryContext) -> String,
 ): CodingRepositoryContext? {
     if (context.files.isEmpty()) return null
@@ -1017,7 +1026,39 @@ internal fun compactRepositoryContextToBudget(
     if (!availablePaths.containsAll(requiredPaths)) return null
     val optionalFiles = context.files.filter { it.path !in requiredPaths }
     var declarationLimit = context.files.maxOfOrNull { it.matchedDeclarations.size } ?: 0
+    var contentByteLimit: Int? = null
     if (requiredPaths.isNotEmpty()) {
+        val requiredWithNoDeclarations = compactRepositoryContext(
+            context,
+            requiredPaths,
+            optionalFiles = emptyList(),
+            declarationLimit = 0,
+        )
+        if (estimateModelTokens(promptFor(requiredWithNoDeclarations)) > inputBudgetTokens) {
+            val compactContent = contentCompactor ?: return null
+            var lowerContentBytes = 1
+            var upperContentBytes = context.files.filter { it.path in requiredPaths }
+                .maxOf { it.content.encodeToByteArray().size }
+            var fittedContentBytes: Int? = null
+            while (lowerContentBytes <= upperContentBytes) {
+                val candidateBytes = (lowerContentBytes + upperContentBytes) / 2
+                val candidate = compactRepositoryContext(
+                    context,
+                    requiredPaths,
+                    optionalFiles = emptyList(),
+                    declarationLimit = 0,
+                    contentByteLimit = candidateBytes,
+                    contentCompactor = compactContent,
+                )
+                if (candidate.files.all { it.content.isNotEmpty() } && estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
+                    fittedContentBytes = candidateBytes
+                    lowerContentBytes = candidateBytes + 1
+                } else {
+                    upperContentBytes = candidateBytes - 1
+                }
+            }
+            contentByteLimit = fittedContentBytes ?: return null
+        }
         var lowerDeclarations = 0
         var upperDeclarations = declarationLimit
         var fittedDeclarationLimit: Int? = null
@@ -1028,6 +1069,8 @@ internal fun compactRepositoryContextToBudget(
                 requiredPaths,
                 optionalFiles = emptyList(),
                 declarationLimit = candidateLimit,
+                contentByteLimit = contentByteLimit,
+                contentCompactor = contentCompactor,
             )
             if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
                 fittedDeclarationLimit = candidateLimit
@@ -1048,6 +1091,8 @@ internal fun compactRepositoryContextToBudget(
             requiredPaths,
             optionalFiles.take(retainedOptional),
             declarationLimit,
+            contentByteLimit,
+            contentCompactor,
         )
         if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
             best = candidate
@@ -1064,12 +1109,22 @@ private fun compactRepositoryContext(
     requiredPaths: Set<String>,
     optionalFiles: List<CodingContextFile>,
     declarationLimit: Int,
+    contentByteLimit: Int? = null,
+    contentCompactor: ((String, Int) -> String)? = null,
 ): CodingRepositoryContext {
     val selectedPaths = requiredPaths + optionalFiles.map { it.path }
     return context.copy(
         files = context.files.filter { it.path in selectedPaths }.map { file ->
-            file.copy(matchedDeclarations = file.matchedDeclarations.take(declarationLimit))
+            file.copy(
+                content = contentByteLimit?.let { requireNotNull(contentCompactor)(file.content, it) } ?: file.content,
+                matchedDeclarations = file.matchedDeclarations.take(declarationLimit),
+            )
         },
         omittedFileCount = context.omittedFileCount + context.files.size - selectedPaths.size,
     )
 }
+
+private fun repositoryAnalysisTokens(value: String): Set<String> = value.lowercase()
+    .split(Regex("[^a-z0-9_]+"))
+    .filter { it.length >= 3 }
+    .toSet()
