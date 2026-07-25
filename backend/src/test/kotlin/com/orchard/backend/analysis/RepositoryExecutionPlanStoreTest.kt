@@ -184,21 +184,24 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
         assert(prompt.contains("copying scope exactly without paraphrasing, omission, or invention"))
         assert(prompt.contains("or from a path targeted by a CREATE, MODIFY, or DELETE operation"))
-        assert(prompt.contains("Every evidencePath in implementation scopeCoverage must also be targeted by a CREATE, MODIFY, or DELETE operation"))
+        assert(prompt.contains("classify every evidencePath exactly once"))
+        assert(prompt.contains("include it in compliantEvidencePaths when pinned evidence proves its bytes already satisfy that scope unchanged"))
+        assert(prompt.contains("must not be targeted by any CREATE, MODIFY, or DELETE operation in the plan"))
         assert(prompt.contains("every referenced order must exist"))
         assert(prompt.contains("Treat universal scope words such as all, every, and across as exhaustive"))
         assert(prompt.contains("typed repository evidence selectors evaluated against complete supplied source"))
         assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
         assert(prompt.contains("matchedDeclarations selected from its complete source before content excerpting"))
         assert(prompt.contains("do not claim an owner or surface is absent when matchedDeclarations identifies it"))
-        assert(prompt.contains("requiredSourcePathGroups is deterministic authority"))
+        assert(prompt.contains("requiredEvidencePathGroups is deterministic evidence authority"))
         assert(prompt.contains("Group IDs are selector IDs"))
         assert(prompt.contains("Never omit a grouped path"))
         assert(prompt.contains("each value is a list of selector IDs"))
         assert(prompt.contains("copy that exact union to the matching scopeCoverage evidencePaths"))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
-        assert(prompt.contains("for each path in evidencePaths, include a CREATE, MODIFY, or DELETE operation whose path is that same string"))
-        assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this source-path requirement"))
+        assert(prompt.contains("each evidencePath must be the same string as either a CREATE, MODIFY, or DELETE operation path, or an entry in compliantEvidencePaths"))
+        assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this path requirement"))
+        assert(prompt.contains("A clause that adds a test or regression requires a created or modified test source path"))
         assert(prompt.contains("put only the created or modified test source path in evidencePaths"))
         assert(prompt.contains("never put a requiredScope value in acceptanceCriteria"))
         assert(prompt.contains("verificationCommands may contain only exact values from requiredVerificationCommands"))
@@ -385,16 +388,34 @@ class RepositoryExecutionPlanStoreTest {
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_VERIFY, ".", null, "Verify it.", listOf("Behavior works."))),
         )
         assertEquals(
-            "Scope coverage 2 cites paths without corresponding source operations: src/MainTest.kt. " +
+            "Scope coverage 2 cites paths without source operations or explicit compliant evidence: src/MainTest.kt. " +
                 "Linked source operation paths: <none>.",
             repositoryScopeCoverageDiagnostic(scope, verifyOnly),
+        )
+        assertEquals(
+            "Scope coverage 1 uses compliant evidence classification for evidence-only scope.",
+            repositoryScopeCoverageDiagnostic(
+                scope,
+                content.copy(scopeCoverage = content.scopeCoverage.mapIndexed { index, coverage ->
+                    if (index == 0) coverage.copy(compliantEvidencePaths = coverage.evidencePaths) else coverage
+                }),
+            ),
+        )
+        assertEquals(
+            "Scope coverage 2 requires a test source operation.",
+            repositoryScopeCoverageDiagnostic(
+                scope,
+                verifyOnly.copy(scopeCoverage = verifyOnly.scopeCoverage.mapIndexed { index, coverage ->
+                    if (index == 1) coverage.copy(compliantEvidencePaths = coverage.evidencePaths) else coverage
+                }),
+            ),
         )
         val unmatchedEvidence = content.copy(
             evidence = content.evidence + RepositoryEvidenceCitation("src/Other.kt", null, "Another owner.", "d".repeat(64)),
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
         )
         assertEquals(
-            "Scope coverage 2 cites paths without corresponding source operations: src/Other.kt. " +
+            "Scope coverage 2 cites paths without source operations or explicit compliant evidence: src/Other.kt. " +
                 "Linked source operation paths: src/Main.kt.",
             repositoryScopeCoverageDiagnostic(scope, unmatchedEvidence),
         )
@@ -439,7 +460,7 @@ class RepositoryExecutionPlanStoreTest {
                 affinitySelectorId = "owners",
             ),
         )
-        val scope = listOf("Inspect typography across all surfaces.", "Add focused regression coverage.")
+        val scope = listOf("Restore native typography across all surfaces.", "Add focused regression coverage.")
         val complete = plan(1, 1, "a".repeat(40)).content.copy(
             evidence = listOf(context.files[0], context.files[1], context.files[4]).map {
                 RepositoryEvidenceCitation(it.path, null, "Explicit typography owner.", it.contentHash)
@@ -463,10 +484,10 @@ class RepositoryExecutionPlanStoreTest {
                 "frontend/src/main/Theme.kt",
                 "frontend/src/test/TypographyTest.kt",
             ),
-            requiredRepositorySourceOperationPaths(selectors, context),
+            requiredRepositoryEvidencePaths(selectors, context),
         )
         assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete))
-        assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, complete))
+        assertNull(repositoryRequiredScopeEvidencePathsDiagnostic(scope, selectors, context, complete))
         assertNull(repositoryEvidenceSelectionDiagnostic(selectors, context))
         assertEquals(
             "Repository evidence selectors matched no required paths: owners, tests.",
@@ -478,7 +499,7 @@ class RepositoryExecutionPlanStoreTest {
         assertEquals(
             "Scope coverage 2 paths differ from deterministic scope authority. " +
                 "Expected: frontend/src/test/TypographyTest.kt. Actual: frontend/src/main/Theme.kt.",
-            repositoryRequiredScopeSourcePathsDiagnostic(
+            repositoryRequiredScopeEvidencePathsDiagnostic(
                 scope,
                 selectors,
                 context,
@@ -499,7 +520,7 @@ class RepositoryExecutionPlanStoreTest {
             "Scope coverage 1 paths differ from deterministic scope authority. " +
                 "Expected: frontend/src/main/Inbox.kt, frontend/src/main/Theme.kt. " +
                 "Actual: frontend/src/test/TypographyTest.kt.",
-            repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, misplacedTest),
+            repositoryRequiredScopeEvidencePathsDiagnostic(scope, selectors, context, misplacedTest),
         )
         val swappedScopePaths = complete.copy(scopeCoverage = complete.scopeCoverage.map {
             when (it.scope) {
@@ -514,7 +535,7 @@ class RepositoryExecutionPlanStoreTest {
                 "Actual: frontend/src/test/TypographyTest.kt.\n" +
                 "Scope coverage 2 paths differ from deterministic scope authority. " +
                 "Expected: frontend/src/test/TypographyTest.kt. Actual: frontend/src/main/Theme.kt.",
-            repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, swappedScopePaths),
+            repositoryRequiredScopeEvidencePathsDiagnostic(scope, selectors, context, swappedScopePaths),
         )
         val compiledScopeAuthority = compileRepositoryScopeAuthority(scope, selectors, context, swappedScopePaths)
         assertEquals(scope, compiledScopeAuthority.scopeCoverage.map { it.scope })
@@ -526,36 +547,70 @@ class RepositoryExecutionPlanStoreTest {
             compiledScopeAuthority.scopeCoverage.map { it.evidencePaths },
         )
         assertEquals(listOf(listOf(1, 2), listOf(3, 4)), compiledScopeAuthority.scopeCoverage.map { it.operationOrders })
-        assertNull(repositoryRequiredScopeSourcePathsDiagnostic(scope, selectors, context, compiledScopeAuthority))
+        assertNull(repositoryRequiredScopeEvidencePathsDiagnostic(scope, selectors, context, compiledScopeAuthority))
         assertNull(repositoryScopeCoverageDiagnostic(scope, compiledScopeAuthority))
+        val alreadyCompliantOwner = complete.copy(
+            scopeCoverage = complete.scopeCoverage.map { coverage ->
+                if (coverage.scope == scope[0]) {
+                    coverage.copy(
+                        compliantEvidencePaths = listOf("frontend/src/main/Inbox.kt"),
+                        operationOrders = listOf(1, 4),
+                    )
+                } else {
+                    coverage
+                }
+            },
+            operations = complete.operations.filter { it.order != 2 },
+        )
+        val compiledAlreadyCompliantOwner = compileRepositoryScopeAuthority(scope, selectors, context, alreadyCompliantOwner)
+        assertEquals(
+            listOf(
+                Triple(1, PLAN_OPERATION_MODIFY, "frontend/src/main/Theme.kt"),
+                Triple(2, PLAN_OPERATION_MODIFY, "frontend/src/test/TypographyTest.kt"),
+                Triple(3, PLAN_OPERATION_VERIFY, "."),
+            ),
+            compiledAlreadyCompliantOwner.operations.map { Triple(it.order, it.action, it.path) },
+        )
+        assertEquals(
+            listOf("frontend/src/main/Inbox.kt"),
+            compiledAlreadyCompliantOwner.scopeCoverage.first().compliantEvidencePaths,
+        )
+        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledAlreadyCompliantOwner))
+        assertNull(repositoryScopeCoverageDiagnostic(scope, compiledAlreadyCompliantOwner))
         val missingTestOperation = complete.copy(operations = complete.operations.filter { it.order != 3 })
         val compiledMissingTest = compileRepositoryScopeAuthority(
             scope,
             selectors,
             context,
             missingTestOperation,
-            listOf("Behavior works."),
         )
         assertEquals(
             listOf(
                 Triple(1, PLAN_OPERATION_MODIFY, "frontend/src/main/Theme.kt"),
                 Triple(2, PLAN_OPERATION_MODIFY, "frontend/src/main/Inbox.kt"),
-                Triple(3, PLAN_OPERATION_MODIFY, "frontend/src/test/TypographyTest.kt"),
-                Triple(4, PLAN_OPERATION_VERIFY, "."),
+                Triple(3, PLAN_OPERATION_VERIFY, "."),
             ),
             compiledMissingTest.operations.map { Triple(it.order, it.action, it.path) },
         )
-        assertEquals(listOf(listOf(1, 2), listOf(3, 4)), compiledMissingTest.scopeCoverage.map { it.operationOrders })
-        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledMissingTest))
-        assertNull(repositoryScopeCoverageDiagnostic(scope, compiledMissingTest))
+        assertEquals(listOf(listOf(1, 2), listOf(3)), compiledMissingTest.scopeCoverage.map { it.operationOrders })
+        assertEquals(
+            "Required repository paths omit source operations or explicit compliant evidence: " +
+                "frontend/src/test/TypographyTest.kt.",
+            repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledMissingTest),
+        )
+        assertEquals(
+            "Scope coverage 2 cites paths without source operations or explicit compliant evidence: " +
+                "frontend/src/test/TypographyTest.kt. Linked source operation paths: <none>.",
+            repositoryScopeCoverageDiagnostic(scope, compiledMissingTest),
+        )
         assertNull(repositoryAcceptanceCoverageDiagnostic(listOf("Behavior works."), compiledMissingTest))
         assertNull(repositoryOperationShapeDiagnostic(context, compiledMissingTest))
         assertEquals(
-            "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
+            "Required repository paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(evidence = complete.evidence.take(1))),
         )
         assertEquals(
-            "Required source operation paths omit source operations: frontend/src/main/Inbox.kt.",
+            "Required repository paths omit source operations or explicit compliant evidence: frontend/src/main/Inbox.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(operations = complete.operations.filter { it.order != 2 })),
         )
         val missingPinnedOwner = complete.copy(
@@ -567,8 +622,8 @@ class RepositoryExecutionPlanStoreTest {
             repositoryScopeCoverageDiagnostic(scope, missingPinnedOwner),
         )
         assertEquals(
-            "Required source operation paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.\n" +
-                "Required source operation paths omit source operations: frontend/src/main/Inbox.kt.",
+            "Required repository paths omit evidence: frontend/src/main/Inbox.kt, frontend/src/test/TypographyTest.kt.\n" +
+                "Required repository paths omit source operations or explicit compliant evidence: frontend/src/main/Inbox.kt.",
             repositoryScopeAuthorityDiagnostic(scope, selectors, context, missingPinnedOwner),
         )
         assertEquals(

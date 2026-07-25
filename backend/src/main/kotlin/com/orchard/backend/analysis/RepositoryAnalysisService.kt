@@ -68,7 +68,7 @@ private data class RequiredRepositoryEvidence(
 )
 
 @Serializable
-private data class RequiredSourcePathGroup(
+private data class RequiredEvidencePathGroup(
     val id: String,
     val paths: List<String>,
 )
@@ -98,8 +98,8 @@ private data class RepositoryAnalysisEnvelope(
     val requiredOutputSchema: String,
     val requiredEvidence: List<RequiredRepositoryEvidence>,
     val requiredScope: List<String>,
-    val requiredSourcePathGroups: List<RequiredSourcePathGroup>,
-    val requiredScopeSourcePathGroupIds: List<List<String>>,
+    val requiredEvidencePathGroups: List<RequiredEvidencePathGroup>,
+    val requiredScopeEvidencePathGroupIds: List<List<String>>,
     val priorRejectedAnalysisDiagnostic: String?,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
@@ -364,8 +364,8 @@ class RepositoryAnalysisService(
             OUTPUT_SCHEMA,
             candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.scope.orEmpty(),
-            requiredRepositorySourcePathGroups(run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(), candidate),
-            requiredRepositoryScopeSourcePathGroupIds(
+            requiredRepositoryEvidencePathGroups(run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(), candidate),
+            requiredRepositoryScopeEvidencePathGroupIds(
                 run.workDefinition?.definition?.scope.orEmpty(),
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             ),
@@ -373,11 +373,11 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
-        val requiredSourcePaths = requiredRepositorySourceOperationPaths(
+        val requiredEvidencePaths = requiredRepositoryEvidencePaths(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
         ).toSet()
-        val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens, requiredSourcePaths) { candidate ->
+        val boundedContext = compactRepositoryContextToBudget(context, profile.inputBudgetTokens, requiredEvidencePaths) { candidate ->
             "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
         } ?: return RepositoryAnalysisTickResult(
             RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
@@ -452,7 +452,6 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             boundedContext,
             output,
-            run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
         )
         val invalid = validateOutput(run, boundedContext, compiledOutput)
         if (invalid != null) return blockAttempt(
@@ -695,16 +694,32 @@ internal fun repositoryScopeCoverageDiagnostic(
         if (coverage.operationOrders.any { it !in operations }) {
             return "Scope coverage ${index + 1} references an unavailable operation."
         }
+        if (!requiresSourceOperation(coverage.scope) && coverage.compliantEvidencePaths.isNotEmpty()) {
+            return "Scope coverage ${index + 1} uses compliant evidence classification for evidence-only scope."
+        }
         if (requiresSourceOperation(coverage.scope)) {
             val linkedSourcePaths = coverage.operationOrders.asSequence()
                 .mapNotNull(operations::get)
                 .filter { it.action != PLAN_OPERATION_VERIFY }
                 .mapTo(hashSetOf()) { it.path }
-            val missingSourcePaths = coverage.evidencePaths.filter { it !in linkedSourcePaths }.distinct().sorted()
-            if (missingSourcePaths.isNotEmpty()) {
+            val unpinnedCompliantPaths = coverage.compliantEvidencePaths.filter { it !in evidencePaths }.distinct().sorted()
+            if (unpinnedCompliantPaths.isNotEmpty()) {
+                return "Scope coverage ${index + 1} marks paths compliant without pinned evidence: " +
+                    "${unpinnedCompliantPaths.joinToString(", ")}."
+            }
+            val conflictingPaths = coverage.compliantEvidencePaths.filter { it in sourceOperationPaths }.distinct().sorted()
+            if (conflictingPaths.isNotEmpty()) {
+                return "Scope coverage ${index + 1} marks source-operation paths as already compliant: " +
+                    "${conflictingPaths.joinToString(", ")}."
+            }
+            val unsatisfiedPaths = coverage.evidencePaths
+                .filter { it !in linkedSourcePaths && it !in coverage.compliantEvidencePaths }
+                .distinct()
+                .sorted()
+            if (unsatisfiedPaths.isNotEmpty()) {
                 val linked = linkedSourcePaths.sorted().joinToString(", ").ifBlank { "<none>" }
-                return "Scope coverage ${index + 1} cites paths without corresponding source operations: " +
-                    "${missingSourcePaths.joinToString(", ")}. Linked source operation paths: $linked."
+                return "Scope coverage ${index + 1} cites paths without source operations or explicit compliant evidence: " +
+                    "${unsatisfiedPaths.joinToString(", ")}. Linked source operation paths: $linked."
             }
             if (requiresTestSource(coverage.scope) && linkedSourcePaths.none(::isTestSourcePath)) {
                 return "Scope coverage ${index + 1} requires a test source operation."
@@ -720,7 +735,7 @@ internal fun repositoryScopeAuthorityDiagnostic(
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? = repositoryScopeIdentityDiagnostic(acceptedScope, output)
-    ?: repositoryRequiredScopeSourcePathsDiagnostic(acceptedScope, selectors, context, output)
+    ?: repositoryRequiredScopeEvidencePathsDiagnostic(acceptedScope, selectors, context, output)
     ?: repositoryUniversalScopeCoverageDiagnostic(acceptedScope, selectors, context, output)
     ?: repositoryScopeCoverageDiagnostic(acceptedScope, output)
 
@@ -752,37 +767,38 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val requiredPaths = requiredRepositorySourceOperationPaths(selectors, context).toSortedSet()
+    val requiredPaths = requiredRepositoryEvidencePaths(selectors, context).toSortedSet()
     if (requiredPaths.isEmpty()) return null
     val citedPaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val missingEvidence = requiredPaths - citedPaths
     val sourceOperationPaths = output.operations.asSequence()
         .filter { it.action != PLAN_OPERATION_VERIFY }
         .mapTo(hashSetOf()) { it.path }
-    val missingOperations = requiredPaths - sourceOperationPaths
+    val compliantEvidencePaths = output.scopeCoverage.flatMapTo(hashSetOf()) { it.compliantEvidencePaths }
+    val unsatisfiedPaths = requiredPaths - sourceOperationPaths - compliantEvidencePaths
     val diagnostics = listOfNotNull(
         missingEvidence.takeIf { it.isNotEmpty() }?.let {
-            "Required source operation paths omit evidence: ${it.joinToString(", ")}."
+            "Required repository paths omit evidence: ${it.joinToString(", ")}."
         },
-        missingOperations.takeIf { it.isNotEmpty() }?.let {
-            "Required source operation paths omit source operations: ${it.joinToString(", ")}."
+        unsatisfiedPaths.takeIf { it.isNotEmpty() }?.let {
+            "Required repository paths omit source operations or explicit compliant evidence: ${it.joinToString(", ")}."
         },
     )
     return diagnostics.takeIf { it.isNotEmpty() }?.joinToString("\n")
 }
 
-internal fun requiredRepositorySourceOperationPaths(
+internal fun requiredRepositoryEvidencePaths(
     selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
 ): List<String> = requiredRepositoryPathsBySelector(selectors, context).values.flatten().distinct().sorted()
 
-private fun requiredRepositorySourcePathGroups(
+private fun requiredRepositoryEvidencePathGroups(
     selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
-): List<RequiredSourcePathGroup> = requiredRepositoryPathsBySelector(selectors, context)
-    .map { (id, paths) -> RequiredSourcePathGroup(id, paths) }
+): List<RequiredEvidencePathGroup> = requiredRepositoryPathsBySelector(selectors, context)
+    .map { (id, paths) -> RequiredEvidencePathGroup(id, paths) }
 
-private fun requiredRepositoryScopeSourcePathGroupIds(
+private fun requiredRepositoryScopeEvidencePathGroupIds(
     acceptedScope: List<String>,
     selectors: List<RepositoryEvidenceSelector>,
 ): List<List<String>> = acceptedScope.indices.map { scopeIndex ->
@@ -820,14 +836,14 @@ internal fun repositoryEvidenceSelectionDiagnostic(
     }
 }
 
-internal fun repositoryRequiredScopeSourcePathsDiagnostic(
+internal fun repositoryRequiredScopeEvidencePathsDiagnostic(
     acceptedScope: List<String>,
     selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val groups = requiredRepositorySourcePathGroups(selectors, context).associate { it.id to it.paths }
-    val groupIds = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, selectors)
+    val groups = requiredRepositoryEvidencePathGroups(selectors, context).associate { it.id to it.paths }
+    val groupIds = requiredRepositoryScopeEvidencePathGroupIds(acceptedScope, selectors)
     if (selectors.isEmpty()) return null
     val actual = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
     val mismatches = acceptedScope.mapIndexedNotNull { index, scope ->
@@ -847,30 +863,13 @@ internal fun compileRepositoryScopeAuthority(
     selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
-    acceptedCriteria: List<String> = output.operations.flatMap { it.acceptanceCriteria }.distinct(),
 ): RepositoryAnalysisPlanContent {
     if (selectors.isEmpty() || repositoryScopeIdentityDiagnostic(acceptedScope, output) != null) return output
     val pathsBySelector = requiredRepositoryPathsBySelector(selectors, context)
-    val selectorIdsByScope = requiredRepositoryScopeSourcePathGroupIds(acceptedScope, selectors)
+    val selectorIdsByScope = requiredRepositoryScopeEvidencePathGroupIds(acceptedScope, selectors)
     val coverageByScope = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
-    val requiredPaths = pathsBySelector.values.flatten().distinct().sorted()
-    val existingSourcePaths = output.operations.asSequence()
-        .filter { it.action != PLAN_OPERATION_VERIFY }
-        .mapTo(hashSetOf()) { it.path }
     val compiledOperations = (
         output.operations.filter { it.action != PLAN_OPERATION_VERIFY } +
-            requiredPaths.filter { it !in existingSourcePaths }.map { path ->
-                val scopes = acceptedScope.filterIndexed { index, _ ->
-                    selectorIdsByScope[index].any { path in pathsBySelector[it].orEmpty() }
-                }
-                ExecutionPlanOperation(
-                    order = 0,
-                    action = PLAN_OPERATION_MODIFY,
-                    path = path,
-                    instruction = "Implement accepted scope for this required source path: ${scopes.joinToString(" | ")}",
-                    acceptanceCriteria = acceptedCriteria,
-                )
-            } +
             output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
         ).mapIndexed { index, operation -> operation.copy(order = index + 1) }
     val verificationOrderMap = output.operations.filter { it.action == PLAN_OPERATION_VERIFY }

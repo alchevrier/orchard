@@ -51,6 +51,8 @@ data class ExecutionPlanScopeCoverage(
     val scope: String,
     val evidencePaths: List<String>,
     val operationOrders: List<Int>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val compliantEvidencePaths: List<String> = emptyList(),
 )
 
 @Serializable
@@ -240,6 +242,8 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
     }) { "Execution plan operation is invalid" }
     require(plan.content.scopeCoverage.all { coverage ->
         coverage.scope.isNotBlank() && coverage.evidencePaths.isNotEmpty() && coverage.evidencePaths.all(::validPath) &&
+            coverage.compliantEvidencePaths.distinct().size == coverage.compliantEvidencePaths.size &&
+            coverage.compliantEvidencePaths.all { it in coverage.evidencePaths } &&
             coverage.operationOrders.isNotEmpty() && coverage.operationOrders.all { it > 0 }
     }) { "Execution plan scope coverage is invalid" }
     if (plan.content.disposition == DISPOSITION_COMPLETE) require(plan.content.operations.all { it.action == PLAN_OPERATION_VERIFY })
