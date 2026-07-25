@@ -6,6 +6,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -117,7 +118,7 @@ class CodingWorkspaceGatewayTest {
     }
 
     @Test
-    fun `plan context preserves every pinned path within corrective retry aperture`() {
+    fun `plan context requires editable source for every pinned corrective path`() {
         val repository = createTempDirectory("orchard-plan-retry-context-")
         git(repository, "init")
         val paths = (1..5).map { index ->
@@ -134,19 +135,29 @@ class CodingWorkspaceGatewayTest {
         git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
         val revision = gitOutput(repository, "rev-parse", "HEAD")
 
+        assertFailsWith<IllegalArgumentException> {
+            LocalCodingWorkspaceGateway().collectPlanContext(
+                repository.toString(),
+                revision,
+                paths,
+                "platform typography",
+                1_600,
+            )
+        }
         val context = LocalCodingWorkspaceGateway().collectPlanContext(
             repository.toString(),
             revision,
             paths,
             "platform typography",
-            1_600,
+            3_200,
         )
 
         assertEquals(paths, context.files.map { it.path })
         assertEquals(0, context.omittedFileCount)
         assertTrue(context.files.all { it.contentHash.matches(Regex("[0-9a-f]{64}")) })
-        assertTrue(context.files.all { it.content.isNotEmpty() })
-        assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 1_600)
+        assertTrue(context.files.all { it.content.contains("class Owner") })
+        assertTrue(context.files.all { it.content.encodeToByteArray().size >= 128 })
+        assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 3_200)
     }
 
     private companion object {
