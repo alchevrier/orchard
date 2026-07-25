@@ -393,7 +393,8 @@ class CodingWorkerService(
         )
         val proposalHash = sha256(strictOutputJson.encodeToString(proposal))
         if (executionPlan != null) {
-            val authorizationDiagnostic = codingProposalAuthorizationDiagnostic(proposal, executionPlan)
+            val authorizationDiagnostic = codingProposalShapeDiagnostic(proposal)
+                ?: codingProposalAuthorizationDiagnostic(proposal, executionPlan)
             if (authorizationDiagnostic != null) {
                 val storageDiagnostic = recordCorrectiveRejection(
                     run.runId,
@@ -948,6 +949,34 @@ internal fun codingRejectionIsRepeated(
         it.executionPlanHash == planHash &&
         it.state == CODING_ATTEMPT_BLOCKED &&
         (it.proposalHash == proposalHash || it.diagnostic == diagnostic)
+}
+
+internal fun codingProposalShapeDiagnostic(proposal: CodingPatchProposal): String? {
+    val malformed = proposal.operations.mapNotNull { operation ->
+        val reason = when (operation.action) {
+            CODING_FILE_WRITE -> when {
+                operation.content == null -> "requires complete content"
+                operation.replacements.isNotEmpty() -> "forbids replacements"
+                else -> null
+            }
+            CODING_FILE_REPLACE -> when {
+                operation.content != null -> "forbids complete content"
+                operation.replacements.isEmpty() -> "requires at least one bounded replacement"
+                operation.replacements.any { it.old.isEmpty() } -> "requires non-empty old text"
+                else -> null
+            }
+            CODING_FILE_DELETE -> when {
+                operation.content != null -> "forbids content"
+                operation.replacements.isNotEmpty() -> "forbids replacements"
+                else -> null
+            }
+            else -> null
+        }
+        reason?.let { "${operation.action} ${operation.path} $it" }
+    }
+    return malformed.takeIf { it.isNotEmpty() }?.let {
+        "The coding proposal contains malformed operation payloads: ${it.distinct().sorted().joinToString(" | ")}."
+    }
 }
 
 internal fun codingProposalAuthorizationDiagnostic(

@@ -68,6 +68,24 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
+    fun `proposal shape diagnostic rejects incomplete replacements before scope acceptance`() {
+        val diagnostic = codingProposalShapeDiagnostic(
+            CodingPatchProposal(
+                summary = "Change the admitted file.",
+                operations = listOf(
+                    CodingFileOperation(CODING_FILE_REPLACE, "src/Allowed.kt"),
+                ),
+            ),
+        )
+
+        assertEquals(
+            "The coding proposal contains malformed operation payloads: " +
+                "REPLACE src/Allowed.kt requires at least one bounded replacement.",
+            diagnostic,
+        )
+    }
+
+    @Test
     fun `same rejection diagnostic is recurrent even when proposal hash changes`() {
         val blocked = attempt(1, CODING_ATTEMPT_BLOCKED, "The proposal contains no coding operations.")
 
