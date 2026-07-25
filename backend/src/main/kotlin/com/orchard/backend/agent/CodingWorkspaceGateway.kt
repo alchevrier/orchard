@@ -821,6 +821,9 @@ private enum class KotlinLexicalState { CODE, STRING, CHARACTER, RAW_STRING, BLO
 internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, maxBytes: Int): String {
     require(maxBytes > 0)
     if (content.encodeToByteArray().size <= maxBytes) return content
+    val lexicalSummary = lexicalMatchSummary(content, queryTokens, maxBytes / 4)
+    val excerptBudget = maxBytes - lexicalSummary.encodeToByteArray().size
+    if (excerptBudget <= 0) return lexicalSummary
     val lines = content.split('\n')
     val matches = lines.indices.mapNotNull { index ->
         val lower = lines[index].lowercase()
@@ -856,20 +859,38 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
     }.fold(mutableListOf<IntRange>()) { selected, window ->
         if (selected.none { existing -> window.first <= existing.last && existing.first <= window.last }) {
             val sectionBytes = excerptSection(lines, window).encodeToByteArray().size
-            if (selectedBytes + sectionBytes <= maxBytes) {
+            if (selectedBytes + sectionBytes <= excerptBudget) {
                 selected += window
                 selectedBytes += sectionBytes
             }
         }
         selected
     }
-    val excerpt = StringBuilder()
+    val excerpt = StringBuilder(lexicalSummary)
     windows.sortedBy { it.first }.forEach { window -> excerpt.append(excerptSection(lines, window)) }
-    return excerpt.toString().ifBlank {
+    return excerpt.toString().takeIf { it.length > lexicalSummary.length } ?: buildString {
+        append(lexicalSummary)
         lines.asSequence().runningFold("") { result, line -> "$result$line\n" }
-            .takeWhile { it.encodeToByteArray().size <= maxBytes }
-            .lastOrNull().orEmpty()
+            .takeWhile { it.encodeToByteArray().size <= excerptBudget }
+            .lastOrNull()
+            ?.let(::append)
     }
+}
+
+private fun lexicalMatchSummary(content: String, queryTokens: Set<String>, maxBytes: Int): String {
+    if (maxBytes <= 0 || queryTokens.isEmpty()) return ""
+    val lower = content.lowercase()
+    val entries = queryTokens.asSequence()
+        .sorted()
+        .map { token -> "$token=${Regex(Regex.escape(token)).findAll(lower).count()}" }
+        .toList()
+    return entries.asSequence().runningFold("[Orchard lexical query counts: ") { summary, entry ->
+        val separator = if (summary.endsWith(": ")) "" else ", "
+        "$summary$separator$entry"
+    }.map { "$it]\n" }
+        .takeWhile { it.encodeToByteArray().size <= maxBytes }
+        .lastOrNull()
+        .orEmpty()
 }
 
 internal fun rejectedReplacementAnchor(old: String): String {

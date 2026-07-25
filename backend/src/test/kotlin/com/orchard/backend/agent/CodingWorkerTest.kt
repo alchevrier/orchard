@@ -912,6 +912,22 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `focused excerpts report query literal presence and absence`() {
+        val content = buildString {
+            repeat(300) { appendLine("val filler$it = $it") }
+            appendLine("Text(fontFamily = FontFamily.Monospace)")
+            repeat(300) { appendLine("val trailing$it = $it") }
+        }
+
+        val excerpt = focusedContextExcerpt(content, setOf("serif", "monospace"), 1_024)
+
+        assertTrue(excerpt.contains("monospace=1"))
+        assertTrue(excerpt.contains("serif=0"))
+        assertTrue(excerpt.contains("FontFamily.Monospace"))
+        assertTrue(excerpt.encodeToByteArray().size <= 1_024)
+    }
+
+    @Test
     fun `focused excerpts reserve rare surface owner declarations`() {
         val content = buildString {
             repeat(100) { appendLine("Text(\"project workspace usage $it\")") }
