@@ -337,7 +337,7 @@ class CodingWorkerTest {
 
     @Test
     fun `coding proposal cannot reuse a rejected anchor for the same path`() {
-        val path = "src/Theme.kt"
+        val path = "src/OrchardCircuitBinder.kt"
         val old = "fontFamily = FontFamily.Serif"
         val attempts = listOf(CodingWorkerAttempt(
             attemptId = 1,
@@ -360,6 +360,7 @@ class CodingWorkerTest {
         val context = CodingRepositoryContext(listOf(CodingContextFile(
             path = path,
             content = """[Orchard excerpt lines 40-46 of 100]
+                |private fun UnrelatedPanel() = Unit
                 |@Composable
                 |private fun OrchardTheme(content: @Composable () -> Unit) {
                 |    MaterialTheme(
@@ -369,7 +370,10 @@ class CodingWorkerTest {
                 |        content = content,
                 |""".trimMargin(),
             contentHash = "b".repeat(64),
-            matchedDeclarations = listOf("private fun OrchardTheme(content: @Composable () -> Unit)"),
+            matchedDeclarations = listOf(
+                "private fun UnrelatedPanel() = Unit",
+                "private fun OrchardTheme(content: @Composable () -> Unit)",
+            ),
         )), 0)
 
         val diagnostic = codingRejectedAnchorDiagnostic(
@@ -383,17 +387,18 @@ class CodingWorkerTest {
 
         assertTrue(requireNotNull(diagnostic).contains("reuses a previously rejected source anchor"))
         assertTrue(diagnostic.contains("private fun OrchardTheme"))
-    assertTrue(diagnostic.contains("Exact contiguous source text near matched declarations"))
-    assertTrue(diagnostic.contains("MaterialTheme.colors.copy"))
-    assertTrue(!diagnostic.contains("[Orchard excerpt lines"))
-    val groundedLegacyDiagnostic = sourceGroundedRetryDiagnostic(attempts.single().diagnostic, context)
-    assertTrue(requireNotNull(groundedLegacyDiagnostic).contains("Exact contiguous source text for this correction"))
-    assertTrue(groundedLegacyDiagnostic.contains("MaterialTheme.colors.copy"))
+        assertTrue(diagnostic.contains("Exact contiguous source text near matched declarations"))
+        assertTrue(diagnostic.contains("MaterialTheme.colors.copy"))
+        assertTrue(!diagnostic.contains("[Orchard excerpt lines"))
+        val legacyDiagnostic = attempts.single().diagnostic
+        val groundedLegacyDiagnostic = sourceGroundedRetryDiagnostic(legacyDiagnostic, context)
+        assertTrue(requireNotNull(groundedLegacyDiagnostic).contains("Exact contiguous source text for this correction"))
+        assertTrue(groundedLegacyDiagnostic.contains("MaterialTheme.colors.copy"))
         assertTrue(
             Json.encodeToString(groundedLegacyDiagnostic).encodeToByteArray().size -
-                Json.encodeToString(attempts.single().diagnostic).encodeToByteArray().size < 4_096,
+                Json.encodeToString(legacyDiagnostic).encodeToByteArray().size < 4_096,
         )
-    assertEquals(groundedLegacyDiagnostic, sourceGroundedRetryDiagnostic(groundedLegacyDiagnostic, context))
+        assertEquals(groundedLegacyDiagnostic, sourceGroundedRetryDiagnostic(groundedLegacyDiagnostic, context))
         assertNull(codingRejectedAnchorDiagnostic(
             proposal,
             attempts,

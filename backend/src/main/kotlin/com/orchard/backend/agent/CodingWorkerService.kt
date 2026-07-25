@@ -1166,7 +1166,15 @@ internal fun sourceBackedDeclarationAnchors(contextFile: CodingContextFile): Lis
     val sourceLines = contextFile.content.lineSequence()
         .filterNot { it.startsWith("[Orchard excerpt lines ") }
         .toList()
-    return contextFile.matchedDeclarations.asSequence().mapNotNull { declaration ->
+    val pathTokens = CAMEL_CASE_TOKEN.findAll(contextFile.path.substringAfterLast('/').substringBeforeLast('.'))
+        .map { it.value.lowercase() }
+        .filter { it.length >= MIN_SOURCE_ANCHOR_TOKEN_LENGTH }
+        .toSet()
+    return contextFile.matchedDeclarations.withIndex().sortedWith(
+        compareByDescending<IndexedValue<String>> { (_, declaration) ->
+            pathTokens.count { it in declaration.lowercase() }
+        }.thenBy { it.index },
+    ).asSequence().mapNotNull { (_, declaration) ->
         val declarationIndex = sourceLines.indexOfFirst { line ->
             val trimmed = line.trim()
             trimmed == declaration || trimmed.startsWith(declaration)
@@ -1269,3 +1277,5 @@ private const val SOURCE_ANCHOR_LINES = 4
 private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
 private const val MAX_SOURCE_ANCHOR_BYTES = 1_024
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
+private const val MIN_SOURCE_ANCHOR_TOKEN_LENGTH = 4
+private val CAMEL_CASE_TOKEN = Regex("[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
