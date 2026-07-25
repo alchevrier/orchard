@@ -83,12 +83,46 @@ class CodingWorkspaceGatewayTest {
         assertEquals(listOf("core/src/main/kotlin/OrderBook.kt"), context.files.map { it.path })
     }
 
+    @Test
+    fun `plan context includes every pinned path within the bounded coding aperture`() {
+        val repository = createTempDirectory("orchard-plan-context-")
+        git(repository, "init")
+        val paths = (1..5).map { index -> "src/Owner$index.kt" }
+        Files.createDirectories(repository.resolve("src"))
+        paths.forEachIndexed { index, path ->
+            Files.writeString(
+                repository.resolve(path),
+                "class Owner${index + 1}\n" + "val unrelated${index + 1} = 1\n".repeat(8_000),
+            )
+        }
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        val revision = gitOutput(repository, "rev-parse", "HEAD")
+
+        val context = LocalCodingWorkspaceGateway().collectPlanContext(
+            repository.toString(),
+            revision,
+            paths,
+            "native platform typography",
+        )
+
+        assertEquals(paths, context.files.map { it.path })
+        assertEquals(0, context.omittedFileCount)
+        assertTrue(context.files.all { it.contentHash.matches(Regex("[0-9a-f]{64}")) })
+        assertTrue(context.files.sumOf { it.content.encodeToByteArray().size } <= 256 * 1024)
+    }
+
     private fun git(directory: Path, vararg arguments: String) {
+        gitOutput(directory, *arguments)
+    }
+
+    private fun gitOutput(directory: Path, vararg arguments: String): String {
         val process = ProcessBuilder(listOf("git", "-C", directory.toString()) + arguments)
             .redirectErrorStream(true)
             .start()
         assertTrue(process.waitFor(10, TimeUnit.SECONDS))
         val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
         assertEquals(0, process.exitValue(), output)
+        return output
     }
 }

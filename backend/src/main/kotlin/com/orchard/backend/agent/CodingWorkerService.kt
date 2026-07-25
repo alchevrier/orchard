@@ -264,15 +264,25 @@ class CodingWorkerService(
             "No valid toolchain policy matches the reserved repository.",
         )
 
-        val collectedContext = runCatching {
-            workspaceGateway.collectContext(workspacePath, run.context.title + "\n" + run.context.content)
+        val contextQuery = run.context.title + "\n" + run.context.content
+        val repositoryContext = runCatching {
+            executionPlan?.let { plan ->
+                workspaceGateway.collectPlanContext(
+                    workspacePath = workspacePath,
+                    repositoryRevision = plan.baseRevision,
+                    paths = plan.content.operations.filter { it.action != "VERIFY" }.map { it.path },
+                    query = contextQuery,
+                )
+            } ?: workspaceGateway.collectContext(workspacePath, contextQuery)
         }.getOrElse { error ->
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.APPLICATION_FAILED, error.message)
         }
-        val repositoryContext = executionPlan?.let { plan ->
-            val targetPaths = plan.content.operations.mapTo(hashSetOf()) { it.path }
-            collectedContext.copy(files = collectedContext.files.filter { it.path in targetPaths })
-        } ?: collectedContext
+        if (executionPlan != null && repositoryContext.omittedFileCount != 0) return finish(
+            claim,
+            CODING_EXECUTION_BLOCKED,
+            CodingWorkerTickStatus.APPLICATION_FAILED,
+            "Accepted execution-plan paths are missing from the pinned coding context.",
+        )
         val envelope = CodingWorkerModelEnvelope(
             executionProfile = profile,
             workflowStepId = CODING_WORKFLOW_STEP_ID,

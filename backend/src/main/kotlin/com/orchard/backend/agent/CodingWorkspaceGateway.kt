@@ -77,6 +77,12 @@ interface CodingWorkspaceGateway {
         selectors: List<RepositoryEvidenceSelector>,
     ): CodingRepositoryContext = collectAnalysisContext(workspacePath, query)
     fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext = collectContext(workspacePath, query)
+    fun collectPlanContext(
+        workspacePath: String,
+        repositoryRevision: String,
+        paths: List<String>,
+        query: String,
+    ): CodingRepositoryContext = collectIntelligenceContext(workspacePath, repositoryRevision, paths)
     fun collectIntelligenceContext(workspacePath: String, repositoryRevision: String, paths: List<String>): CodingRepositoryContext =
         collectAnalysisContext(workspacePath, paths.joinToString(" "))
     fun currentRevision(workspacePath: String): String? = null
@@ -122,6 +128,38 @@ class LocalCodingWorkspaceGateway(
             includePath = ::isGenesisImplementationPath,
         )
 
+    override fun collectPlanContext(
+        workspacePath: String,
+        repositoryRevision: String,
+        paths: List<String>,
+        query: String,
+    ): CodingRepositoryContext {
+        val root = validatedRoot(workspacePath)
+        requireGitWorkspace(root)
+        require(repositoryRevision.matches(GIT_HASH)) { "Repository plan revision is invalid" }
+        val distinctPaths = paths.distinct()
+        require(distinctPaths.isNotEmpty() && distinctPaths.size <= MAX_CONTEXT_FILES) {
+            "Repository plan path count is invalid"
+        }
+        val queryTokens = tokens(query)
+        val maxFileBytes = minOf(MAX_CONTEXT_FILE_BYTES, MAX_CONTEXT_BYTES / distinctPaths.size)
+        val selected = distinctPaths.mapNotNull { relative ->
+            runCatching { validatedRelative(root, relative, mustExist = false) }.getOrNull() ?: return@mapNotNull null
+            val bytes = runCatching {
+                readGitBlob(root, repositoryRevision, relative, MAX_CONTEXT_SOURCE_BYTES)
+            }.getOrNull() ?: return@mapNotNull null
+            if (bytes.any { it == 0.toByte() }) return@mapNotNull null
+            val source = bytes.toString(Charsets.UTF_8)
+            CodingContextFile(
+                path = relative,
+                content = focusedContextExcerpt(source, queryTokens, maxFileBytes),
+                contentHash = sha256Content(source),
+                matchedDeclarations = matchedSourceDeclarations(source, queryTokens),
+            )
+        }
+        return CodingRepositoryContext(selected, distinctPaths.size - selected.size)
+    }
+
     override fun collectIntelligenceContext(
         workspacePath: String,
         repositoryRevision: String,
@@ -134,7 +172,8 @@ class LocalCodingWorkspaceGateway(
         var bytesUsed = 0
         paths.distinct().forEach { relative ->
             runCatching { validatedRelative(root, relative, mustExist = false) }.getOrNull() ?: return@forEach
-            val bytes = runCatching { readGitBlob(root, repositoryRevision, relative) }.getOrNull() ?: return@forEach
+            val bytes = runCatching { readGitBlob(root, repositoryRevision, relative, MAX_CONTEXT_FILE_BYTES.toLong()) }
+                .getOrNull() ?: return@forEach
             if (bytes.any { it == 0.toByte() }) return@forEach
             if (selected.size < MAX_ANALYSIS_CONTEXT_FILES && bytesUsed + bytes.size <= MAX_ANALYSIS_CONTEXT_BYTES) {
                 val content = bytes.toString(Charsets.UTF_8)
@@ -145,7 +184,7 @@ class LocalCodingWorkspaceGateway(
         return CodingRepositoryContext(selected, (paths.distinct().size - selected.size).coerceAtLeast(0))
     }
 
-    private fun readGitBlob(root: Path, revision: String, relative: String): ByteArray? {
+    private fun readGitBlob(root: Path, revision: String, relative: String, maxBytes: Long): ByteArray? {
         val outputPath = Files.createTempFile("orchard-intelligence-context-", ".blob")
         val errorPath = Files.createTempFile("orchard-intelligence-context-", ".log")
         try {
@@ -160,7 +199,7 @@ class LocalCodingWorkspaceGateway(
             require(process.exitValue() == 0) {
                 "Git repository context read failed: ${Files.readString(errorPath).take(512)}"
             }
-            if (Files.size(outputPath) > MAX_CONTEXT_FILE_BYTES) return null
+            if (Files.size(outputPath) > maxBytes) return null
             return Files.readAllBytes(outputPath)
         } finally {
             Files.deleteIfExists(outputPath)
