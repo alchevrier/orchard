@@ -1024,12 +1024,16 @@ internal fun compileRepositoryScopeAuthority(
             val sourceOperationOrders = compiledOperations.asSequence()
                 .filter { it.action != PLAN_OPERATION_VERIFY && it.path in evidencePaths }
                 .map { it.order }
+            val sourceOperationPaths = compiledOperations.asSequence()
+                .filter { it.action != PLAN_OPERATION_VERIFY }
+                .mapTo(hashSetOf()) { it.path }
             val verificationOperationOrders = coverage.operationOrders.asSequence()
                 .mapNotNull(verificationOrderMap::get)
             coverage.copy(
                 scope = scope,
                 evidencePaths = evidencePaths,
                 operationOrders = (sourceOperationOrders + verificationOperationOrders).distinct().sorted().toList(),
+                compliantEvidencePaths = evidencePaths.filter { it !in sourceOperationPaths },
             )
         },
     )

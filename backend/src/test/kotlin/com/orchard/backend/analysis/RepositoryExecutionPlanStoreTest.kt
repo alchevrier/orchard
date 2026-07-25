@@ -697,6 +697,19 @@ class RepositoryExecutionPlanStoreTest {
         )
         assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledAlreadyCompliantOwner))
         assertNull(repositoryScopeCoverageDiagnostic(scope, compiledAlreadyCompliantOwner))
+        val omittedOwnerClassification = complete.copy(
+            operations = complete.operations.filter { it.path != "frontend/src/main/Inbox.kt" },
+            scopeCoverage = complete.scopeCoverage.map { coverage ->
+                if (coverage.scope == scope[0]) coverage.copy(compliantEvidencePaths = emptyList()) else coverage
+            },
+        )
+        val compiledOmittedOwner = compileRepositoryScopeAuthority(scope, selectors, context, omittedOwnerClassification)
+        assertEquals(
+            listOf("frontend/src/main/Inbox.kt"),
+            compiledOmittedOwner.scopeCoverage.first().compliantEvidencePaths,
+        )
+        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledOmittedOwner))
+        assertNull(repositoryScopeCoverageDiagnostic(scope, compiledOmittedOwner))
         val missingTestOperation = complete.copy(operations = complete.operations.filter { it.order != 3 })
         val compiledMissingTest = compileRepositoryScopeAuthority(
             scope,
