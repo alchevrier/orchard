@@ -97,6 +97,7 @@ interface CodingWorkspaceGateway {
         collectAnalysisContext(workspacePath, paths.joinToString(" "))
     fun currentRevision(workspacePath: String): String? = null
     fun applyAndCommit(workspacePath: String, proposal: CodingPatchProposal, executionId: Long): CodingCandidate
+    fun revertCandidate(workspacePath: String, candidateRevision: String, executionId: Long): String? = null
     fun resolveToolchainPolicy(workspacePath: String): ResolvedToolchainPolicy?
     fun parseVerificationCommand(command: String): VerificationCommand
     fun executeVerification(
@@ -261,6 +262,39 @@ class LocalCodingWorkspaceGateway(
         return run(root, listOf("git", "rev-parse", "--verify", "HEAD"), GIT_COMMAND_TIMEOUT_SECONDS)
             .takeIf { it.exitCode == 0 && it.output.matches(GIT_HASH) }
             ?.output
+    }
+
+    override fun revertCandidate(workspacePath: String, candidateRevision: String, executionId: Long): String {
+        val root = validatedRoot(workspacePath)
+        requireGitWorkspace(root)
+        require(candidateRevision.matches(GIT_HASH)) { "Candidate revision is invalid" }
+        val status = run(root, listOf("git", "status", "--porcelain"), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(status.exitCode == 0 && status.output.isBlank()) {
+            "Coding workspace must be clean before reverting a candidate"
+        }
+        val head = requireNotNull(currentRevision(workspacePath)) { "Unable to resolve coding workspace revision" }
+        require(head == candidateRevision) {
+            "Coding workspace revision $head does not match failed candidate $candidateRevision"
+        }
+        val parent = run(root, listOf("git", "rev-parse", "--verify", "$candidateRevision^"), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(parent.exitCode == 0 && parent.output.matches(GIT_HASH)) { "Failed candidate has no valid parent revision" }
+        val revert = run(
+            root,
+            listOf(
+                "git", "-c", "user.name=Orchard Coding Worker",
+                "-c", "user.email=orchard-worker@localhost",
+                "revert", "--no-edit", candidateRevision,
+            ),
+            GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+        require(revert.exitCode == 0) { "Unable to revert failed candidate: ${revert.output.take(1_000)}" }
+        val restoredTree = run(root, listOf("git", "diff", "--quiet", parent.output, "HEAD", "--"), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(restoredTree.exitCode == 0) { "Failed candidate revert did not restore its parent tree" }
+        val restoredStatus = run(root, listOf("git", "status", "--porcelain"), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(restoredStatus.exitCode == 0 && restoredStatus.output.isBlank()) {
+            "Coding workspace is not clean after reverting failed candidate for execution $executionId"
+        }
+        return requireNotNull(currentRevision(workspacePath)) { "Unable to resolve restored coding workspace revision" }
     }
 
     private fun collectContext(

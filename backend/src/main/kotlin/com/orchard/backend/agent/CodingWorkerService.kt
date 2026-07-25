@@ -206,11 +206,15 @@ class CodingWorkerService(
         }
         val run = candidateRuns(executions).singleOrNull { it.runId == runId }
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
+        val workspacePath = requireNotNull(run.context.workspaceReservation).path
+        val restorationDiagnostic = restoreLatestFailedCandidate(run.runId, workspacePath, executions)
+        if (restorationDiagnostic != null) {
+            return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
+        }
         val executionPlan = repositoryAnalysis?.currentPlan(run.runId)
         if (repositoryAnalysis != null && executionPlan == null) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.ANALYSIS_REQUIRED)
         }
-        val workspacePath = requireNotNull(run.context.workspaceReservation).path
         if (executionPlan != null && workspaceGateway.currentRevision(workspacePath) != executionPlan.baseRevision) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_STALE)
         }
@@ -561,7 +565,7 @@ class CodingWorkerService(
                 candidate,
             )
         } else {
-            finish(
+            val failed = finish(
                 claim,
                 CODING_EXECUTION_FAILED,
                 CodingWorkerTickStatus.VERIFICATION_FAILED,
@@ -570,7 +574,34 @@ class CodingWorkerService(
                 proposalHash,
                 candidate,
             )
+            if (failed.status != CodingWorkerTickStatus.STORAGE_UNAVAILABLE) {
+                runCatching {
+                    workspaceGateway.revertCandidate(
+                        requireNotNull(run.context.workspaceReservation).path,
+                        candidate.revision,
+                        claim.executionId,
+                    )
+                }
+            }
+            failed
         }
+    }
+
+    private fun restoreLatestFailedCandidate(
+        runId: Long,
+        workspacePath: String,
+        executions: List<CodingWorkerExecutionView>,
+    ): String? {
+        val failed = executions.lastOrNull {
+            it.claim.runId == runId &&
+                it.result?.status == CODING_EXECUTION_FAILED &&
+                it.result.revision != null
+        } ?: return null
+        val candidateRevision = requireNotNull(failed.result?.revision)
+        if (workspaceGateway.currentRevision(workspacePath) != candidateRevision) return null
+        return runCatching {
+            workspaceGateway.revertCandidate(workspacePath, candidateRevision, failed.claim.executionId)
+        }.exceptionOrNull()?.message ?: return null
     }
 
     private fun candidateRuns(executions: List<CodingWorkerExecutionView>): List<WorkflowRunView> {

@@ -133,6 +133,11 @@ class CodingWorkerTest {
 
         assertEquals(CodingWorkerTickStatus.VERIFICATION_FAILED, result.status)
         assertEquals(CODING_EXECUTION_FAILED, requireNotNull(result.execution?.result).status)
+        val reservation = requireNotNull(run.context.workspaceReservation)
+        val candidateRevision = requireNotNull(result.execution?.result?.revision)
+        assertEquals(candidateRevision, run(Path.of(reservation.path), "git", "rev-parse", "$candidateRevision^{commit}"))
+        assertEquals("", run(Path.of(reservation.path), "git", "diff", "--name-only", "$candidateRevision^", "HEAD"))
+        assertEquals("", run(Path.of(reservation.path), "git", "status", "--porcelain"))
         assertEquals(
             "Evidence ACCEPTANCE has no admitted or repository verification command.",
             result.execution?.result?.diagnostic,
@@ -154,7 +159,11 @@ class CodingWorkerTest {
         assertEquals(RUN_STATE_EVIDENCE_PENDING, run.state)
         assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST"), run.evidence.mapTo(hashSetOf()) { it.kind })
         assertTrue(run.evidence.all { it.passed })
-        assertEquals("fun answer() = 42\n", Files.readString(Path.of(run.context.repository.path).resolve("src/Main.kt")))
+        assertEquals("fun answer() = 42", run(Path.of(reservation.path), "git", "show", "$candidateRevision:src/Main.kt"))
+        assertEquals(
+            run(Path.of(reservation.path), "git", "show", "$candidateRevision^:src/Main.kt"),
+            Files.readString(Path.of(reservation.path).resolve("src/Main.kt")).trimEnd(),
+        )
         assertEquals(8_000, model.maxOutputTokens)
         assertEquals(88_000, model.contextWindowTokens)
         assertTrue(requireNotNull(model.resourceDemandInputTokens) in 1 until 80_000)
@@ -649,6 +658,31 @@ class CodingWorkerTest {
         assertNotEquals(run(repository, "git", "rev-parse", "HEAD~1"), candidate.revision)
         assertEquals("fun answer() = 42\n", Files.readString(repository.resolve("src/Main.kt")))
         assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
+    fun `workspace gateway reverts failed candidate while preserving its revision`() {
+        val repository = initializedRepository()
+        val gateway = LocalCodingWorkspaceGateway()
+        val parent = run(repository, "git", "rev-parse", "HEAD")
+        val candidate = gateway.applyAndCommit(
+            repository.toString(),
+            CodingPatchProposal(
+                summary = "Add a candidate implementation.",
+                operations = listOf(CodingFileOperation(CODING_FILE_WRITE, "src/Main.kt", "fun answer() = 42\n")),
+            ),
+            executionId = 9,
+        )
+
+        val restored = gateway.revertCandidate(repository.toString(), candidate.revision, executionId = 9)
+
+        assertNotEquals(candidate.revision, restored)
+        assertEquals("", run(repository, "git", "diff", "--name-only", parent, restored))
+        assertEquals(candidate.revision, run(repository, "git", "rev-parse", "${candidate.revision}^{commit}"))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+        assertFailsWith<IllegalArgumentException> {
+            gateway.revertCandidate(repository.toString(), candidate.revision, executionId = 9)
+        }
     }
 
     @Test
