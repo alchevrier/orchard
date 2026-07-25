@@ -15,7 +15,9 @@ Rules:
 - When priorRejectedCodingDiagnostic is present, correct every reported defect and preserve all previously satisfied plan constraints.
 - Implement only the stated work item and acceptance contract.
 - Execute only the exact paths and action classes authorized by executionPlan.operations. Do not redesign or expand the plan.
-- If the plan and repository context disagree, return no substitute architecture; Orchard will classify the plan as stale or blocked.
+- If an execution-plan path or action conflicts with repository context, return no substitute architecture; Orchard will classify the plan as stale or blocked.
+- A rejected REPLACE old value is a defect in the prior proposal, not a conflict between the execution plan and repository context. Select a different exact source-backed anchor for that path.
+- When executionPlan contains required coding operations, operations must not be empty and must exactly cover every required path and action.
 - Return complete file content for every WRITE operation, and use WRITE only when the plan authorizes CREATE.
 - Use REPLACE when the plan authorizes MODIFY. Each old value must be non-empty and occur exactly once when its replacements are applied in order.
 - Treat repositoryContext.files[].content as the authority for existing source text. Plan instructions describe intent and do not prove that any literal exists.

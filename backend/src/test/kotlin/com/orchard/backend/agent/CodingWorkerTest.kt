@@ -137,6 +137,8 @@ class CodingWorkerTest {
         assertTrue(requireNotNull(result.execution?.claim?.toolchainPolicyHash).matches(Regex("[0-9a-f]{64}")))
         assertTrue(requireNotNull(model.prompt).contains("Plan instructions describe intent and do not prove that any literal exists."))
         assertTrue(model.prompt?.contains("Copy every REPLACE old value as one exact contiguous substring") == true)
+        assertTrue(model.prompt?.contains("A rejected REPLACE old value is a defect in the prior proposal") == true)
+        assertTrue(model.prompt?.contains("operations must not be empty") == true)
         assertTrue(model.prompt?.contains("pairwise non-overlapping old values and order replacements from the bottom") == true)
         assertTrue(model.prompt?.contains("excerpt headers are context metadata, not repository source") == true)
         assertEquals(RUN_STATE_EVIDENCE_PENDING, run.state)
