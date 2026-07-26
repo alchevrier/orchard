@@ -706,6 +706,7 @@ class CodingWorkerService(
         planHash: String,
         proposalHash: String,
         diagnostic: String,
+        authorizeCorrection: Boolean = true,
     ): String? {
         val attempts = attemptStore.load()
         val repeatedRejection = codingRejectionIsRepeated(
@@ -729,7 +730,11 @@ class CodingWorkerService(
                     proposalHash = proposalHash,
                 )
             }
-            if (!repeatedRejection && automaticCodingCorrectionAvailable(attempts, runId, planId, planHash)) {
+            if (
+                authorizeCorrection &&
+                !repeatedRejection &&
+                automaticCodingCorrectionAvailable(attempts, runId, planId, planHash)
+            ) {
                 attemptStore.appendNext { attemptId ->
                     CodingWorkerAttempt(
                         attemptId = attemptId,
@@ -1023,6 +1028,7 @@ class CodingWorkerService(
                         planHash,
                         proposalHash,
                         "The coding proposal could not be applied: ${requireNotNull(execution.result).diagnostic}",
+                        authorizeCorrection = false,
                     )
                 }
             }
@@ -1281,12 +1287,14 @@ internal fun automaticCodingCorrectionAvailable(
     runId: Long,
     planId: Long,
     planHash: String,
-): Boolean = attempts.none {
+): Boolean = attempts.count {
     it.runId == runId &&
         it.executionPlanId == planId &&
         it.executionPlanHash == planHash &&
         it.state == CODING_ATTEMPT_RETRY_AUTHORIZED
-}
+} < MAX_AUTOMATIC_CODING_CORRECTIONS
+
+private const val MAX_AUTOMATIC_CODING_CORRECTIONS = 2
 
 internal fun codingProposalShapeDiagnostic(proposal: CodingPatchProposal): String? {
     val malformed = proposal.operations.mapNotNull { operation ->
