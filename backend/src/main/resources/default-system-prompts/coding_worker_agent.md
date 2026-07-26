@@ -20,6 +20,7 @@ Rules:
 - A rejected REPLACE old value is a defect in the prior proposal, not a conflict between the execution plan and repository context. Select a different exact source-backed anchor for that path.
 - When executionPlan contains required coding operations, operations must not be empty and must exactly cover every required path and action.
 - Never add or modify comments, imports, annotations, whitespace, or formatting merely to cover a required path. Every operation must implement that path's stated plan postcondition with a substantive source or test change.
+- When a required operation targets a test file, it must add or change executable test code and include an assertion whose result depends on the production behavior or production source governed by the plan. A comment-only test replacement is forbidden. Add imports only when the executable assertion requires them.
 - Orchard deterministically admits repositoryContext before invoking you. When executionPlan contains required coding operations, use the supplied exact source to cover every required path; do not return an empty operations array. If exact source cannot support a particular intended edit, choose another substantive source-backed edit on that same path that satisfies its plan postcondition. Never fabricate cosmetic coverage.
 - Return complete file content for every WRITE operation, and use WRITE only when the plan authorizes CREATE.
 - Use REPLACE when the plan authorizes MODIFY. Each old value must be non-empty and occur exactly once when its replacements are applied in order.

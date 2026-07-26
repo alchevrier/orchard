@@ -181,6 +181,8 @@ class CodingWorkerTest {
         assertTrue(model.prompt?.contains("Every WRITE and REPLACE operation must change its target bytes") == true)
         assertTrue(model.prompt?.contains("operations must not be empty") == true)
         assertTrue(model.prompt?.contains("Never add or modify comments, imports, annotations, whitespace, or formatting merely to cover a required path") == true)
+        assertTrue(model.prompt?.contains("include an assertion whose result depends on the production behavior or production source") == true)
+        assertTrue(model.prompt?.contains("A comment-only test replacement is forbidden") == true)
         assertTrue(model.prompt?.contains("do not return an empty operations array") == true)
         assertTrue(model.prompt?.contains("Orchard deterministically admits repositoryContext") == true)
         assertTrue(model.prompt?.contains("Never fabricate cosmetic coverage") == true)
