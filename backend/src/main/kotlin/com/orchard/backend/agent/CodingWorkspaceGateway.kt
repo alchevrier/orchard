@@ -489,7 +489,7 @@ class LocalCodingWorkspaceGateway(
                                     anchor
                             } else {
                                 "REPLACE ${operation.path} replacement ${index + 1} old text occurs $occurrenceCount times; expected exactly once; " +
-                                    anchor
+                                    anchor + ambiguousReplacementAnchorDiagnostic(candidate, replacement.old)
                             }
                         }
                         candidate = candidate.replaceFirst(replacement.old, replacement.new)
@@ -1000,6 +1000,30 @@ internal fun rejectedReplacementAnchor(old: String): String {
     return "rejected old text ${Json.encodeToString(preview)}$suffix, sha256 ${sha256Content(old)}"
 }
 
+internal fun ambiguousReplacementAnchorDiagnostic(content: String, old: String): String {
+    if (old.isEmpty() || exactOccurrenceCount(content, old) <= 1) return ""
+    val lines = content.split('\n')
+    val offsets = buildList {
+        var offset = 0
+        lines.forEach { line ->
+            add(offset)
+            offset += line.length + 1
+        }
+    }
+    val suggestions = Regex(Regex.escape(old)).findAll(content).mapNotNull { match ->
+        val lineIndex = offsets.indexOfLast { it <= match.range.first }
+        (0..MAX_AMBIGUOUS_ANCHOR_CONTEXT_LINES).asSequence().mapNotNull { radius ->
+            val first = (lineIndex - radius).coerceAtLeast(0)
+            val last = (lineIndex + radius).coerceAtMost(lines.lastIndex)
+            val suggestion = lines.subList(first, last + 1).joinToString("\n")
+            suggestion.takeIf { exactOccurrenceCount(content, it) == 1 && old in it }
+        }.firstOrNull()
+    }.distinct().take(MAX_AMBIGUOUS_ANCHOR_SUGGESTIONS).toList()
+    if (suggestions.isEmpty()) return ""
+    return "; exact source-backed unique anchor suggestions: " +
+        suggestions.joinToString(" | ") { Json.encodeToString(it) }
+}
+
 internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>): List<String> {
     val matches = content.lineSequence().mapIndexedNotNull { index, line ->
         val lower = line.lowercase()
@@ -1035,6 +1059,8 @@ private const val EXCERPT_CONTEXT_LINES = 3
 private const val DECLARATION_MATCH_BONUS = 2
 private const val MAX_MATCHED_DECLARATIONS = 64
 private const val MAX_DECLARATION_CHARS = 512
+private const val MAX_AMBIGUOUS_ANCHOR_CONTEXT_LINES = 3
+private const val MAX_AMBIGUOUS_ANCHOR_SUGGESTIONS = 8
 private val SOURCE_DECLARATION = Regex("\\b(class|interface|object|fun|val|var|typealias)\\b")
 private data class ExcerptMatch(
     val index: Int,

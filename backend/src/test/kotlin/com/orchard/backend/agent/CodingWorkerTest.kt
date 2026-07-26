@@ -1093,13 +1093,31 @@ class CodingWorkerTest {
             )
         }
 
-        assertEquals(
+        assertTrue(error.message?.startsWith(
             "REPLACE src/Main.kt replacement 1 old text occurs 2 times; expected exactly once; " +
                 rejectedReplacementAnchor("fun answer() = 1"),
-            error.message,
-        )
+        ) == true)
+        assertTrue(error.message?.contains("exact source-backed unique anchor suggestions") == true)
         assertEquals("fun answer() = 1\nfun answer() = 1\n", Files.readString(source))
         assertEquals("", run(repository, "git", "status", "--porcelain"))
+    }
+
+    @Test
+    fun `ambiguous replacement diagnostics provide exact unique source anchors`() {
+        val content = """
+            Text(fontFamily = FontFamily.Serif,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(fontFamily = FontFamily.Serif,
+                fontWeight = FontWeight.Bold,
+            )
+        """.trimIndent()
+
+        val diagnostic = ambiguousReplacementAnchorDiagnostic(content, "fontFamily = FontFamily.Serif,")
+
+        assertTrue(diagnostic.contains("fontWeight = FontWeight.Medium,"))
+        assertTrue(diagnostic.contains("fontWeight = FontWeight.Bold,"))
+        assertTrue(diagnostic.contains("exact source-backed unique anchor suggestions"))
     }
 
     @Test
