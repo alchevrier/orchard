@@ -11,6 +11,7 @@ import java.time.Instant
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 const val CODING_EXECUTION_CLAIMED = "CLAIMED"
 const val CODING_EXECUTION_COMPLETED = "COMPLETED"
@@ -112,9 +113,11 @@ class FileCodingWorkerStore(private val directory: Path) : CodingWorkerStore {
 
     private fun loadEventsUnlocked(): List<CodingWorkerEvent> = mutableListOf<CodingWorkerEvent>().let { events ->
         loadRecoverableJsonl(path, "coding-worker") { line, recordNumber ->
+            val storedValue = json.parseToJsonElement(line).jsonObject.getValue("value")
             val envelope = json.decodeFromString<CodingWorkerEnvelope>(line)
             require(envelope.version == FORMAT_VERSION) { "Unsupported coding worker format ${envelope.version}" }
-            require(envelope.checksum == stagedPlanHash(json.encodeToString(envelope.value))) {
+            require(envelope.checksum == stagedPlanHash(storedValue.toString()) ||
+                envelope.checksum == stagedPlanHash(json.encodeToString(envelope.value))) {
                 "Checksum mismatch in coding worker event $recordNumber"
             }
             require(envelope.value.eventId == recordNumber.toLong()) {

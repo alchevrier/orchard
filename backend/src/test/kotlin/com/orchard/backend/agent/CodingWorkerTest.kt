@@ -251,6 +251,21 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `worker journal replays checksum from stored value before defaulted package fields`() {
+        val directory = createTempDirectory("orchard-legacy-worker-envelope-")
+        Files.writeString(
+            directory.resolve("coding-worker.jsonl"),
+            """{"version":1,"value":{"eventId":1,"claim":{"executionId":1,"runId":6,"attempt":1,"contextHash":"6c73098f77fea74187473a55a7e7f80d55fcdbe6b565641524ec08ebe17ec526","workspacePath":"/Users/rogue-leader/.orchard/projects/workspace/worktrees/circuit-dispatch-6","bindingFingerprint":"f624e16b4d8cab0667ea26710ce63b02a9c86d063c5c85ea031cb2e9d8d8798e","assignmentId":9,"staffRole":"IMPLEMENTER","riskClass":"HIGH","executionPlanId":2,"executionPlanHash":"0f2d3cefd1ebb57a0e345baa2f2b29f96cf77bfdd1fde14a765904232d52389c","toolchainPackId":"orchard.default-toolchains","toolchainPackVersion":1,"toolchainProfileId":"gradle-wrapper","toolchainPolicyHash":"1e3a971c50db584970b34fdce7daed7f52fd4ef666717bac73ebc6a2b72f859a","claimedAt":"2026-07-23T11:13:27.413031Z","hash":"5afefd9662251711ee6b6cfc0b6a278f8edc29d53622b457d2b78ab36297770c"},"result":null},"checksum":"407c88954bdf5cc37e9c448ca25fd29e98399b47e5b8c33143a3d996f11dc92e"}
+            """,
+        )
+
+        val events = FileCodingWorkerStore(directory).loadEvents()
+
+        assertEquals(1, events.size)
+        assertEquals(null, events.single().claim?.workPackageId)
+    }
+
+    @Test
     fun `background tick recovers the oldest interrupted claim before candidate selection`() = runTest {
         val store = TransientCodingWorkerStore()
         val claim = claim(executionId = 1, runId = 17, attempt = 1)
