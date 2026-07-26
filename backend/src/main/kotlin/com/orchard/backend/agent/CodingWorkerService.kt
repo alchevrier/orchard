@@ -105,6 +105,7 @@ class CodingWorkerService(
         require(retryBudget in 1..MAX_RETRY_BUDGET) { "Coding worker retry budget is invalid" }
         workerStore.loadEvents()
         attemptStore.load()
+        bootstrapFailedCandidateRestorations()
         bootstrapLegacyAttemptBlocks()
         bootstrapApplicationFailureBlocks()
         bootstrapTerminalPlanBlocks()
@@ -883,6 +884,20 @@ class CodingWorkerService(
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+    private fun bootstrapFailedCandidateRestorations() {
+        val executions = codingWorkerExecutions(workerStore.loadEvents())
+        val runs = workspace.snapshot(MESSAGE_READY).workflowRuns.associateBy { it.runId }
+        executions.asSequence()
+            .filter { it.result?.status == CODING_EXECUTION_FAILED && it.result.revision != null }
+            .groupBy { it.claim.runId }
+            .values
+            .map { it.last() }
+            .forEach { failed ->
+                val workspacePath = runs[failed.claim.runId]?.context?.workspaceReservation?.path ?: return@forEach
+                restoreLatestFailedCandidate(failed.claim.runId, workspacePath, executions)
+            }
+    }
 
     private fun bootstrapLegacyAttemptBlocks() {
         val attempts = attemptStore.load()
