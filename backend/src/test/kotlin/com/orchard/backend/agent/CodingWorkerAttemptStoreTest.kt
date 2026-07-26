@@ -163,6 +163,48 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
+    fun `proposal behavior must reduce forbidden literals and reject tautological tests`() {
+        val productionPath = "src/Main.kt"
+        val testPath = "src/test/MainTest.kt"
+        val context = CodingRepositoryContext(
+            files = listOf(
+                CodingContextFile(productionPath, "val family = FontFamily.Serif\nfun render() = Unit"),
+                CodingContextFile(testPath, "fun verifies() { check(render()) }"),
+            ),
+            omittedFileCount = 0,
+        )
+        val criterion = listOf(
+            "The shared desktop theme declares platform-default sans typography and none of the four bounded production UI files " +
+                "contains FontFamily.Serif or another decorative family."
+        )
+
+        assertEquals(
+            "REPLACE $productionPath must reduce forbidden literal FontFamily.Serif from its pinned count of 1; proposed count is 1.",
+            codingProposalBehaviorDiagnostic(
+                CodingPatchProposal("Cosmetic production edit", listOf(CodingFileOperation(
+                    CODING_FILE_REPLACE,
+                    productionPath,
+                    replacements = listOf(CodingTextReplacement("fun render() = Unit", "fun render() = Unit;")),
+                ))),
+                criterion,
+                context,
+            ),
+        )
+        assertEquals(
+            "REPLACE $testPath introduces a tautological constant-true assertion; required test assertions must depend on governed production behavior or source.",
+            codingProposalBehaviorDiagnostic(
+                CodingPatchProposal("Tautological test", listOf(CodingFileOperation(
+                    CODING_FILE_REPLACE,
+                    testPath,
+                    replacements = listOf(CodingTextReplacement("check(render())", "check(render()); assertTrue(true)")),
+                ))),
+                emptyList(),
+                context,
+            ),
+        )
+    }
+
+    @Test
     fun `same rejection diagnostic is recurrent even when proposal hash changes`() {
         val blocked = attempt(1, CODING_ATTEMPT_BLOCKED, "The proposal contains no coding operations.")
 

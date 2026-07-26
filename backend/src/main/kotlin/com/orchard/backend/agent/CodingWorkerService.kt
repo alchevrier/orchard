@@ -458,6 +458,11 @@ class CodingWorkerService(
             }
             val authorizationDiagnostic = codingProposalShapeDiagnostic(proposal)
                 ?: codingProposalAuthorizationDiagnostic(proposal, executionPlan)
+                ?: codingProposalBehaviorDiagnostic(
+                    proposal,
+                    run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+                    repositoryContext,
+                )
                 ?: rejectedAnchorDiagnostic
             if (authorizationDiagnostic != null) {
                 val storageDiagnostic = recordCorrectiveRejection(
@@ -1492,6 +1497,41 @@ internal fun codingProposalAuthorizationDiagnostic(
     }
 }
 
+internal fun codingProposalBehaviorDiagnostic(
+    proposal: CodingPatchProposal,
+    acceptanceCriteria: List<String>,
+    context: CodingRepositoryContext,
+): String? {
+    val files = context.files.associateBy { it.path }
+    val forbiddenLiterals = acceptanceCriteria.flatMap { criterion ->
+        Regex("\\bnone\\b[^.]*?\\bcontains\\s+([A-Za-z_][A-Za-z0-9_.]*)", RegexOption.IGNORE_CASE)
+            .findAll(criterion)
+            .map { it.groupValues[1] }
+            .toList()
+    }.distinct()
+    proposal.operations.filter { it.action == CODING_FILE_REPLACE }.forEach { operation ->
+        val original = files[operation.path]?.content ?: return@forEach
+        var candidate = original
+        operation.replacements.forEach { replacement ->
+            candidate = candidate.replaceFirst(replacement.old, replacement.new)
+        }
+        forbiddenLiterals.forEach { literal ->
+            val before = Regex(Regex.escape(literal), RegexOption.IGNORE_CASE).findAll(original).count()
+            val after = Regex(Regex.escape(literal), RegexOption.IGNORE_CASE).findAll(candidate).count()
+            if (before > 0 && after >= before) {
+                return "REPLACE ${operation.path} must reduce forbidden literal $literal from its pinned count of $before; proposed count is $after."
+            }
+        }
+        if (isCandidateTestSourcePath(operation.path) &&
+            TAUTOLOGICAL_TRUE_ASSERTION.containsMatchIn(candidate) &&
+            !TAUTOLOGICAL_TRUE_ASSERTION.containsMatchIn(original)
+        ) {
+            return "REPLACE ${operation.path} introduces a tautological constant-true assertion; required test assertions must depend on governed production behavior or source."
+        }
+    }
+    return null
+}
+
 private const val MAX_REJECTED_ANCHOR_DECLARATIONS = 5
 private const val MAX_REJECTED_ANCHOR_EXAMPLES = 2
 private const val SOURCE_ANCHOR_LINES = 4
@@ -1502,3 +1542,4 @@ private const val INVALID_CODING_PROPOSAL_DIAGNOSTIC = "The coding model returne
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
 private const val MIN_SOURCE_ANCHOR_TOKEN_LENGTH = 4
 private val CAMEL_CASE_TOKEN = Regex("[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
+private val TAUTOLOGICAL_TRUE_ASSERTION = Regex("\\b(?:assertTrue\\s*\\(\\s*true\\s*\\)|assertEquals\\s*\\(\\s*true\\s*,\\s*true\\s*\\))")
