@@ -55,15 +55,14 @@ class CodingWorkerTest {
     fun `candidate semantic verification rejects residual forbidden literals`() {
         val criterion = "None of the bounded production files contains FontFamily.Serif or another decorative family."
 
-        assertEquals(
-            "Candidate retains forbidden literal FontFamily.Serif 5 times in src/GuidedGenesisWorkspace.kt.",
-            candidateForbiddenLiteralDiagnostic(
+        assertTrue(
+            requireNotNull(candidateForbiddenLiteralDiagnostic(
                 listOf(criterion),
                 CodingRepositoryContext(
                     listOf(CodingContextFile("src/GuidedGenesisWorkspace.kt", "FontFamily.Serif\n".repeat(5))),
                     omittedFileCount = 0,
                 ),
-            ),
+            )).startsWith("Candidate retains forbidden literal FontFamily.Serif 5 times in src/GuidedGenesisWorkspace.kt."),
         )
         assertNull(candidateForbiddenLiteralDiagnostic(
             listOf(criterion),
@@ -76,6 +75,19 @@ class CodingWorkerTest {
             "Candidate semantic verification is missing scoped production paths.",
             candidateForbiddenLiteralDiagnostic(listOf(criterion), CodingRepositoryContext(emptyList(), omittedFileCount = 1)),
         )
+        val groundedDiagnostic = requireNotNull(candidateForbiddenLiteralDiagnostic(
+            listOf(criterion),
+            CodingRepositoryContext(
+                listOf(CodingContextFile(
+                    "src/GuidedGenesisWorkspace.kt",
+                    "first = FontFamily.Serif\nsecond = FontFamily.Serif\n",
+                )),
+                omittedFileCount = 0,
+            ),
+        ))
+        assertTrue(groundedDiagnostic.contains("exact source-backed unique anchor suggestions"))
+        assertTrue(groundedDiagnostic.contains("first = FontFamily.Serif"))
+        assertTrue(groundedDiagnostic.contains("second = FontFamily.Serif"))
     }
 
     @Test

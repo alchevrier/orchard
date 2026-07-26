@@ -1222,7 +1222,8 @@ internal fun candidateForbiddenLiteralDiagnostic(
         forbiddenLiterals.forEach { literal ->
             val count = Regex(Regex.escape(literal), RegexOption.IGNORE_CASE).findAll(file.content).count()
             if (count > 0) {
-                return "Candidate retains forbidden literal $literal $count time${if (count == 1) "" else "s"} in ${file.path}."
+                return "Candidate retains forbidden literal $literal $count time${if (count == 1) "" else "s"} in ${file.path}." +
+                    ambiguousReplacementAnchorDiagnostic(file.content, literal)
             }
         }
     }
