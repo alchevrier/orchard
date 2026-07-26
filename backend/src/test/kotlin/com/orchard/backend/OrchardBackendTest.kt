@@ -1519,6 +1519,30 @@ class DefinitionIntelligenceServiceTest {
     }
 
     @Test
+    fun rejectsOutputWhenProviderMeasuresOutputBeyondProfileBudget() = runTest {
+        val workspace = definitionWorkspace()
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "measured-output-overflow",
+                "test",
+                "measured-output-overflow",
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int) =
+                com.orchard.backend.vector.ModelGeneration(proposalJson(), 1_000, 2_001)
+        }
+
+        val result = DefinitionIntelligenceService(workspace, provider, systemPrompt = "policy").propose(4)
+
+        assertEquals(ProposalGenerationStatus.INVALID_OUTPUT, result.status)
+        assertEquals("Model output exceeded the execution profile budget.", result.diagnostic)
+        assertTrue(result.snapshot.definitionProposals.isEmpty())
+    }
+
+    @Test
     fun acceptsSchemaCompleteDefinitionWithUnknownModelMetadata() = runTest {
         val workspace = definitionWorkspace()
         val output = proposalJson().replace(

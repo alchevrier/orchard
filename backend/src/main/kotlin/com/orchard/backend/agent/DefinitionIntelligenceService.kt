@@ -272,8 +272,7 @@ class DefinitionIntelligenceService(
             return result(ProposalGenerationStatus.MODEL_UNAVAILABLE)
         }
         val outputWithinBudget = generation.promptTokens <= profile.inputBudgetTokens &&
-            generation.completionTokens <= profile.outputBudgetTokens &&
-            estimateModelTokens(generation.text) <= profile.outputBudgetTokens
+            generation.completionTokens <= profile.outputBudgetTokens
         val decoded = if (outputWithinBudget) {
             runCatching { strictOutputJson.decodeFromString<DefinitionProposalOutput>(generation.text) }
         } else null
