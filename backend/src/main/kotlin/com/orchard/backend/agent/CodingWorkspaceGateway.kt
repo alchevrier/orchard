@@ -231,7 +231,7 @@ class LocalCodingWorkspaceGateway(
         var bytesUsed = 0
         paths.distinct().forEach { relative ->
             runCatching { validatedRelative(root, relative, mustExist = false) }.getOrNull() ?: return@forEach
-            val bytes = runCatching { readGitBlob(root, repositoryRevision, relative, MAX_CONTEXT_FILE_BYTES.toLong()) }
+            val bytes = runCatching { readGitBlob(root, repositoryRevision, relative, MAX_CONTEXT_SOURCE_BYTES) }
                 .getOrNull() ?: return@forEach
             if (bytes.any { it == 0.toByte() }) return@forEach
             if (selected.size < MAX_ANALYSIS_CONTEXT_FILES && bytesUsed + bytes.size <= MAX_ANALYSIS_CONTEXT_BYTES) {

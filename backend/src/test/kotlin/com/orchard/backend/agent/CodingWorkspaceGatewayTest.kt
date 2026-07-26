@@ -173,6 +173,26 @@ class CodingWorkspaceGatewayTest {
         assertTrue(budgets.take(4).all { it >= 128 })
     }
 
+    @Test
+    fun `intelligence context reads complete source beyond prompt excerpt limit`() {
+        val repository = createTempDirectory("orchard-intelligence-context-")
+        git(repository, "init")
+        Files.createDirectories(repository.resolve("src"))
+        val content = "val typography = FontFamily.Default\n".repeat(2_500)
+        Files.writeString(repository.resolve("src/LargeTheme.kt"), content)
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        val revision = gitOutput(repository, "rev-parse", "HEAD")
+
+        val context = LocalCodingWorkspaceGateway().collectIntelligenceContext(
+            repository.toString(), revision, listOf("src/LargeTheme.kt"),
+        )
+
+        assertEquals(0, context.omittedFileCount)
+        assertEquals(content, context.files.single().content)
+        assertTrue(content.encodeToByteArray().size > 64 * 1024)
+    }
+
     private companion object {
         val contextJson = Json { encodeDefaults = true }
     }
