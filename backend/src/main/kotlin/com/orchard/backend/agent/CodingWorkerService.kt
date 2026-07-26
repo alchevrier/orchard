@@ -524,7 +524,7 @@ class CodingWorkerService(
                 claim.executionId,
             )
         }.getOrElse { error ->
-            val applicationDiagnostic = "The coding proposal could not be applied: ${error.message.orEmpty()}"
+            val applicationDiagnostic = codingApplicationDiagnostic(error.message.orEmpty(), proposal)
             if (executionPlan != null) {
                 val storageDiagnostic = recordCorrectiveRejection(
                     run.runId,
@@ -1160,6 +1160,14 @@ internal fun codingRunCanExecute(
 internal fun codingExecutionConsumesRepairBudget(status: String?): Boolean =
     status == CODING_EXECUTION_COMPLETED || status == CODING_EXECUTION_FAILED
 
+internal fun codingApplicationDiagnostic(error: String, proposal: CodingPatchProposal): String {
+    val base = "The coding proposal could not be applied: $error"
+    if ("git diff --check" !in error) return base
+    val proposalJson = Json.encodeToString(proposal)
+    if (proposalJson.encodeToByteArray().size > MAX_RETRY_PROPOSAL_BYTES) return base
+    return "$base Prior proposal JSON to correct without redesign: $proposalJson"
+}
+
 internal fun codingContextQuery(run: WorkflowRunView, executionPlan: RepositoryExecutionPlan?): String = buildString {
     appendLine(run.context.title)
     appendLine(run.context.content)
@@ -1465,6 +1473,7 @@ private const val MAX_REJECTED_ANCHOR_EXAMPLES = 2
 private const val SOURCE_ANCHOR_LINES = 4
 private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
 private const val MAX_SOURCE_ANCHOR_BYTES = 1_024
+private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
 private const val MIN_SOURCE_ANCHOR_TOKEN_LENGTH = 4
 private val CAMEL_CASE_TOKEN = Regex("[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")

@@ -602,6 +602,24 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `diff check rejection preserves bounded proposal for mechanical correction`() {
+        val proposal = CodingPatchProposal("Remove serif", listOf(CodingFileOperation(
+            action = CODING_FILE_REPLACE,
+            path = "src/Theme.kt",
+            replacements = listOf(CodingTextReplacement("FontFamily.Serif", "FontFamily.Default")),
+        )))
+
+        val diagnostic = codingApplicationDiagnostic("Candidate patch failed git diff --check: trailing whitespace", proposal)
+
+        assertTrue(diagnostic.contains("Prior proposal JSON to correct without redesign"))
+        assertTrue(diagnostic.contains("FontFamily.Default"))
+        assertEquals(
+            "The coding proposal could not be applied: exact anchor missing",
+            codingApplicationDiagnostic("exact anchor missing", proposal),
+        )
+    }
+
+    @Test
     fun `rejected anchor reuse includes literal centered unique suggestions`() {
         val path = "src/Theme.kt"
         val old = "fontFamily = FontFamily.Serif,"
