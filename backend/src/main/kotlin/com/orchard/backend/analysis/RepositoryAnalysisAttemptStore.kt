@@ -198,18 +198,38 @@ internal fun RepositoryAnalysisAttemptStore.compileRetainedExactPathOperations(
     val sourcePaths = compiledOperations.asSequence()
         .filter { it.action != PLAN_OPERATION_VERIFY }
         .mapTo(hashSetOf()) { it.path }
+    val currentOperationsByPath = compiledOperations.associateBy { it.path }
+    val earlierPlans = load().asReversed().asSequence()
+        .filter { it.runId == runId && it.baseRevision == baseRevision }
+        .mapNotNull { it.rejectedPlan }
+        .toList()
     return output.copy(
         operations = compiledOperations,
         scopeCoverage = output.scopeCoverage.map { coverage ->
             val exactSourceOrders = compiledOperations.asSequence()
                 .filter { it.action != PLAN_OPERATION_VERIFY && it.path in coverage.evidencePaths }
                 .map { it.order }
+            val retainedTestPath = earlierPlans.asSequence().mapNotNull { plan ->
+                val earlierCoverage = plan.scopeCoverage.singleOrNull { it.scope == coverage.scope } ?: return@mapNotNull null
+                val earlierOperations = plan.operations.associateBy { it.order }
+                earlierCoverage.operationOrders.asSequence()
+                    .mapNotNull(earlierOperations::get)
+                    .firstOrNull { isAnalysisTestPath(it.path) && it.path in currentOperationsByPath }
+                    ?.path
+            }.firstOrNull()
+            val retainedTestOrder = retainedTestPath?.let(currentOperationsByPath::get)?.order
             coverage.copy(
-                operationOrders = (coverage.operationOrders + exactSourceOrders).distinct().sorted(),
+                evidencePaths = (coverage.evidencePaths + listOfNotNull(retainedTestPath)).distinct(),
+                operationOrders = (coverage.operationOrders + exactSourceOrders + listOfNotNull(retainedTestOrder)).distinct().sorted(),
                 compliantEvidencePaths = coverage.compliantEvidencePaths.filter { it !in sourcePaths },
             )
         },
     )
+}
+
+private fun isAnalysisTestPath(path: String): Boolean {
+    val normalized = path.replace('\\', '/').lowercase()
+    return "/test/" in normalized || normalized.substringAfterLast('/').contains("test.")
 }
 
 private fun validateRepositoryAnalysisAttempt(

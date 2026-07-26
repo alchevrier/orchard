@@ -985,6 +985,38 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `retains earlier model authored test linkage for the same scope`() {
+        val store = TransientRepositoryAnalysisAttemptStore()
+        val original = plan(1, 1, "a".repeat(40)).content
+        val scope = "Backend correlation authority and focused tests"
+        val test = original.operations.first().copy(order = 2, path = "frontend/src/desktopTest/NetworkTest.kt")
+        val earlier = original.copy(
+            operations = listOf(test),
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(scope, listOf(test.path), listOf(2))),
+        )
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = 21,
+                baseRevision = "a".repeat(40),
+                state = ANALYSIS_ATTEMPT_BLOCKED,
+                resultStatus = RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                diagnostic = "citation unavailable",
+                rejectedPlan = earlier,
+            )
+        }
+        val latest = earlier.copy(
+            operations = listOf(test.copy(order = 1)),
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(scope, emptyList())),
+        )
+
+        val compiled = store.compileRetainedExactPathOperations(21, "a".repeat(40), emptySet(), latest)
+
+        assertEquals(listOf(test.path), compiled.scopeCoverage.single().evidencePaths)
+        assertEquals(listOf(1), compiled.scopeCoverage.single().operationOrders)
+    }
+
+    @Test
     fun `matching test mutation resolves extension question`() {
         val original = plan(1, 1, "a".repeat(40)).content
         val question = "Does DurableConversationWorkspaceTest need extension to assert correlation behavior?"
