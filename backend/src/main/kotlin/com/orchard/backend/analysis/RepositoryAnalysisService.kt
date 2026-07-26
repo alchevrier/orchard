@@ -510,7 +510,7 @@ class RepositoryAnalysisService(
         repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
-        val resolvedOutput = compileResolvedCreateQuestions(output)
+        val resolvedOutput = compileResolvedTestQuestions(compileResolvedCreateQuestions(output))
         repositoryForbiddenLiteralComplianceDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             complianceContext,
@@ -1062,6 +1062,18 @@ internal fun compileResolvedCreateQuestions(output: RepositoryAnalysisPlanConten
             authorityTerms(question).any { term -> createAuthorities.any { term in it } }
     }
     return output.copy(unresolvedQuestions = unresolved)
+}
+
+internal fun compileResolvedTestQuestions(output: RepositoryAnalysisPlanContent): RepositoryAnalysisPlanContent {
+    val mutatedTests = output.operations.asSequence()
+        .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path) }
+        .map { it.path.substringAfterLast('/').substringBeforeLast('.') }
+        .toSet()
+    if (mutatedTests.isEmpty()) return output
+    return output.copy(unresolvedQuestions = output.unresolvedQuestions.filterNot { question ->
+        question.contains(Regex("\\b(?:need|needs|extension|extend|modify|modification)\\b", RegexOption.IGNORE_CASE)) &&
+            mutatedTests.any { test -> question.contains(Regex("\\b${Regex.escape(test)}\\b")) }
+    })
 }
 
 private fun authorityTerms(value: String): Set<String> = Regex("[A-Za-z][A-Za-z-]{7,}")

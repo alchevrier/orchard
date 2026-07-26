@@ -949,6 +949,30 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `matching test mutation resolves extension question`() {
+        val original = plan(1, 1, "a".repeat(40)).content
+        val question = "Does DurableConversationWorkspaceTest need extension to assert correlation behavior?"
+        val output = original.copy(
+            operations = original.operations.map {
+                it.copy(
+                    action = PLAN_OPERATION_MODIFY,
+                    path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/ui/DurableConversationWorkspaceTest.kt",
+                )
+            },
+            unresolvedQuestions = listOf(question, "Which authority owns a genuine conflict?"),
+        )
+
+        assertEquals(
+            listOf("Which authority owns a genuine conflict?"),
+            compileResolvedTestQuestions(output).unresolvedQuestions,
+        )
+        assertEquals(listOf(question), compileResolvedTestQuestions(output.copy(
+            operations = output.operations.map { it.copy(path = "frontend/src/desktopTest/OtherTest.kt") },
+            unresolvedQuestions = listOf(question),
+        )).unresolvedQuestions)
+    }
+
+    @Test
     fun `required regression mutation is not an architect question`() {
         val claim = "Is DesktopNetworkClientTest.kt sufficient, or does it require modification?"
 
