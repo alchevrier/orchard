@@ -735,12 +735,14 @@ class RepositoryExecutionPlanStoreTest {
             "Architect escalation contradicts pinned evidence: $binderPath contains FontFamily.Serif 0 times, but unresolvedQuestions claims: $claim",
             repositoryArchitectEscalationEvidenceDiagnostic(
                 listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0)),
+                CodingRepositoryContext(emptyList(), 0),
                 emptyList(),
                 listOf(claim),
             ),
         )
         assertNull(repositoryArchitectEscalationEvidenceDiagnostic(
             listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 1)),
+            CodingRepositoryContext(emptyList(), 0),
             emptyList(),
             listOf(claim),
         ))
@@ -749,6 +751,7 @@ class RepositoryExecutionPlanStoreTest {
                 "OrchardCircuitBinder.kt still contains FontFamily.Serif literals.",
             repositoryArchitectEscalationEvidenceDiagnostic(
                 listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0)),
+                CodingRepositoryContext(emptyList(), 0),
                 emptyList(),
                 listOf("OrchardCircuitBinder.kt still contains FontFamily.Serif literals."),
             ),
@@ -756,7 +759,24 @@ class RepositoryExecutionPlanStoreTest {
         val absenceClaim = "Shared OrchardCircuitBinder.kt lacks FontFamily.Default; a MODIFY operation is required."
         assertEquals(
             "Architect escalation contradicts compliant pinned evidence for $binderPath: $absenceClaim",
-            repositoryArchitectEscalationEvidenceDiagnostic(emptyList(), listOf(binderPath), listOf(absenceClaim)),
+            repositoryArchitectEscalationEvidenceDiagnostic(
+                emptyList(),
+                CodingRepositoryContext(emptyList(), 0),
+                listOf(binderPath),
+                listOf(absenceClaim),
+            ),
+        )
+        assertEquals(
+            "Architect escalation contradicts pinned source evidence for $binderPath: $absenceClaim",
+            repositoryArchitectEscalationEvidenceDiagnostic(
+                emptyList(),
+                CodingRepositoryContext(
+                    listOf(CodingContextFile(binderPath, "val body = FontFamily.Default")),
+                    0,
+                ),
+                emptyList(),
+                listOf(absenceClaim),
+            ),
         )
     }
 

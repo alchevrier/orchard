@@ -514,6 +514,7 @@ class RepositoryAnalysisService(
                 run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
                 complianceContext,
             ),
+            complianceContext,
             output.scopeCoverage.flatMap { it.compliantEvidencePaths },
             output.unresolvedQuestions,
         )?.let {
@@ -965,6 +966,7 @@ internal fun repositoryForbiddenLiteralFacts(
 
 internal fun repositoryArchitectEscalationEvidenceDiagnostic(
     facts: List<RepositoryForbiddenLiteralFact>,
+    context: CodingRepositoryContext,
     compliantEvidencePaths: List<String>,
     unresolvedQuestions: List<String>,
 ): String? {
@@ -977,6 +979,17 @@ internal fun repositoryArchitectEscalationEvidenceDiagnostic(
                 question.contains(Regex("\\bcontains?\\b", RegexOption.IGNORE_CASE))
         } ?: return@firstNotNullOfOrNull null
         "Architect escalation contradicts pinned evidence: ${fact.path} contains ${fact.literal} 0 times, but unresolvedQuestions claims: $unsupported"
+    }?.let { return it }
+    context.files.firstNotNullOfOrNull { file ->
+        val basename = file.path.substringAfterLast('/')
+        val unsupported = unresolvedQuestions.firstOrNull { question ->
+            (question.contains(file.path, ignoreCase = true) || question.contains(basename, ignoreCase = true)) &&
+                question.contains(Regex("\\b(?:lacks?|missing|omits?)\\b", RegexOption.IGNORE_CASE)) &&
+                Regex("FontFamily\\.[A-Za-z]+", RegexOption.IGNORE_CASE).find(question)?.value?.let { literal ->
+                    lexicalEvidenceCount(file.content, literal) > 0
+                } == true
+        } ?: return@firstNotNullOfOrNull null
+        "Architect escalation contradicts pinned source evidence for ${file.path}: $unsupported"
     }?.let { return it }
     return compliantEvidencePaths.distinct().firstNotNullOfOrNull { path ->
         val basename = path.substringAfterLast('/')
