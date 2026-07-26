@@ -935,7 +935,10 @@ class RepositoryExecutionPlanStoreTest {
                 rejectedPlan = earlier.copy(operations = listOf(retainedOperation)),
             )
         }
-        val latest = earlier.copy(operations = earlier.operations.filter { it.path != uiPath })
+        val latest = earlier.copy(
+            operations = earlier.operations.filter { it.path != uiPath },
+            scopeCoverage = earlier.scopeCoverage.map { it.copy(compliantEvidencePaths = listOf(uiPath)) },
+        )
 
         val compiled = store.compileRetainedExactPathOperations(
             21,
@@ -945,6 +948,7 @@ class RepositoryExecutionPlanStoreTest {
         )
 
         assertEquals(retainedOperation.copy(order = compiled.operations.indexOfFirst { it.path == uiPath } + 1), compiled.operations.first { it.path == uiPath })
+        assertTrue(compiled.scopeCoverage.all { uiPath !in it.compliantEvidencePaths })
         assertEquals(latest, store.compileRetainedExactPathOperations(21, "a".repeat(40), setOf("other/Test.kt"), latest))
     }
 

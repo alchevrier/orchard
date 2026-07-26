@@ -183,9 +183,15 @@ internal fun RepositoryAnalysisAttemptStore.compileRetainedExactPathOperations(
         .distinctBy { it.path }
         .toList()
     if (retained.isEmpty()) return output
+    val retainedPaths = retained.mapTo(hashSetOf()) { it.path }
     val operations = output.operations.filter { it.action != PLAN_OPERATION_VERIFY } +
         retained + output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
-    return output.copy(operations = operations.mapIndexed { index, operation -> operation.copy(order = index + 1) })
+    return output.copy(
+        operations = operations.mapIndexed { index, operation -> operation.copy(order = index + 1) },
+        scopeCoverage = output.scopeCoverage.map { coverage ->
+            coverage.copy(compliantEvidencePaths = coverage.compliantEvidencePaths.filter { it !in retainedPaths })
+        },
+    )
 }
 
 private fun validateRepositoryAnalysisAttempt(
