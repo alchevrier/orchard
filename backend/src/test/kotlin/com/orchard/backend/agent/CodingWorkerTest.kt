@@ -496,6 +496,12 @@ class CodingWorkerTest {
                     acceptanceCriteria = listOf("Human-readable text uses FontFamily.Default."),
                 )),
                 verificationCommands = emptyList(),
+                scopeCoverage = listOf(com.orchard.backend.analysis.ExecutionPlanScopeCoverage(
+                    scope = "Existing compliant inbox typography",
+                    evidencePaths = listOf("src/Inbox.kt", "src/Theme.kt"),
+                    operationOrders = listOf(1),
+                    compliantEvidencePaths = listOf("src/Inbox.kt"),
+                )),
             ),
             provenance = AnalysisExecutionProvenance(
                 executionProfileId = "test-analysis",
@@ -514,6 +520,7 @@ class CodingWorkerTest {
         assertTrue(query.contains("MaterialTheme owns the shared typography defaults."))
         assertTrue(query.contains("Set the default font family on shared typography."))
         assertTrue(query.contains("Human-readable text uses FontFamily.Default."))
+        assertEquals(listOf("src/Theme.kt", "src/Inbox.kt"), codingPlanContextPaths(plan))
     }
 
     @Test

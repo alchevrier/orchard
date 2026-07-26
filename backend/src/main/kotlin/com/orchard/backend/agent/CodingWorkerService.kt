@@ -300,10 +300,7 @@ class CodingWorkerService(
         )
 
         val contextQuery = codingContextQuery(run, executionPlan)
-        val planPaths = executionPlan?.content?.operations
-            ?.filter { it.action != "VERIFY" }
-            ?.map { it.path }
-            .orEmpty()
+        val planPaths = codingPlanContextPaths(executionPlan)
         fun envelope(
             repositoryContext: CodingRepositoryContext,
             retryDiagnostic: String? = priorRejectedCodingDiagnostic,
@@ -1183,6 +1180,12 @@ internal fun codingPlanContextQuery(executionPlan: RepositoryExecutionPlan?): St
         }
     }
 }
+
+internal fun codingPlanContextPaths(executionPlan: RepositoryExecutionPlan?): List<String> = executionPlan?.content?.let { plan ->
+    (plan.operations.filter { it.action != "VERIFY" }.map { it.path } +
+        plan.scopeCoverage.flatMap { it.evidencePaths })
+        .distinct()
+}.orEmpty()
 
 internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
     result.status == CODING_EXECUTION_BLOCKED ||
