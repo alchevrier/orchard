@@ -1220,7 +1220,7 @@ internal fun codingPlanContextPaths(executionPlan: RepositoryExecutionPlan?): Li
 }.orEmpty()
 
 internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
-    result.status == CODING_EXECUTION_BLOCKED ||
+    result.status in setOf(CODING_EXECUTION_BLOCKED, CODING_EXECUTION_INTERRUPTED) ||
         (result.status == CODING_EXECUTION_FAILED && (
             result.revision != null || result.diagnostic == INVALID_CODING_PROPOSAL_DIAGNOSTIC
         ))
