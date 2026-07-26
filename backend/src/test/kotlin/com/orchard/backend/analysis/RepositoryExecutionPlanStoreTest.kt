@@ -1027,6 +1027,29 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `backend scope cannot be satisfied by a test mutation alone`() {
+        val original = plan(1, 1, "a".repeat(40)).content
+        val testOperation = original.operations.first().copy(
+            order = 1,
+            action = PLAN_OPERATION_MODIFY,
+            path = "frontend/src/desktopTest/NetworkClientTest.kt",
+        )
+        val output = original.copy(
+            operations = listOf(testOperation),
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(
+                scope = "Backend durable correlation authority and focused tests",
+                evidencePaths = listOf(testOperation.path),
+                operationOrders = listOf(1),
+            )),
+        )
+
+        assertEquals(
+            "Scope coverage 1 requires a linked CREATE or MODIFY operation for concrete non-test implementation source.",
+            repositoryScopeCoverageDiagnostic(listOf(output.scopeCoverage.single().scope), output),
+        )
+    }
+
+    @Test
     fun `repository analysis compiles exact verification command authority`() {
         val original = plan(1, 1, "a".repeat(40)).content.copy(
             verificationCommands = listOf("invented command"),

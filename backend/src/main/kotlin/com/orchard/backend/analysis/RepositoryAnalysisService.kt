@@ -902,6 +902,11 @@ internal fun repositoryScopeCoverageDiagnostic(
                 .toList()
             val linkedSourcePaths = linkedSourceOperations.asSequence()
                 .mapTo(hashSetOf()) { it.path }
+            if (requiresImplementationSource(coverage.scope) && linkedSourceOperations.none {
+                    it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && !isTestSourcePath(it.path)
+                }) {
+                return "Scope coverage ${index + 1} requires a linked CREATE or MODIFY operation for concrete non-test implementation source."
+            }
             val unpinnedCompliantPaths = coverage.compliantEvidencePaths.filter { it !in evidencePaths }.distinct().sorted()
             if (unpinnedCompliantPaths.isNotEmpty()) {
                 return "Scope coverage ${index + 1} marks paths compliant without pinned evidence: " +
@@ -1379,6 +1384,9 @@ private fun requiresTestSource(scope: String): Boolean {
     val normalized = canonicalAuthorityText(scope).lowercase()
     return "test" in normalized || "regression" in normalized
 }
+
+private fun requiresImplementationSource(scope: String): Boolean = canonicalAuthorityText(scope)
+    .startsWith("Backend ", ignoreCase = true)
 
 private fun isTestSourcePath(path: String): Boolean {
     val normalized = path.replace('\\', '/').lowercase()
