@@ -548,6 +548,11 @@ class RepositoryAnalysisService(
             context,
             output,
         )?.let { return it }
+        repositoryForbiddenLiteralComplianceDiagnostic(
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+            context,
+            output,
+        )?.let { return it }
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
         repositoryAcceptanceCoverageDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
@@ -800,6 +805,10 @@ private fun RepositoryExecutionPlan.coversAcceptedScope(
     run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
     context,
     content,
+) == null && repositoryForbiddenLiteralComplianceDiagnostic(
+    run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+    context,
+    content,
 ) == null
 
 internal fun repositoryScopeCoverageDiagnostic(
@@ -856,6 +865,40 @@ internal fun repositoryScopeCoverageDiagnostic(
         }
     }
     return null
+}
+
+internal fun repositoryForbiddenLiteralComplianceDiagnostic(
+    acceptanceCriteria: List<String>,
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val forbiddenLiterals = acceptanceCriteria.flatMap { criterion ->
+        FORBIDDEN_CONTAINS_LITERAL.findAll(criterion).map { it.groupValues[1] }.toList()
+    }.distinct()
+    if (forbiddenLiterals.isEmpty()) return null
+    val files = context.files.associateBy { it.path }
+    output.scopeCoverage.forEach { coverage ->
+        coverage.compliantEvidencePaths.forEach { path ->
+            val content = files[path]?.content ?: return@forEach
+            forbiddenLiterals.forEach { literal ->
+                val count = lexicalEvidenceCount(content, literal)
+                if (count > 0) {
+                    return "Scope '${coverage.scope}' marks $path compliant, but pinned evidence contains forbidden literal " +
+                        "$literal $count time${if (count == 1) "" else "s"}."
+                }
+            }
+        }
+    }
+    return null
+}
+
+private fun lexicalEvidenceCount(content: String, literal: String): Int {
+    val summarized = Regex("${Regex.escape(literal)}=(\\d+)", RegexOption.IGNORE_CASE)
+        .find(content.substringBefore(']'))
+        ?.groupValues
+        ?.get(1)
+        ?.toIntOrNull()
+    return summarized ?: Regex(Regex.escape(literal), RegexOption.IGNORE_CASE).findAll(content).count()
 }
 
 internal fun repositoryScopeAuthorityDiagnostic(
@@ -1054,6 +1097,11 @@ private fun commonPathPrefixLength(first: String, second: String): Int = first
     .zip(second.replace('\\', '/').split('/'))
     .takeWhile { (left, right) -> left == right }
     .size
+
+private val FORBIDDEN_CONTAINS_LITERAL = Regex(
+    "\\bnone\\b[^.]*?\\bcontains\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+    RegexOption.IGNORE_CASE,
+)
 
 private fun canonicalAuthorityText(value: String): String = value
     .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")

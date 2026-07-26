@@ -649,6 +649,52 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `compliant evidence cannot contain a literal forbidden by acceptance criteria`() {
+        val path = "frontend/src/main/GuidedGenesisWorkspace.kt"
+        val scope = "Guided genesis typography in $path"
+        val output = plan(1, 1, "a".repeat(40)).content.copy(
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(
+                scope = scope,
+                evidencePaths = listOf(path),
+                operationOrders = emptyList(),
+                compliantEvidencePaths = listOf(path),
+            )),
+        )
+        val criterion = "None of the bounded production files contains FontFamily.Serif or another decorative family."
+
+        assertEquals(
+            "Scope '$scope' marks $path compliant, but pinned evidence contains forbidden literal FontFamily.Serif 5 times.",
+            repositoryForbiddenLiteralComplianceDiagnostic(
+                listOf(criterion),
+                CodingRepositoryContext(
+                    listOf(CodingContextFile(
+                        path,
+                        "[Orchard lexical query counts: fontfamily.serif=5, fontfamily.monospace=8]\n",
+                    )),
+                    omittedFileCount = 0,
+                ),
+                output,
+            ),
+        )
+        assertNull(repositoryForbiddenLiteralComplianceDiagnostic(
+            listOf("Every remaining FontFamily.Monospace use must be machine-readable."),
+            CodingRepositoryContext(listOf(CodingContextFile(path, "FontFamily.Monospace")), omittedFileCount = 0),
+            output,
+        ))
+        assertNull(repositoryForbiddenLiteralComplianceDiagnostic(
+            listOf(criterion),
+            CodingRepositoryContext(
+                listOf(CodingContextFile(
+                    path,
+                    "[Orchard lexical query counts: fontfamily.serif=0]\n",
+                )),
+                omittedFileCount = 0,
+            ),
+            output,
+        ))
+    }
+
+    @Test
     fun `repository selectors require every matched owner and an affine test operation`() {
         val context = CodingRepositoryContext(
             listOf(
@@ -715,6 +761,7 @@ class RepositoryExecutionPlanStoreTest {
                 context.copy(files = context.files.map { it.copy(matchedEvidenceSelectorIds = emptyList()) }),
             ),
         )
+
         assertEquals(
             "Scope coverage 2 paths differ from deterministic scope authority. " +
                 "Expected: frontend/src/test/TypographyTest.kt. Actual: frontend/src/main/Theme.kt.",
