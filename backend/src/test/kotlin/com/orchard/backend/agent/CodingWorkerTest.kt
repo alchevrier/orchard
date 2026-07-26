@@ -180,6 +180,8 @@ class CodingWorkerTest {
         assertTrue(model.prompt?.contains("rejected old-text value named in priorRejectedCodingDiagnostic as forbidden") == true)
         assertTrue(model.prompt?.contains("Every WRITE and REPLACE operation must change its target bytes") == true)
         assertTrue(model.prompt?.contains("operations must not be empty") == true)
+        assertTrue(model.prompt?.contains("forbidden only as the complete `old` value") == true)
+        assertTrue(model.prompt?.contains("include it inside a larger exact source-backed `old` value") == true)
         assertTrue(model.prompt?.contains("Never add or modify comments, imports, annotations, whitespace, or formatting merely to cover a required path") == true)
         assertTrue(model.prompt?.contains("include an assertion whose result depends on the production behavior or production source") == true)
         assertTrue(model.prompt?.contains("A comment-only test replacement is forbidden") == true)
