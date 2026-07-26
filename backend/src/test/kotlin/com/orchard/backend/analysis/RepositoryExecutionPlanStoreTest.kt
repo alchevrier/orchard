@@ -208,6 +208,33 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `repository analysis retry retains an exact path correction anchor`() {
+        val directory = createTempDirectory("orchard-analysis-path-anchor-")
+        val store = FileRepositoryAnalysisAttemptStore(directory)
+        val revision = "a".repeat(40)
+        val original = plan(1, 1, revision).content
+        val requiredPath = "src/RequiredTest.kt"
+        val correctedPlan = original.copy(operations = original.operations.map { it.copy(path = requiredPath) })
+        val regressedPlan = original.copy(operations = original.operations.map { it.copy(path = "src/WrongTest.kt") })
+        listOf(correctedPlan to "Earlier rejection.", regressedPlan to "Scope requires $requiredPath.").forEach { (rejectedPlan, diagnostic) ->
+            store.appendNext { attemptId ->
+                RepositoryAnalysisAttempt(
+                    attemptId, 11, revision, ANALYSIS_ATTEMPT_BLOCKED,
+                    RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name, diagnostic, "b".repeat(64),
+                    rejectedPlan = rejectedPlan,
+                )
+            }
+            store.appendNext { attemptId ->
+                RepositoryAnalysisAttempt(attemptId, 11, revision, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, "RETRY_AUTHORIZED", "Authorized.")
+            }
+        }
+
+        val diagnostic = requireNotNull(store.retryDiagnostic(11, revision))
+        assertTrue(diagnostic.contains("Exact-path correction anchor for $requiredPath"))
+        assertTrue(diagnostic.contains("\"path\":\"$requiredPath\""))
+    }
+
+    @Test
     fun `repository analysis attempt store reads legacy records without rejected plan field`() {
         val directory = createTempDirectory("orchard-legacy-analysis-attempt-")
         val value = """{"attemptId":1,"runId":11,"baseRevision":"${"a".repeat(40)}","state":"BLOCKED","resultStatus":"INVALID_ANALYSIS","diagnostic":"Legacy rejection.","promptHash":"${"b".repeat(64)}","recordedAt":"2026-07-26T00:00:00Z"}"""

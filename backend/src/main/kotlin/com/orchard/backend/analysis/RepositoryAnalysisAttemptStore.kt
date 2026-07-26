@@ -145,6 +145,25 @@ fun RepositoryAnalysisAttemptStore.retryDiagnostic(runId: Long, baseRevision: St
                     append(Json.encodeToString(anchor))
                 }
         }
+        val missingDiagnosticPath = blockedAttempts.asReversed()
+            .asSequence()
+            .mapNotNull { it.rejectedPlan }
+            .flatMap { it.operations.asSequence() }
+            .map { it.path }
+            .distinct()
+            .firstOrNull { path ->
+                current.contains(path) && latestRejectedPlan?.operations?.none { it.path == path } == true
+            }
+        missingDiagnosticPath?.let { path ->
+            blockedAttempts.asReversed()
+                .asSequence()
+                .mapNotNull { it.rejectedPlan }
+                .firstOrNull { plan -> plan.operations.any { it.path == path } }
+                ?.let { anchor ->
+                    append("\nExact-path correction anchor for $path; retain this source operation while correcting the latest candidate:\n")
+                    append(Json.encodeToString(anchor))
+                }
+        }
     }
 }
 
