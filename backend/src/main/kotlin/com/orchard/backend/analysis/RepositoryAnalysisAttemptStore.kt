@@ -167,6 +167,27 @@ fun RepositoryAnalysisAttemptStore.retryDiagnostic(runId: Long, baseRevision: St
     }
 }
 
+internal fun RepositoryAnalysisAttemptStore.compileRetainedExactPathOperations(
+    runId: Long,
+    baseRevision: String,
+    requiredPaths: Set<String>,
+    output: RepositoryAnalysisPlanContent,
+): RepositoryAnalysisPlanContent {
+    val currentPaths = output.operations.mapTo(hashSetOf()) { it.path }
+    val retained = load().asReversed().asSequence()
+        .filter { it.runId == runId && it.baseRevision == baseRevision }
+        .mapNotNull { it.rejectedPlan }
+        .flatMap { it.operations.asSequence() }
+        .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) }
+        .filter { it.path in requiredPaths && it.path !in currentPaths }
+        .distinctBy { it.path }
+        .toList()
+    if (retained.isEmpty()) return output
+    val operations = output.operations.filter { it.action != PLAN_OPERATION_VERIFY } +
+        retained + output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
+    return output.copy(operations = operations.mapIndexed { index, operation -> operation.copy(order = index + 1) })
+}
+
 private fun validateRepositoryAnalysisAttempt(
     attempt: RepositoryAnalysisAttempt,
     previous: List<RepositoryAnalysisAttempt>,

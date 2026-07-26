@@ -548,14 +548,17 @@ class RepositoryAnalysisService(
                 resolvedOutput,
             )
         }
+        val acceptedScope = run.workDefinition?.definition?.scope.orEmpty()
+        val scopedOutput = compileRepositoryScopeAuthority(acceptedScope, selectors, boundedContext, resolvedOutput)
+        val reconciledOutput = attemptStore.compileRetainedExactPathOperations(
+            run.runId,
+            baseRevision,
+            scopedOutput.scopeCoverage.flatMap { it.evidencePaths }.filter(::isTestSourcePath).toSet(),
+            scopedOutput,
+        )
         val compiledOutput = compileRepositoryVerificationAuthority(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
-            compileRepositoryScopeAuthority(
-                run.workDefinition?.definition?.scope.orEmpty(),
-                run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
-                boundedContext,
-                resolvedOutput,
-            ),
+            compileRepositoryScopeAuthority(acceptedScope, selectors, boundedContext, reconciledOutput),
         )
         val failedCandidatePaths = failedCandidateCorrectionPaths(
             baseRevision,

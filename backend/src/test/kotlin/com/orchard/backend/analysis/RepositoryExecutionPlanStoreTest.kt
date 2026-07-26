@@ -915,6 +915,40 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `retains earlier model authored operation for an exact required test path`() {
+        val store = TransientRepositoryAnalysisAttemptStore()
+        val earlier = plan(1, 1, "a".repeat(40)).content
+        val uiPath = "frontend/src/desktopTest/kotlin/com/orchard/frontend/ui/InboxTest.kt"
+        val retainedOperation = earlier.operations.first().copy(
+            action = PLAN_OPERATION_MODIFY,
+            path = uiPath,
+            instruction = "Prove the integrated Inbox behavior.",
+        )
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = 21,
+                baseRevision = "a".repeat(40),
+                state = ANALYSIS_ATTEMPT_BLOCKED,
+                resultStatus = RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                diagnostic = "missing operation",
+                rejectedPlan = earlier.copy(operations = listOf(retainedOperation)),
+            )
+        }
+        val latest = earlier.copy(operations = earlier.operations.filter { it.path != uiPath })
+
+        val compiled = store.compileRetainedExactPathOperations(
+            21,
+            "a".repeat(40),
+            setOf(uiPath),
+            latest,
+        )
+
+        assertEquals(retainedOperation.copy(order = compiled.operations.indexOfFirst { it.path == uiPath } + 1), compiled.operations.first { it.path == uiPath })
+        assertEquals(latest, store.compileRetainedExactPathOperations(21, "a".repeat(40), setOf("other/Test.kt"), latest))
+    }
+
+    @Test
     fun `required regression mutation is not an architect question`() {
         val claim = "Is DesktopNetworkClientTest.kt sufficient, or does it require modification?"
 
