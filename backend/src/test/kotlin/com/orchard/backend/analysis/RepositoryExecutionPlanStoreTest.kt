@@ -539,8 +539,8 @@ class RepositoryExecutionPlanStoreTest {
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
         )
         assertEquals(
-            "Scope coverage 2 requires a linked CREATE or MODIFY operation for a concrete test source path. " +
-                "Add the test operation order to this scope coverage row; VERIFY and compliant evidence cannot satisfy regression scope.",
+            "Scope coverage 2 must link an existing test mutation by adding its path to evidencePaths and its order to operationOrders: " +
+                "order 2 (src/MainTest.kt).",
             repositoryScopeCoverageDiagnostic(scope, unmatchedEvidence),
         )
         val createdRegression = unmatchedEvidence.copy(
@@ -553,6 +553,16 @@ class RepositoryExecutionPlanStoreTest {
             ),
         )
         assertNull(repositoryScopeCoverageDiagnostic(scope, createdRegression))
+        val unlinkedCreatedRegression = createdRegression.copy(
+            scopeCoverage = createdRegression.scopeCoverage.mapIndexed { index, coverage ->
+                if (index == 1) coverage.copy(operationOrders = listOf(1)) else coverage
+            },
+        )
+        assertEquals(
+            "Scope coverage 2 must link an existing test mutation by adding its path to evidencePaths and its order to operationOrders: " +
+                "order 2 (src/NewTest.kt).",
+            repositoryScopeCoverageDiagnostic(scope, unlinkedCreatedRegression),
+        )
         assertNull(
             repositoryScopeCoverageDiagnostic(
                 listOf("Inspect the owners."),
@@ -1076,8 +1086,8 @@ class RepositoryExecutionPlanStoreTest {
             repositoryScopeAuthorityDiagnostic(scope, selectors, context, missingPinnedOwner),
         )
         assertEquals(
-            "Scope coverage 2 requires a linked CREATE or MODIFY operation for a concrete test source path. " +
-                "Add the test operation order to this scope coverage row; VERIFY and compliant evidence cannot satisfy regression scope.",
+            "Scope coverage 2 must link an existing test mutation by adding its path to evidencePaths and its order to operationOrders: " +
+                "order 3 (frontend/src/test/TypographyTest.kt).",
             repositoryScopeCoverageDiagnostic(
                 scope,
                 complete.copy(

@@ -914,6 +914,12 @@ internal fun repositoryScopeCoverageDiagnostic(
             val regressionSatisfied = if (requiredTestPaths.isEmpty()) changedTestPaths.isNotEmpty()
             else requiredTestPaths.any { it in changedTestPaths }
             if (requiresTestSource(coverage.scope) && !regressionSatisfied) {
+                val availableTestOperations = output.operations.filter {
+                    it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path)
+                }
+                if (requiredTestPaths.isEmpty() && availableTestOperations.isNotEmpty()) {
+                    return unlinkedTestSourceOperationDiagnostic(index, availableTestOperations)
+                }
                 return testSourceOperationDiagnostic(index, requiredTestPaths)
             }
             val unsatisfiedPaths = coverage.evidencePaths
@@ -1167,6 +1173,12 @@ private fun testSourceOperationDiagnostic(scopeIndex: Int, requiredTestPaths: Li
     return "Scope coverage ${scopeIndex + 1} requires a CREATE or MODIFY operation for its pinned test source path: $paths. " +
         "DELETE and compliant evidence cannot satisfy regression scope."
 }
+
+private fun unlinkedTestSourceOperationDiagnostic(
+    scopeIndex: Int,
+    operations: List<ExecutionPlanOperation>,
+): String = "Scope coverage ${scopeIndex + 1} must link an existing test mutation by adding its path to evidencePaths and its order to operationOrders: " +
+    operations.joinToString(", ") { "order ${it.order} (${it.path})" } + "."
 
 internal fun requiredRepositoryEvidencePaths(
     selectors: List<RepositoryEvidenceSelector>,
