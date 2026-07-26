@@ -549,6 +549,7 @@ class CompanyCircuitTest {
                 "Attempted to reuse evidence from the superseded candidate.",
             ).status,
         )
+        assertTrue(company.projectView(1).acceptances.isEmpty())
 
         assertEquals(CompanyAuditTickStatus.ACCEPTED, audit.tick().status)
         assertEquals(CompanyAuditTickStatus.ACCEPTED, audit.tick().status)

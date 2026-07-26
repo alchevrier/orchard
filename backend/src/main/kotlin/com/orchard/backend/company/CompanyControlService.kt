@@ -376,7 +376,7 @@ class CompanyControlService(
         }.groupBy { it.role }.mapValues { (_, values) -> values.maxBy { it.auditId } }
         if (events.mapNotNull { it.audit }.any {
             it.runId == runId && it.candidateRevision == candidateRevision &&
-                it.candidateDiffHash == candidateDiffHash && it.status != AUDIT_CONFORMING
+                it.candidateDiffHash == candidateDiffHash && it.status == AUDIT_VIOLATION
             }
         ) return CompanyMutationResult(CompanyMutationStatus.AUDIT_VIOLATION)
         if (!audits.keys.containsAll(requiredRoles)) return CompanyMutationResult(CompanyMutationStatus.AUDIT_INCOMPLETE)

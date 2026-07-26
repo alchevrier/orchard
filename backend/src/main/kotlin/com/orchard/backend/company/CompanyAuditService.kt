@@ -172,7 +172,7 @@ class CompanyAuditService(
         val ruleSet = project.ruleSet ?: return CompanyAuditTickResult(CompanyAuditTickStatus.INVALID_JUDGMENT, run.runId)
         val completedRoles = project.audits.filter {
             it.runId == run.runId && it.candidateRevision == revision && it.candidateDiffHash == sourceDiff.outputHash &&
-                it.genesisHash == ruleSet.genesisHash && it.ruleSetHash == ruleSet.hash
+                it.genesisHash == ruleSet.genesisHash && it.ruleSetHash == ruleSet.hash && it.status == AUDIT_CONFORMING
         }.mapTo(hashSetOf()) { it.role }
         val role = listOf(ROLE_ARCHITECTURE_AUDITOR, ROLE_QUALITY_AUDITOR).firstOrNull { it !in completedRoles }
         if (role == null) {
@@ -341,6 +341,13 @@ class CompanyAuditService(
             findings,
             proposal.rationale,
         )
+        if (recorded.status == CompanyMutationStatus.EVIDENCE_STALE) {
+            val diagnostic = "Audit judgment relied on stale or incomplete candidate evidence."
+            if (!blockInvalidAttempt(run.runId, role, revision, sourceDiff.outputHash, diagnostic)) {
+                return CompanyAuditTickResult(CompanyAuditTickStatus.STORAGE_UNAVAILABLE, run.runId, role)
+            }
+            return CompanyAuditTickResult(CompanyAuditTickStatus.INVALID_JUDGMENT, run.runId, role, recorded.status, diagnostic)
+        }
         if (recorded.status == CompanyMutationStatus.AUDIT_VIOLATION) {
             val reopened = workspace.requireAuditRepair(
                 run.runId,
@@ -378,7 +385,7 @@ class CompanyAuditService(
                     view.acceptances.any { it.runId == execution.claim.runId && it.candidateRevision == result.revision } ||
                         view.audits.any {
                             it.runId == execution.claim.runId && it.candidateRevision == result.revision &&
-                                it.status != AUDIT_CONFORMING
+                                it.status == AUDIT_VIOLATION
                         }
                 }
             }
