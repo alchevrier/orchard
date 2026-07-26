@@ -949,6 +949,9 @@ class RepositoryExecutionPlanStoreTest {
 
         assertEquals(retainedOperation.copy(order = compiled.operations.indexOfFirst { it.path == uiPath } + 1), compiled.operations.first { it.path == uiPath })
         assertTrue(compiled.scopeCoverage.all { uiPath !in it.compliantEvidencePaths })
+        assertTrue(compiled.scopeCoverage.all { coverage ->
+            uiPath !in coverage.evidencePaths || compiled.operations.first { it.path == uiPath }.order in coverage.operationOrders
+        })
         assertEquals(latest, store.compileRetainedExactPathOperations(21, "a".repeat(40), setOf("other/Test.kt"), latest))
     }
 
