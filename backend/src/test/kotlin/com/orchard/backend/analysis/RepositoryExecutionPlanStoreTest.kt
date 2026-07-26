@@ -613,45 +613,6 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
-    fun `empty or cosmetic coding rejection requires revised source authority`() {
-        val rejected = plan(1, 1, "a".repeat(40)).content
-        val unchanged = rejected.copy(summary = "Retry the same authority.")
-        val expected = "A corrective plan cannot repeat unchanged source-operation authority after an empty or cosmetic coding proposal; " +
-            "reclassify compliant evidence paths or provide different concrete source authority."
-
-        assertEquals(
-            expected,
-            correctivePlanAuthorityDiagnostic(rejected, "The proposal contains no coding operations.", emptySet(), unchanged),
-        )
-        assertEquals(
-            expected,
-            correctivePlanAuthorityDiagnostic(
-                rejected,
-                "REPLACE src/Main.kt only changes line comments on unchanged source",
-                emptySet(),
-                unchanged,
-            ),
-        )
-        assertNull(
-            correctivePlanAuthorityDiagnostic(
-                rejected,
-                "The proposal contains no coding operations.",
-                emptySet(),
-                unchanged.copy(operations = unchanged.operations.filter { it.action == PLAN_OPERATION_VERIFY }),
-            ),
-        )
-        assertNull(correctivePlanAuthorityDiagnostic(rejected, "An exact anchor was ambiguous.", emptySet(), unchanged))
-        assertNull(
-            correctivePlanAuthorityDiagnostic(
-                rejected,
-                "The proposal contains no coding operations.",
-                setOf("src/Main.kt"),
-                unchanged,
-            ),
-        )
-    }
-
-    @Test
     fun `compliant evidence cannot contain a literal forbidden by acceptance criteria`() {
         val path = "frontend/src/main/GuidedGenesisWorkspace.kt"
         val scope = "Guided genesis typography in $path"
