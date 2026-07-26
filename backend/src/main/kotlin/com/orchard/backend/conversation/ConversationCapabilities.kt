@@ -669,7 +669,11 @@ fun defaultConversationCapabilities(
                 require(payload.workItemId > 0)
                 val result = service.propose(payload.workItemId, commandReference(command))
                 if (result.status != ProposalGenerationStatus.CREATED) {
-                    return failure("Work-definition proposal was not created: ${result.status}.", "WORK_ITEM", payload.workItemId.toString())
+                    return failure(
+                        "Work-definition proposal was not created: ${result.status}. ${result.diagnostic}".trim(),
+                        "WORK_ITEM",
+                        payload.workItemId.toString(),
+                    )
                 }
                 val proposal = result.snapshot.definitionProposals
                     .filter { it.proposal.workItemId == payload.workItemId }

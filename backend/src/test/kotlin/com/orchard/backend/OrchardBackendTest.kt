@@ -1546,6 +1546,32 @@ class DefinitionIntelligenceServiceTest {
     }
 
     @Test
+    fun reportsBoundedSchemaDiagnosticForMissingDefinitionField() = runTest {
+        val workspace = definitionWorkspace()
+        val output = proposalJson().replace("\"requestedOutcome\": \"Complete the bounded task\",", "")
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "missing-field",
+                "test",
+                "missing-field",
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int) =
+                com.orchard.backend.vector.ModelGeneration(output, 1_000, 200)
+        }
+
+        val result = DefinitionIntelligenceService(workspace, provider, systemPrompt = "policy").propose(4)
+
+        assertEquals(ProposalGenerationStatus.INVALID_OUTPUT, result.status)
+        assertTrue(result.diagnostic.startsWith("Definition JSON did not match the required schema:"))
+        assertTrue(result.diagnostic.contains("requestedOutcome"))
+        assertTrue(result.diagnostic.length <= 310)
+    }
+
+    @Test
     fun recordsCancelledModelInvocationBeforePropagatingCancellation() = runTest {
         val workspace = definitionWorkspace()
         val provider = object : ModelProvider {

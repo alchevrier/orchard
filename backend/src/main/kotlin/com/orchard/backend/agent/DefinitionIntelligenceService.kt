@@ -57,6 +57,7 @@ enum class ProposalGenerationStatus {
 data class ProposalGenerationResult(
     val status: ProposalGenerationStatus,
     val snapshot: WorkspaceSnapshot,
+    val diagnostic: String = "",
 )
 
 class DefinitionIntelligenceService(
@@ -273,9 +274,10 @@ class DefinitionIntelligenceService(
         val outputWithinBudget = generation.promptTokens <= profile.inputBudgetTokens &&
             generation.completionTokens <= profile.outputBudgetTokens &&
             estimateModelTokens(generation.text) <= profile.outputBudgetTokens
-        val output = if (outputWithinBudget) {
-            runCatching { strictOutputJson.decodeFromString<DefinitionProposalOutput>(generation.text) }.getOrNull()
+        val decoded = if (outputWithinBudget) {
+            runCatching { strictOutputJson.decodeFromString<DefinitionProposalOutput>(generation.text) }
         } else null
+        val output = decoded?.getOrNull()
         val execution = recordExecution(
             profile,
             binding,
@@ -288,7 +290,19 @@ class DefinitionIntelligenceService(
             output != null,
             admission.evidence,
         ) ?: return result(ProposalGenerationStatus.STORAGE_UNAVAILABLE)
-        if (output == null) return result(ProposalGenerationStatus.INVALID_OUTPUT)
+        if (output == null) {
+            val diagnostic = if (!outputWithinBudget) {
+                "Model output exceeded the execution profile budget."
+            } else {
+                decoded?.exceptionOrNull()?.message
+                    ?.lineSequence()
+                    ?.firstOrNull()
+                    ?.take(256)
+                    ?.let { "Definition JSON did not match the required schema: $it" }
+                    ?: "Definition JSON did not match the required schema."
+            }
+            return result(ProposalGenerationStatus.INVALID_OUTPUT, diagnostic)
+        }
         val recorded = workspace.recordDefinitionProposal(
             workItemId = workItemId,
             actor = COLLABORATOR_LOCAL_LLM,
@@ -315,12 +329,15 @@ class DefinitionIntelligenceService(
             DefinitionCollaborationStatus.WORK_ITEM_NOT_FOUND -> result(ProposalGenerationStatus.WORK_ITEM_NOT_FOUND)
             DefinitionCollaborationStatus.STORAGE_UNAVAILABLE -> result(ProposalGenerationStatus.STORAGE_UNAVAILABLE)
             DefinitionCollaborationStatus.PROPOSAL_NOT_FOUND,
-            DefinitionCollaborationStatus.INVALID_RECORD -> result(ProposalGenerationStatus.INVALID_OUTPUT)
+            DefinitionCollaborationStatus.INVALID_RECORD -> result(
+                ProposalGenerationStatus.INVALID_OUTPUT,
+                "Definition JSON decoded but failed semantic validation.",
+            )
         }
     }
 
-    private fun result(status: ProposalGenerationStatus): ProposalGenerationResult =
-        ProposalGenerationResult(status, workspace.snapshot(MESSAGE_DEFINITION_COLLABORATION))
+    private fun result(status: ProposalGenerationStatus, diagnostic: String = ""): ProposalGenerationResult =
+        ProposalGenerationResult(status, workspace.snapshot(MESSAGE_DEFINITION_COLLABORATION), diagnostic)
 
     private fun recordExecution(
         profile: ModelExecutionProfile,
