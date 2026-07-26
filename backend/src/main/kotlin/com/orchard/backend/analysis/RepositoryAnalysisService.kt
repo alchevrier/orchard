@@ -880,7 +880,7 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
     val files = context.files.associateBy { it.path }
     output.scopeCoverage.forEach { coverage ->
         coverage.compliantEvidencePaths.forEach { path ->
-            val content = files[path]?.content ?: return@forEach
+            val content = files[path]?.content ?: return "Scope '${coverage.scope}' marks $path compliant, but pinned evidence is unavailable."
             forbiddenLiterals.forEach { literal ->
                 val count = lexicalEvidenceCount(content, literal)
                 if (count > 0) {

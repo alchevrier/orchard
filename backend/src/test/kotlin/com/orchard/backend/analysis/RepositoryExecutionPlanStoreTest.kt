@@ -693,6 +693,14 @@ class RepositoryExecutionPlanStoreTest {
             ),
             output,
         ))
+        assertEquals(
+            "Scope '$scope' marks $path compliant, but pinned evidence is unavailable.",
+            repositoryForbiddenLiteralComplianceDiagnostic(
+                listOf(criterion),
+                CodingRepositoryContext(emptyList(), omittedFileCount = 1),
+                output,
+            ),
+        )
     }
 
     @Test
