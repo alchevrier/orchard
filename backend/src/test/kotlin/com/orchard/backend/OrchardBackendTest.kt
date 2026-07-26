@@ -1519,6 +1519,33 @@ class DefinitionIntelligenceServiceTest {
     }
 
     @Test
+    fun acceptsSchemaCompleteDefinitionWithUnknownModelMetadata() = runTest {
+        val workspace = definitionWorkspace()
+        val output = proposalJson().replace(
+                "\"observations\":",
+                "\"modelMetadata\": {\"confidence\": \"high\"}, \"observations\":",
+            )
+        val provider = object : ModelProvider {
+            override suspend fun triage(prompt: String): String = error("unused")
+            override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
+            override fun bindingProfile() = ModelBindingProfile(
+                "unknown-metadata",
+                "test",
+                "unknown-metadata",
+                14_000,
+                setOf(MODEL_CAPABILITY_STRICT_JSON),
+            )
+            override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int) =
+                com.orchard.backend.vector.ModelGeneration(output, 1_000, 200)
+        }
+
+        val result = DefinitionIntelligenceService(workspace, provider, systemPrompt = "policy").propose(4)
+
+        assertEquals(ProposalGenerationStatus.CREATED, result.status)
+        assertEquals("Complete the bounded task", result.snapshot.definitionProposals.single().proposal.content.definition.requestedOutcome)
+    }
+
+    @Test
     fun recordsCancelledModelInvocationBeforePropagatingCancellation() = runTest {
         val workspace = definitionWorkspace()
         val provider = object : ModelProvider {

@@ -68,7 +68,7 @@ class DefinitionIntelligenceService(
     private val systemPrompt: String = loadPrompt(),
 ) {
     private val workItemMutexes = ConcurrentHashMap<Int, Mutex>()
-    private val strictOutputJson = Json { encodeDefaults = true }
+    private val strictOutputJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     constructor(
         workspace: WorkspaceStore,
