@@ -93,6 +93,7 @@ class ProjectReportService(
     private val conversationConductor: ConversationConductorService? = null,
     private val now: () -> String = { Instant.now().toString() },
     private val latestBaselineAnalysis: ((Int) -> RepositoryBaselineAnalysis?)? = null,
+    private val governedDeliveryEvidence: (Long) -> List<ReportEvidenceReference> = { emptyList() },
 ) {
     private val nextBaselineAttemptAt = mutableMapOf<Int, Instant>()
 
@@ -114,7 +115,10 @@ class ProjectReportService(
         val runs = snapshot.workflowRuns.filter { projectId == null || it.context.projectId == projectId }
         runs.forEach { run ->
             val ticket = entities[run.context.workItemId] ?: return@forEach
-            val sourceHash = stagedPlanHash(serviceJson.encodeToString(run))
+            val deliveryEvidence = governedDeliveryEvidence(run.runId)
+            val sourceHash = stagedPlanHash(
+                serviceJson.encodeToString(run) + serviceJson.encodeToString(deliveryEvidence)
+            )
             val reportState = when (run.state) {
                 RUN_STATE_EVIDENCE_BLOCKED, RUN_STATE_CANCELLED -> REPORT_STATE_BLOCKED
                 RUN_STATE_DONE -> REPORT_STATE_COMPLETED
@@ -159,7 +163,7 @@ class ProjectReportService(
                             hash = evidence.outputHash,
                             description = evidence.summary,
                         )
-                    },
+                    } + deliveryEvidence,
                 )),
                 createdAt = run.evidence.lastOrNull()?.recordedAt ?: run.createdAt,
             )

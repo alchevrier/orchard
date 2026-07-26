@@ -56,6 +56,7 @@ class ProjectInboxIntegrationTest {
             assertEquals(RepositoryBindStatus.BOUND, firstWorkspace.bindRepository(1, repository.toString()).status)
             val revision = requireNotNull(firstBindings.resolveHead(1)).commitHash
             var assessment = null as com.orchard.backend.analysis.RepositoryObjectiveAssessment?
+            var deliveryEvidence = emptyList<ReportEvidenceReference>()
             val firstConductor = conductor(state)
             val firstReports = ProjectReportService(
                 firstWorkspace,
@@ -63,6 +64,7 @@ class ProjectInboxIntegrationTest {
                 FileProjectReportStore(state),
                 latestAssessment = { assessment },
                 conversationConductor = firstConductor,
+                governedDeliveryEvidence = { deliveryEvidence },
             )
 
             assertEquals("PENDING", firstReports.inbox(1).reports.single().revision.state)
@@ -123,7 +125,18 @@ class ProjectInboxIntegrationTest {
             ).status)
             assertEquals(WorkflowStartStatus.CREATED, firstWorkspace.startWorkflow(4).status)
             firstReports.synchronizeTicketReports(1)
-            val ticketReport = firstReports.inbox(1).reports.single { it.report.scope == ReportScope(REPORT_SCOPE_TICKET, "4") }
+            val initialTicketReport = firstReports.inbox(1).reports.single {
+                it.report.scope == ReportScope(REPORT_SCOPE_TICKET, "4")
+            }
+            deliveryEvidence = listOf(ReportEvidenceReference(
+                "CANDIDATE_PR", "1", revision, "d".repeat(64), "Candidate PR is ready for independent review.",
+            ))
+            firstReports.synchronizeTicketReports(1)
+            val ticketReport = firstReports.inbox(1).reports
+                .filter { it.report.scope == ReportScope(REPORT_SCOPE_TICKET, "4") }
+                .maxBy { it.revision.revision }
+            assertTrue(ticketReport.revision.revision > initialTicketReport.revision.revision)
+            assertEquals("CANDIDATE_PR", ticketReport.items.single().evidence.last().type)
             firstReports.subscribe(1, ticketReport.report.reportId, ReportSubscriptionRequest(REPORT_MODE_ALL))
             val reportThread = firstReports.resolveThread(
                 1, ReportThreadRequest(REPORT_TARGET_REPORT, ticketReport.report.reportId),
@@ -138,16 +151,18 @@ class ProjectInboxIntegrationTest {
                 recoveredBindings,
                 FileProjectReportStore(state),
                 conversationConductor = recoveredConductor,
+                governedDeliveryEvidence = { deliveryEvidence },
             )
             val recoveredInbox = recoveredReports.inbox(1)
-            val recoveredTicket = recoveredInbox.reports.single {
+            val recoveredTicket = recoveredInbox.reports.filter {
                 it.report.reportId == ticketReport.report.reportId && it.revision.sourceType == "WORKFLOW_RUN"
-            }
+            }.maxBy { it.revision.revision }
 
             assertEquals(GENESIS_READY, recoveredWorkspace.snapshot(0).projectGenesis.single().phase)
             assertEquals("Operate the project from a correlated Inbox", recoveredWorkspace.entities().single { it.id == epicId }.title)
             assertEquals(1, recoveredWorkspace.snapshot(0).workflowRuns.size)
             assertTrue(recoveredTicket.subscribed)
+            assertEquals("CANDIDATE_PR", recoveredTicket.items.single().evidence.last().type)
             assertTrue(recoveredInbox.reports.any { it.revision.sourceType == "REPOSITORY_OBJECTIVE_ASSESSMENT" })
             assertEquals(reportThread, recoveredReports.resolveThread(
                 1, ReportThreadRequest(REPORT_TARGET_REPORT, ticketReport.report.reportId),

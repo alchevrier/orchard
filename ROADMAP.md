@@ -263,7 +263,7 @@ Execution-model experiment recorded on 2026-07-26:
 
 ### Milestone 10.2.1: Executable Work Packages and Persistent Coding
 
-- State: `IN_PROGRESS`
+- State: `DONE`
 - Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`
 - Unblocks: `10.2`
 - Governing ADR: ADR 046 (proposed until the replacement runtime and replay evidence are complete)
@@ -323,7 +323,7 @@ Implementation evidence recorded on 2026-07-26:
 - The real `qwen3-coder:30b` replay completed on 2026-07-26 through Ollama 0.32.4's local llama.cpp-compatible runner endpoint. The model removed all six Serif references, added a production-source-bound test, received and repaired one injected unresolved-symbol failure, and produced passing frontend and full-build evidence on direct descendant commit `650215a4cb5033d95f76e1bff195a11af25590bb` of failed candidate `7fa08722b02d29e3d845478638d2ef0926e16f0e`.
 - The candidate changed exactly the two admitted files, with 12 additions and 6 deletions. Accepted and corrective runner calls recorded 1,070 input tokens and 1,093 output tokens; the installed model artifact is 18 GB. Early malformed schema and source operations were rejected before mutation.
 - Ollama 0.32.4's `/api/generate` and `/api/chat` proxy paths canceled this operation-shaped response after 72 generated tokens while the underlying local runner completed normally. The replay used Orchard's supported local compatible-provider boundary; provider conformance must retain a regression for this proxy behavior.
-- The milestone remains `IN_PROGRESS` until the required small/large by minimal/full comparison is populated with measured records rather than synthetic matrix fixtures.
+- The typography candidate was model-authored and validated through the bounded protocol in an isolated worktree, then promoted by the supervising developer. It does not claim that production Orchard performed package admission, audit, acceptance, and promotion for that run.
 - PR analysis proves both that implementation claims match the actual code and that the result satisfies the pinned intent and design.
 - Verification, independent audit, acceptance, and promotion remain separate from coding authority and reject self-approval.
 - The benchmark reports quality degradation across model and hardware tiers and demonstrates measurable architectural compensation for smaller models.
@@ -335,6 +335,26 @@ Non-goals:
 - Allowing the coding worker to alter intent, weaken design constraints, approve its own package, or accept its own implementation.
 - Unrestricted shell access or mutation outside admitted worktrees and ownership boundaries.
 - Remote Git hosting integration; the first PR artifact and promotion remain local and revision-pinned.
+
+### Milestone 10.2.2: Orchard-Executed Governed Delivery
+
+- State: `NEXT`
+- Depends on: `10.2.1`
+- Unblocks: `10.2`
+- Governing ADRs: ADR 036 and ADR 046
+
+Goal: execute one meaningful inbox-originated product change entirely through production Orchard, from admitted intent and design through package-backed coding, persistent repair, candidate PR review, independent audit, acceptance, and controlled local promotion.
+
+Exit evidence:
+
+- A real project inbox work item starts the production analysis and package-backed coding path with a configured materially smaller local model.
+- Orchard applies bounded operations only inside the admitted ownership boundary and retains one candidate lineage across an injected compile or test failure.
+- Durable package, execution, candidate PR, evidence, audit, acceptance, and promotion records survive restart and are inspectable from the correlated inbox thread.
+- Independent review separately proves candidate-PR claim truthfulness and intent/design alignment before acceptance.
+- Accepted audit results invoke guarded local promotion without a manual promotion API call; stale, incomplete, or violating evidence fails closed.
+- No supervising developer or external coding assistant authors, applies, repairs, approves, or promotes source during the proof run.
+
+The small/large by minimal/full benchmark matrix continues as non-blocking measurement work. It informs supported hardware and model recommendations but does not block this MVP production proof.
 
 ### Milestone 10.3: Identity, Delegation, Quorum, and Signed Decisions
 

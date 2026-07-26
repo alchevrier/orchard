@@ -51,6 +51,8 @@ The server installs `ContentNegotiation` with `kotlinx.serialization`. Decoding 
 
 Work definitions may include `repositoryEvidenceSelectors`. Each selector binds stable `scopeIndexes` to repository-relative `pathGlobs` and optional exact `contentLiterals`. `ALL_MATCHES` requires every matching file; `AFFINE_TEST` selects the matching test path with the strongest common path prefix to its `affinitySelectorId`. Empty selector lists are omitted so historical definition hashes remain unchanged.
 
+Ticket-scoped project report revisions include typed evidence for candidate PRs, independent audits, company acceptance, and local promotion. Each new governed-delivery record changes the report source hash, producing an immutable inbox revision that remains correlated with the ticket's canonical conversation thread.
+
 ## Repository Analysis and Coding
 
 | Method | Path | Purpose |

@@ -309,6 +309,36 @@ fun main() {
         genesisIntelligence::latestRepositoryAssessment,
         conversationConductor,
         latestBaselineAnalysis = repositoryBaselineAnalysis::latest,
+        governedDeliveryEvidence = { runId ->
+            buildList {
+                codingWorker.pullRequests().filter { it.runId == runId }.forEach { pullRequest ->
+                    add(com.orchard.backend.report.ReportEvidenceReference(
+                        "CANDIDATE_PR", pullRequest.pullRequestId.toString(), pullRequest.candidateRevision,
+                        pullRequest.hash, "Candidate PR changed ${pullRequest.changedPaths.size} admitted paths.",
+                    ))
+                }
+                companyControl.projectViews().forEach { project ->
+                    project.audits.filter { it.runId == runId }.forEach { audit ->
+                        add(com.orchard.backend.report.ReportEvidenceReference(
+                            "INDEPENDENT_AUDIT", audit.auditId.toString(), audit.candidateRevision, audit.hash,
+                            "${audit.role} resolved the candidate as ${audit.status}.",
+                        ))
+                    }
+                    project.acceptances.filter { it.runId == runId }.forEach { acceptance ->
+                        add(com.orchard.backend.report.ReportEvidenceReference(
+                            "COMPANY_ACCEPTANCE", acceptance.acceptanceId.toString(), acceptance.candidateRevision,
+                            acceptance.hash, "Independent audit authority accepted the candidate.",
+                        ))
+                    }
+                    project.promotions.filter { it.runId == runId }.forEach { promotion ->
+                        add(com.orchard.backend.report.ReportEvidenceReference(
+                            "LOCAL_PROMOTION", promotion.promotionId.toString(), promotion.destinationRevision,
+                            promotion.hash, "Orchard promoted the accepted candidate locally.",
+                        ))
+                    }
+                }
+            }
+        },
     )
     val baselineCompiler = RepositoryBaselineCompiler(projectReports, repositoryBaselineAnalysis)
     val baselineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -385,6 +415,12 @@ fun main() {
                                 Level.INFO,
                                 "Independent company audit tick resolved as ${result.status} for run ${result.runId}: ${result.diagnostic}",
                             )
+                            promoteAcceptedAudit(result.status, result.runId, companyControl)?.let { promotionStatus ->
+                                AUDIT_LOGGER.log(
+                                    if (promotionStatus == CompanyMutationStatus.RECORDED) Level.INFO else Level.WARNING,
+                                    "Accepted candidate promotion resolved as $promotionStatus for run ${result.runId}.",
+                                )
+                            }
                         }
                 }
             }.onFailure { error ->
@@ -440,6 +476,18 @@ fun main() {
         modelProviderRegistry.close()
     })
     workspaceServer.start(wait = true)
+}
+
+internal fun promoteAcceptedAudit(
+    status: com.orchard.backend.company.CompanyAuditTickStatus,
+    runId: Long?,
+    companyControl: CompanyControlService,
+): CompanyMutationStatus? = if (
+    status == com.orchard.backend.company.CompanyAuditTickStatus.ACCEPTED && runId != null
+) {
+    companyControl.promote(runId).status
+} else {
+    null
 }
 
 fun Application.workspaceApi(

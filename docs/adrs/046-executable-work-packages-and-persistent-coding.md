@@ -2,9 +2,11 @@
 
 ## Status
 
-Proposed
+Accepted
 
 Supersedes the one-shot proposal and failed-candidate reversion portions of ADR 036. Its repository, process, evidence, audit, acceptance, and promotion boundaries remain in force.
+
+Accepted after the controlled `qwen3-coder:30b` replay demonstrated bounded implementation and same-lineage repair with a materially smaller model. That replay was supervised and promoted outside production Orchard; Milestone 10.2.2 separately governs the first fully Orchard-executed delivery proof.
 
 ## Context
 

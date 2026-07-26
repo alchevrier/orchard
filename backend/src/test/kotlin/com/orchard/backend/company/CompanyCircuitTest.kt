@@ -1,6 +1,7 @@
 package com.orchard.backend.company
 
 import com.orchard.backend.workspaceApi
+import com.orchard.backend.promoteAcceptedAudit
 import com.orchard.backend.analysis.DISPOSITION_PARTIALLY_IMPLEMENTED
 import com.orchard.backend.analysis.DISPOSITION_SCAFFOLD_ONLY
 import com.orchard.backend.analysis.ExecutionPlanOperation
@@ -577,7 +578,8 @@ class CompanyCircuitTest {
         )
         assertTrue(company.projectView(1).acceptances.isEmpty())
 
-        assertEquals(CompanyAuditTickStatus.ACCEPTED, audit.tick().status)
+        val acceptedAudit = audit.tick()
+        assertEquals(CompanyAuditTickStatus.ACCEPTED, acceptedAudit.status)
         assertEquals(CompanyAuditTickStatus.ACCEPTED, audit.tick().status)
         assertEquals(CompanyAuditTickStatus.ACCEPTED, audit.tick().status)
         val accepted = company.projectView(1).acceptances.single()
@@ -587,7 +589,10 @@ class CompanyCircuitTest {
         assertEquals(CompanyMutationStatus.RECORDED, company.assign(runId, ROLE_QUALITY_AUDITOR, RISK_HIGH).status)
         assertTrue(requireNotNull(company.assignment(runId, ROLE_QUALITY_AUDITOR)).evidenceSampleCount >= 1)
 
-        assertEquals(CompanyMutationStatus.RECORDED, company.promote(runId).status)
+        assertEquals(
+            CompanyMutationStatus.RECORDED,
+            promoteAcceptedAudit(acceptedAudit.status, acceptedAudit.runId, company),
+        )
         val promoted = company.projectView(1).promotions.single()
         assertEquals(repairedRevision, promoted.destinationRevision)
         assertEquals(repairedRevision, bindings.resolveHead(1)?.commitHash)
