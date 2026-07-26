@@ -217,8 +217,9 @@ class RepositoryAnalysisService(
         val workspacePath = run.context.workspaceReservation?.path ?: return null
         val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
         val context = runCatching { workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run), selectors) }.getOrNull() ?: return null
+        val complianceContext = runCatching { collectComplianceContext(workspacePath, run, selectors, context) }.getOrNull() ?: return null
         return staticCandidates
-            .filter { it.coversAcceptedScope(run, context) }
+            .filter { it.coversAcceptedScope(run, context, complianceContext) }
             .maxByOrNull { it.revision }
     }
 
@@ -250,7 +251,13 @@ class RepositoryAnalysisService(
                         candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
                     )
                 }.getOrNull() ?: return@filter true
-                val currentPlan = staticCandidates.filter { it.coversAcceptedScope(candidate, context) }.maxByOrNull { it.revision }
+                val selectors = candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
+                val complianceContext = runCatching {
+                    collectComplianceContext(workspacePath, candidate, selectors, context)
+                }.getOrNull() ?: return@filter true
+                val currentPlan = staticCandidates.filter {
+                    it.coversAcceptedScope(candidate, context, complianceContext)
+                }.maxByOrNull { it.revision }
                 currentPlan == null || repositoryPlanRequiresRevision(currentPlan, codingAttempts)
             }
             .map { it.runId }
@@ -336,17 +343,23 @@ class RepositoryAnalysisService(
             )
         }
         val query = analysisQuery(run)
+        val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
         val context = runCatching {
             workspaceGateway.collectAnalysisContext(
                 workspacePath,
-            query,
-                run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+                query,
+                selectors,
             )
         }.getOrElse {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
         if (context.files.isEmpty()) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = "No repository evidence was selected.")
+        }
+        val complianceContext = runCatching {
+            collectComplianceContext(workspacePath, run, selectors, context)
+        }.getOrElse {
+            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
         repositoryEvidenceSelectionDiagnostic(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
@@ -492,6 +505,7 @@ class RepositoryAnalysisService(
         val invalid = validateOutput(
             run,
             boundedContext,
+            complianceContext,
             compiledOutput,
             failedCandidatePaths,
             currentPlan?.content,
@@ -537,6 +551,7 @@ class RepositoryAnalysisService(
     private fun validateOutput(
         run: WorkflowRunView,
         context: CodingRepositoryContext,
+        complianceContext: CodingRepositoryContext,
         output: RepositoryAnalysisPlanContent,
         failedCandidatePaths: Set<String>,
         rejectedPlan: RepositoryAnalysisPlanContent?,
@@ -550,7 +565,7 @@ class RepositoryAnalysisService(
         )?.let { return it }
         repositoryForbiddenLiteralComplianceDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
-            context,
+            complianceContext,
             output,
         )?.let { return it }
         repositorySourceOperationBudgetDiagnostic(output)?.let { return it }
@@ -645,6 +660,18 @@ class RepositoryAnalysisService(
             }
         }
         run.context.recalledEpisodes.forEach { appendLine("${it.problem} ${it.resolution} ${it.evidenceSummary}") }
+    }
+
+    private fun collectComplianceContext(
+        workspacePath: String,
+        run: WorkflowRunView,
+        selectors: List<RepositoryEvidenceSelector>,
+        fallback: CodingRepositoryContext,
+    ): CodingRepositoryContext {
+        val query = forbiddenComplianceLiterals(
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+        ).joinToString(" ")
+        return if (query.isBlank()) fallback else workspaceGateway.collectAnalysisContext(workspacePath, query, selectors)
     }
 
     private fun taskContext(run: WorkflowRunView): RepositoryAnalysisTaskContext {
@@ -801,6 +828,7 @@ private fun repositoryPlanRevisionDiagnostic(
 private fun RepositoryExecutionPlan.coversAcceptedScope(
     run: WorkflowRunView,
     context: CodingRepositoryContext,
+    complianceContext: CodingRepositoryContext = context,
 ): Boolean = coversAcceptedScope(run) && repositoryUniversalScopeCoverageDiagnostic(
     run.workDefinition?.definition?.scope.orEmpty(),
     run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
@@ -808,7 +836,7 @@ private fun RepositoryExecutionPlan.coversAcceptedScope(
     content,
 ) == null && repositoryForbiddenLiteralComplianceDiagnostic(
     run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
-    context,
+    complianceContext,
     content,
 ) == null
 
@@ -873,9 +901,7 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): String? {
-    val forbiddenLiterals = acceptanceCriteria.flatMap { criterion ->
-        FORBIDDEN_CONTAINS_LITERAL.findAll(criterion).map { it.groupValues[1] }.toList()
-    }.distinct()
+    val forbiddenLiterals = forbiddenComplianceLiterals(acceptanceCriteria)
     if (forbiddenLiterals.isEmpty()) return null
     val files = context.files.associateBy { it.path }
     output.scopeCoverage.forEach { coverage ->
@@ -892,6 +918,10 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
     }
     return null
 }
+
+private fun forbiddenComplianceLiterals(acceptanceCriteria: List<String>): List<String> = acceptanceCriteria.flatMap { criterion ->
+    FORBIDDEN_CONTAINS_LITERAL.findAll(criterion).map { it.groupValues[1] }.toList()
+}.distinct()
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {
     val sourceOperations = output.operations.count { it.action != PLAN_OPERATION_VERIFY }
