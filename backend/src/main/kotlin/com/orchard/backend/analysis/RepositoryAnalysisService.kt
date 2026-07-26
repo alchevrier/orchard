@@ -510,7 +510,14 @@ class RepositoryAnalysisService(
         repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
-        val resolvedOutput = compileResolvedTestQuestions(compileResolvedCreateQuestions(output))
+        val createResolvedOutput = compileResolvedCreateQuestions(output)
+        val retainedOutput = attemptStore.compileRetainedExactPathOperations(
+            run.runId,
+            baseRevision,
+            createResolvedOutput.scopeCoverage.flatMap { it.evidencePaths }.filter(::isTestSourcePath).toSet(),
+            createResolvedOutput,
+        )
+        val resolvedOutput = compileResolvedTestQuestions(retainedOutput)
         repositoryForbiddenLiteralComplianceDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             complianceContext,
