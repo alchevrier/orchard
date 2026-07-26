@@ -1417,12 +1417,20 @@ internal fun compileRepositoryScopeAuthority(
         operations = compiledOperations,
         scopeCoverage = acceptedScope.mapIndexed { index, scope ->
             val coverage = coverageByScope.getValue(canonicalAuthorityText(scope))
-            val evidencePaths = selectorIdsByScope[index]
+            val selectedEvidencePaths = selectorIdsByScope[index]
                 .flatMap { pathsBySelector[it].orEmpty() }
                 .distinct()
                 .sorted()
+            val retainedCreateOperations = coverage.operationOrders.asSequence()
+                .mapNotNull { order -> output.operations.firstOrNull { it.order == order } }
+                .filter { it.action == PLAN_OPERATION_CREATE }
+                .toList()
+            val evidencePaths = (selectedEvidencePaths + retainedCreateOperations.map { it.path }).distinct().sorted()
             val sourceOperationOrders = compiledOperations.asSequence()
-                .filter { it.action != PLAN_OPERATION_VERIFY && it.path in evidencePaths }
+                .filter { operation ->
+                    operation.action != PLAN_OPERATION_VERIFY &&
+                        (operation.path in selectedEvidencePaths || retainedCreateOperations.any { it.path == operation.path })
+                }
                 .map { it.order }
             val sourceOperationPaths = compiledOperations.asSequence()
                 .filter { it.action != PLAN_OPERATION_VERIFY }

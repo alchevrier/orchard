@@ -1418,6 +1418,39 @@ class RepositoryExecutionPlanStoreTest {
         )
     }
 
+    @Test
+    fun `scope authority retains linked create paths outside existing-file selectors`() {
+        val scope = listOf("Backend correlation authority and focused tests")
+        val test = "backend/src/test/CorrelationTest.kt"
+        val created = "backend/src/main/Correlation.kt"
+        val selectors = listOf(RepositoryEvidenceSelector(
+            selectorId = "tests",
+            scopeIndexes = listOf(0),
+            pathGlobs = listOf("backend/src/test/**"),
+        ))
+        val context = CodingRepositoryContext(
+            listOf(CodingContextFile(test, "class CorrelationTest", matchedEvidenceSelectorIds = listOf("tests"))),
+            0,
+        )
+        val original = plan(1, 1, "a".repeat(40)).content
+        val output = original.copy(
+            operations = listOf(
+                original.operations.first().copy(order = 1, action = PLAN_OPERATION_CREATE, path = created),
+                original.operations.first().copy(order = 2, action = PLAN_OPERATION_MODIFY, path = test),
+            ),
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(
+                scope = scope.single(),
+                evidencePaths = listOf(created, test),
+                operationOrders = listOf(1, 2),
+            )),
+        )
+
+        val compiled = compileRepositoryScopeAuthority(scope, selectors, context, output)
+
+        assertEquals(listOf(created, test), compiled.scopeCoverage.single().evidencePaths)
+        assertEquals(listOf(1, 2), compiled.scopeCoverage.single().operationOrders)
+    }
+
     private fun plan(planId: Long, revision: Int, baseRevision: String): RepositoryExecutionPlan =
         newRepositoryExecutionPlan(
             planId = planId,
