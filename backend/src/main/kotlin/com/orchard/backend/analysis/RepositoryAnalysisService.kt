@@ -238,6 +238,7 @@ class RepositoryAnalysisService(
 
     fun eligibleRunIds(): List<Long> {
         val plans = planStore.load()
+        val analysisAttempts = attemptStore.load()
         val codingAttempts = codingAttemptStore?.load().orEmpty()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
@@ -247,6 +248,12 @@ class RepositoryAnalysisService(
                 val currentRevision = workspaceGateway.currentRevision(workspacePath)
                 if (currentRevision != null && attemptStore.isBlocked(candidate.runId, currentRevision)) {
                     return@filter false
+                }
+                if (analysisAttempts.lastOrNull {
+                        it.runId == candidate.runId && it.baseRevision == currentRevision
+                    }?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
+                ) {
+                    return@filter true
                 }
                 val staticCandidates = plans.filter {
                     it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate)

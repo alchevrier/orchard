@@ -228,6 +228,7 @@ class CompanyCircuitTest {
         val circuit = CompanyCircuitService(workspace, company, projects)
         assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
         val codingAttempts = TransientCodingWorkerAttemptStore()
+        val analysisAttempts = TransientRepositoryAnalysisAttemptStore()
         val analysis = RepositoryAnalysisService(
             workspace,
             listOf(model),
@@ -235,6 +236,7 @@ class CompanyCircuitTest {
             LocalCodingWorkspaceGateway(),
             companyControl = company,
             codingAttemptStore = codingAttempts,
+            attemptStore = analysisAttempts,
         )
         val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
 
@@ -259,6 +261,21 @@ class CompanyCircuitTest {
         assertEquals(listOf(1, 2), analysis.plans().map { it.revision })
         assertTrue(model.analysisPrompts.last().contains(diagnostic))
         assertEquals(emptyList(), analysis.eligibleRunIds())
+
+        val currentRevision = requireNotNull(workspace.snapshot(MESSAGE_READY).workflowRuns.single().context.workspaceReservation).baseRevision
+        analysisAttempts.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId,
+                runId,
+                currentRevision,
+                ANALYSIS_ATTEMPT_BLOCKED,
+                RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name,
+                "The successor plan omitted required evidence.",
+                "a".repeat(64),
+            )
+        }
+        assertEquals(RepositoryAnalysisTickStatus.RETRY_AUTHORIZED, analysis.authorizeRetry(runId).status)
+        assertEquals(listOf(runId), analysis.eligibleRunIds())
     }
 
     @Test
