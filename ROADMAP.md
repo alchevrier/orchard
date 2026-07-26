@@ -144,7 +144,8 @@ Product contract:
 
 - One chronological conversation may contain several explicitly identified objective lanes.
 - The operator can discuss, investigate, propose, admit, start, pause, resume, reprioritize, redirect, cancel, and inspect work from the inbox thread attached to the relevant ticket or report item.
-- Project conversations live inside their Inbox items; starting one creates a durable Inbox envelope instead of an unscoped global chat.
+- Each conversation is an independent durable Inbox item that may begin without project scope and later correlate with multiple projects, topics, tickets, reports, documents, or repository revisions.
+- People may communicate chaotically across overlapping threads; Orchard compiles admitted consequences into ordered project-management, documentation, codebase, and governance projections without treating transcript text as authority.
 - The project board shows all outcomes and tickets, while the inbox exposes subscribed changes, decisions, evidence, and conversations for individual work. Both project the same durable authority.
 - Repository onboarding opens the project immediately and compiles its baseline asynchronously. Only future intent and genuine authority choices require user input.
 - Conversation records prove what was said and correlated; existing domain records remain authoritative for product, work, code, evidence, audit, policy, and promotion.
@@ -178,9 +179,9 @@ Delivery slices:
   - Monotonic activity projection from asynchronous workers into the originating objective and conversation.
 5. **Project inbox, ticket threads, and board**
   - An inbox-style desktop projection with unread, action-required, subscribed, blocked, and completed report updates while Orchard works asynchronously.
-  - One canonical thread per ticket or report item, with state, dependencies, priority, pending admissions, diagnostics, and correlated evidence.
+  - One canonical thread per independent conversation, with optional many-to-many correlation to tickets, reports, projects, documents, and repository evidence.
   - The canonical transcript, composer, objective controls, and command admissions embedded in the selected Inbox item, with board links selecting the same conversation there.
-  - New project conversations represented by one user-report Inbox envelope and one canonical thread rather than a parallel global chat entry.
+  - Every new conversation represented by one cross-project Inbox envelope and one canonical thread rather than a parallel global chat entry; later correlation never moves, merges, or replaces that thread.
   - User-created report scopes over a ticket, outcome, capability, or repository area, with subscriptions to meaningful revision-bound changes and configurable completion or continuation behavior.
   - A Jira-like project board for outcomes, epics, stories, tasks, bugs, dependencies, workflow state, and blocked authority, with direct navigation to each canonical thread.
   - Inline questioning, correction, control, review, and admission of exact proposed actions plus links into detailed authority and evidence projections.
@@ -345,9 +346,13 @@ Non-goals:
 
 Goal: execute one meaningful inbox-originated product change entirely through production Orchard, from admitted intent and design through package-backed coding, persistent repair, candidate PR review, independent audit, acceptance, and controlled local promotion.
 
+Proof target: implement the existing Milestone 10.2 independent-conversation contract. Starting a conversation creates an unscoped cross-project Inbox item; admitted downstream work is aggregated into project-management, documentation, codebase, and governance views while the canonical conversation remains independent and immutable.
+
 Exit evidence:
 
 - A real project inbox work item starts the production analysis and package-backed coding path with a configured materially smaller local model.
+- Multiple independent conversations can correlate with one authoritative work item, and one conversation can correlate with multiple domain records, without transcript merging or duplicated domain authority.
+- Discussion alone changes no consolidated view; only an exact admitted action updates the owning domain and its projections.
 - Orchard applies bounded operations only inside the admitted ownership boundary and retains one candidate lineage across an injected compile or test failure.
 - Durable package, execution, candidate PR, evidence, audit, acceptance, and promotion records survive restart and are inspectable from the correlated inbox thread.
 - Independent review separately proves candidate-PR claim truthfulness and intent/design alignment before acceptance.
