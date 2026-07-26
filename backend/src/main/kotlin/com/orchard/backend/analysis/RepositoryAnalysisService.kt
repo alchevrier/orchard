@@ -902,11 +902,15 @@ internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysi
 }
 
 private fun lexicalEvidenceCount(content: String, literal: String): Int {
-    val summarized = Regex("${Regex.escape(literal)}=(\\d+)", RegexOption.IGNORE_CASE)
-        .find(content.substringBefore(']'))
-        ?.groupValues
-        ?.get(1)
-        ?.toIntOrNull()
+    val summary = content.substringBefore(']')
+    val terminalToken = literal.lowercase().split(Regex("[^a-z0-9_]+")).last()
+    val summarized = sequenceOf(literal, terminalToken).mapNotNull { token ->
+        Regex("(?:^|[,: ]+)${Regex.escape(token)}=(\\d+)", RegexOption.IGNORE_CASE)
+            .find(summary)
+            ?.groupValues
+            ?.get(1)
+            ?.toIntOrNull()
+    }.firstOrNull()
     return summarized ?: Regex(Regex.escape(literal), RegexOption.IGNORE_CASE).findAll(content).count()
 }
 

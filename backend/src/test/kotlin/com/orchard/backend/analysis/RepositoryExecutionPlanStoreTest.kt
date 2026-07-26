@@ -669,7 +669,7 @@ class RepositoryExecutionPlanStoreTest {
                 CodingRepositoryContext(
                     listOf(CodingContextFile(
                         path,
-                        "[Orchard lexical query counts: fontfamily.serif=5, fontfamily.monospace=8]\n",
+                        "[Orchard lexical query counts: fontfamily=13, monospace=8, serif=5]\n",
                     )),
                     omittedFileCount = 0,
                 ),
@@ -686,7 +686,7 @@ class RepositoryExecutionPlanStoreTest {
             CodingRepositoryContext(
                 listOf(CodingContextFile(
                     path,
-                    "[Orchard lexical query counts: fontfamily.serif=0]\n",
+                    "[Orchard lexical query counts: fontfamily=8, serif=0]\n",
                 )),
                 omittedFileCount = 0,
             ),
