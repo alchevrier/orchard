@@ -147,6 +147,8 @@ class CodingWorkerTest {
         assertTrue(requireNotNull(result.execution?.claim?.toolchainPolicyHash).matches(Regex("[0-9a-f]{64}")))
         assertTrue(requireNotNull(model.prompt).contains("Plan instructions describe intent and do not prove that any literal exists."))
         assertTrue(model.prompt?.contains("Copy every REPLACE old value as one exact contiguous substring") == true)
+        assertTrue(model.prompt?.contains("count its exact old value in the supplied content") == true)
+        assertTrue(model.prompt?.contains("extend old with unchanged preceding and following source lines until it is unique") == true)
         assertTrue(model.prompt?.contains("A rejected REPLACE old value is a defect in the prior proposal") == true)
         assertTrue(model.prompt?.contains("rejected old-text value named in priorRejectedCodingDiagnostic as forbidden") == true)
         assertTrue(model.prompt?.contains("Every WRITE and REPLACE operation must change its target bytes") == true)

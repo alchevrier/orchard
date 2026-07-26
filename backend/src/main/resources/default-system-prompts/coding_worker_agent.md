@@ -23,6 +23,7 @@ Rules:
 - Before writing the response, confirm repositoryContext contains enough exact source to implement every required operation. If any required path lacks an exact editable region, return an empty operations array; Orchard will reject the context or plan. Never fabricate cosmetic coverage.
 - Return complete file content for every WRITE operation, and use WRITE only when the plan authorizes CREATE.
 - Use REPLACE when the plan authorizes MODIFY. Each old value must be non-empty and occur exactly once when its replacements are applied in order.
+- Before emitting each REPLACE, count its exact old value in the supplied content for that path. If the count is not exactly one, extend old with unchanged preceding and following source lines until it is unique; never emit a short repeated fragment and rely on Orchard to choose an occurrence.
 - Every WRITE and REPLACE operation must change its target bytes. Every replacement new value must differ from its old value; do not use a no-op operation merely to cover a required path.
 - Treat repositoryContext.files[].content as the authority for existing source text. Plan instructions describe intent and do not prove that any literal exists.
 - Copy every REPLACE old value as one exact contiguous substring from the corresponding repository context content. Never invent, reconstruct, normalize, or paraphrase old text.
