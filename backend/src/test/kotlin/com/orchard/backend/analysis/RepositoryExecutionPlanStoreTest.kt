@@ -778,6 +778,16 @@ class RepositoryExecutionPlanStoreTest {
                 listOf(absenceClaim),
             ),
         )
+        assertEquals(
+            "Architect escalation contradicts inherited platform-default typography on $binderPath: pinned evidence contains FontFamily.Serif 0 times, " +
+                "so an explicit FontFamily.Default declaration is not required. Claim: $absenceClaim",
+            repositoryArchitectEscalationEvidenceDiagnostic(
+                listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0)),
+                CodingRepositoryContext(emptyList(), 0),
+                emptyList(),
+                listOf(absenceClaim),
+            ),
+        )
     }
 
     @Test

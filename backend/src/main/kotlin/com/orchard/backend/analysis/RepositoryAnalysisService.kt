@@ -980,6 +980,17 @@ internal fun repositoryArchitectEscalationEvidenceDiagnostic(
         } ?: return@firstNotNullOfOrNull null
         "Architect escalation contradicts pinned evidence: ${fact.path} contains ${fact.literal} 0 times, but unresolvedQuestions claims: $unsupported"
     }?.let { return it }
+    facts.firstNotNullOfOrNull { fact ->
+        if (fact.count != 0) return@firstNotNullOfOrNull null
+        val basename = fact.path.substringAfterLast('/')
+        val unsupported = unresolvedQuestions.firstOrNull { question ->
+            (question.contains(fact.path, ignoreCase = true) || question.contains(basename, ignoreCase = true)) &&
+                question.contains("FontFamily.Default", ignoreCase = true) &&
+                question.contains(Regex("\\b(?:lacks?|missing|omits?)\\b", RegexOption.IGNORE_CASE)) &&
+                question.contains(Regex("\\b(?:modify|mutation)\\b", RegexOption.IGNORE_CASE))
+        } ?: return@firstNotNullOfOrNull null
+        "Architect escalation contradicts inherited platform-default typography on ${fact.path}: pinned evidence contains ${fact.literal} 0 times, so an explicit FontFamily.Default declaration is not required. Claim: $unsupported"
+    }?.let { return it }
     context.files.firstNotNullOfOrNull { file ->
         val basename = file.path.substringAfterLast('/')
         val unsupported = unresolvedQuestions.firstOrNull { question ->
