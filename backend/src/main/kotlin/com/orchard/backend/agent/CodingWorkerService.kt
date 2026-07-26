@@ -1429,7 +1429,16 @@ internal fun sourceGroundedRetryDiagnostic(
                 .filterNot { it.startsWith("[Orchard excerpt lines ") }
                 .joinToString("\n")
                 .let { takeUtf8Prefix(it, MAX_RETRY_SOURCE_PREFIX_BYTES) }
-            (listOf(sourcePrefix) + sourceBackedDeclarationAnchors(contextFile).take(1))
+            val literalAnchors = RETRY_DIAGNOSTIC_LITERAL.findAll(diagnostic)
+                .map { it.value }
+                .filter { literal -> Regex(Regex.escape(literal)).findAll(contextFile.content).count() > 1 }
+                .distinct()
+                .map { ambiguousReplacementAnchorDiagnostic(contextFile.content, it) }
+                .filter(String::isNotEmpty)
+                .map { takeUtf8Prefix(it.substringAfter(": "), MAX_RETRY_LITERAL_ANCHOR_BYTES) }
+                .take(1)
+                .toList()
+            (literalAnchors + sourcePrefix + sourceBackedDeclarationAnchors(contextFile).take(1))
                 .filter(String::isNotEmpty)
                 .distinct()
                 .map { contextFile.path to it }
@@ -1545,10 +1554,12 @@ private const val SOURCE_ANCHOR_LINES = 4
 private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
 private const val MAX_SOURCE_ANCHOR_BYTES = 1_024
 private const val MAX_RETRY_SOURCE_PREFIX_BYTES = 512
+private const val MAX_RETRY_LITERAL_ANCHOR_BYTES = 2_048
 private const val MAX_RETRY_SOURCE_ANCHORS = 4
 private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024
 private const val INVALID_CODING_PROPOSAL_DIAGNOSTIC = "The coding model returned invalid or oversized proposal JSON."
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
 private const val MIN_SOURCE_ANCHOR_TOKEN_LENGTH = 4
 private val CAMEL_CASE_TOKEN = Regex("[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
+private val RETRY_DIAGNOSTIC_LITERAL = Regex("[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+")
 private val TAUTOLOGICAL_TRUE_ASSERTION = Regex("\\b(?:assertTrue\\s*\\(\\s*true\\s*\\)|assertEquals\\s*\\(\\s*true\\s*,\\s*true\\s*\\))")

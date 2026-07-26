@@ -566,8 +566,10 @@ class CodingWorkerTest {
             path = path,
             content = """[Orchard excerpt lines 40-46 of 100]
                 |private fun UnrelatedPanel() = Unit
+                |val heading = FontFamily.Serif
                 |@Composable
                 |private fun OrchardTheme(content: @Composable () -> Unit) {
+                |    val body = FontFamily.Serif
                 |    MaterialTheme(
                 |        colors = MaterialTheme.colors.copy(
                 |            primary = OrchardColors.moss,
@@ -605,12 +607,15 @@ class CodingWorkerTest {
         assertTrue(diagnostic.contains("Exact contiguous source text near matched declarations"))
         assertTrue(diagnostic.contains("MaterialTheme.colors.copy"))
         assertTrue(!diagnostic.contains("[Orchard excerpt lines"))
-        val legacyDiagnostic = attempts.single().diagnostic + " Required test path: $testPath."
+        val legacyDiagnostic = attempts.single().diagnostic +
+            " Candidate retains forbidden literal FontFamily.Serif. Required test path: $testPath."
         val groundedLegacyDiagnostic = sourceGroundedRetryDiagnostic(legacyDiagnostic, context)
         assertTrue(requireNotNull(groundedLegacyDiagnostic).contains("Exact contiguous source text for this correction"))
         assertTrue(groundedLegacyDiagnostic.contains("MaterialTheme.colors.copy"))
         assertTrue(groundedLegacyDiagnostic.contains("import java.io.File"))
         assertTrue(groundedLegacyDiagnostic.contains("class OrchardCircuitBinderTest"))
+        assertTrue(groundedLegacyDiagnostic.contains("val heading = FontFamily.Serif"))
+        assertTrue(groundedLegacyDiagnostic.contains("val body = FontFamily.Serif"))
         assertTrue(
             Json.encodeToString(groundedLegacyDiagnostic).encodeToByteArray().size -
                 Json.encodeToString(legacyDiagnostic).encodeToByteArray().size < 4_096,
