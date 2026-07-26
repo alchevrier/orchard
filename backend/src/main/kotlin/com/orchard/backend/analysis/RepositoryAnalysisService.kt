@@ -926,6 +926,19 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
     val forbiddenLiterals = forbiddenComplianceLiterals(acceptanceCriteria)
     if (forbiddenLiterals.isEmpty()) return null
     val files = context.files.associateBy { it.path }
+    val mutationPaths = output.operations
+        .filter { it.action != PLAN_OPERATION_VERIFY }
+        .map { it.path }
+        .toSet()
+    files.forEach { (path, file) ->
+        forbiddenLiterals.forEach { literal ->
+            val count = lexicalEvidenceCount(file.content, literal)
+            if (count > 0 && path !in mutationPaths) {
+                return "Pinned evidence contains forbidden literal $literal $count time${if (count == 1) "" else "s"} in $path, " +
+                    "so the execution plan must include a source mutation on that exact path."
+            }
+        }
+    }
     output.scopeCoverage.forEach { coverage ->
         coverage.compliantEvidencePaths.forEach { path ->
             val content = files[path]?.content ?: return "Scope '${coverage.scope}' marks $path compliant, but pinned evidence is unavailable."

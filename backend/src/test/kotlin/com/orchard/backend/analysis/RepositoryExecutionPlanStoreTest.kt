@@ -666,7 +666,7 @@ class RepositoryExecutionPlanStoreTest {
         val criterion = "None of the bounded production files contains FontFamily.Serif or another decorative family."
 
         assertEquals(
-            "Scope '$scope' marks $path compliant, but pinned evidence contains forbidden literal FontFamily.Serif 5 times.",
+            "Pinned evidence contains forbidden literal FontFamily.Serif 5 times in $path, so the execution plan must include a source mutation on that exact path.",
             repositoryForbiddenLiteralComplianceDiagnostic(
                 listOf(criterion),
                 CodingRepositoryContext(
@@ -677,6 +677,27 @@ class RepositoryExecutionPlanStoreTest {
                     omittedFileCount = 0,
                 ),
                 output,
+            ),
+        )
+        val mutatedOutput = output.copy(
+            operations = output.operations + ExecutionPlanOperation(
+                order = 2,
+                action = "MODIFY",
+                path = path,
+                symbol = "GuidedGenesisWorkspace",
+                instruction = "Replace the forbidden family.",
+                acceptanceCriteria = listOf(criterion),
+            ),
+        )
+        assertEquals(
+            "Scope '$scope' marks $path compliant, but pinned evidence contains forbidden literal FontFamily.Serif 5 times.",
+            repositoryForbiddenLiteralComplianceDiagnostic(
+                listOf(criterion),
+                CodingRepositoryContext(
+                    listOf(CodingContextFile(path, "[Orchard lexical query counts: serif=5]\n")),
+                    omittedFileCount = 0,
+                ),
+                mutatedOutput,
             ),
         )
         assertNull(repositoryForbiddenLiteralComplianceDiagnostic(
