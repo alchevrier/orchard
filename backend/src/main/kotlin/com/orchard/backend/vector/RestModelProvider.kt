@@ -207,7 +207,12 @@ class CatalogModelProvider(
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
         return json.decodeFromString<OpenAiChatResponse>(body).let { decoded ->
-            val text = decoded.choices.singleOrNull()?.message?.content
+            val completion = decoded.choices.singleOrNull()
+                ?: error("Provider returned no single completion")
+            check(completion.finishReason in OPENAI_TERMINAL_FINISH_REASONS) {
+                "Provider ${endpoint.endpointId} returned a nonterminal completion (${completion.finishReason})"
+            }
+            val text = completion.message.content
                 ?: error("Provider returned no single completion")
             ModelGeneration(text, decoded.usage?.promptTokens ?: estimateModelTokens(prompt), decoded.usage?.completionTokens ?: estimateModelTokens(text))
         }
@@ -320,6 +325,7 @@ class CatalogModelProvider(
         const val MAX_RESPONSE_BYTES = 2 * 1024 * 1024
         const val MAX_DISCOVERY_BYTES = 512 * 1024
         const val KV_CACHE_BYTES_PER_TOKEN = 393_216L
+        val OPENAI_TERMINAL_FINISH_REASONS = setOf("stop")
         val OLLAMA_RESIDENCY_WINDOW_NANOS = Duration.ofMinutes(4).toNanos()
         val OLLAMA_RESIDENCY_PROBE_WINDOW_NANOS = Duration.ofSeconds(5).toNanos()
     }
@@ -514,7 +520,10 @@ private data class OpenAiChatResponse(
 )
 
 @Serializable
-private data class OpenAiChoice(val message: OpenAiMessage)
+private data class OpenAiChoice(
+    val message: OpenAiMessage,
+    @SerialName("finish_reason") val finishReason: String? = null,
+)
 
 @Serializable
 private data class OpenAiUsage(

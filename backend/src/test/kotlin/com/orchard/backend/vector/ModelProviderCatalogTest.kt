@@ -319,7 +319,7 @@ class ModelProviderCatalogTest {
             authorization = request.headers[HttpHeaders.Authorization]
             body = (request.body as? TextContent)?.text.orEmpty()
             respond(
-                """{"choices":[{"message":{"role":"assistant","content":"{\"plan\":true}"}}],"usage":{"prompt_tokens":11,"completion_tokens":5}}""",
+                """{"choices":[{"message":{"role":"assistant","content":"{\"plan\":true}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":5}}""",
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
@@ -342,12 +342,37 @@ class ModelProviderCatalogTest {
     }
 
     @Test
+    fun `OpenAI compatible adapter rejects nonterminal partial completion`() = runTest {
+        val engine = MockEngine {
+            respond(
+                """{"choices":[{"message":{"role":"assistant","content":"{\"expectedRevision\":\"0000"},"finish_reason":null}],"usage":{"prompt_tokens":0,"completion_tokens":0}}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val endpoint = ModelEndpointDefinition(
+            "local-compatible",
+            "Local compatible",
+            PROVIDER_PROTOCOL_OPENAI_COMPATIBLE,
+            "http://127.0.0.1:11434",
+            PROVIDER_LOCALITY_LOCAL,
+        )
+        val provider = CatalogModelProvider(endpoint, binding("local-compatible"), engine = engine)
+
+        val failure = assertFailsWith<IllegalStateException> {
+            provider.executeCodingPatch("code", 128, 4_096)
+        }
+        provider.close()
+
+        assertTrue(failure.message.orEmpty().contains("nonterminal completion"))
+    }
+
+    @Test
     fun `remote OpenAI compatible adapter resolves environment reference without persisting the secret`() = runTest {
         var authorization: String? = null
         val engine = MockEngine { request ->
             authorization = request.headers[HttpHeaders.Authorization]
             respond(
-                """{"choices":[{"message":{"role":"assistant","content":"{}"}}]}""",
+                """{"choices":[{"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}""",
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
