@@ -181,7 +181,17 @@ internal fun RepositoryAnalysisAttemptStore.compileRetainedExactPathOperations(
         .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) }
         .filter { it.path in requiredPaths && it.path !in currentPaths }
         .distinctBy { it.path }
-        .toList()
+        .toMutableList()
+    if (output.operations.none { it.action == PLAN_OPERATION_CREATE } &&
+        output.scopeCoverage.any { it.scope.trim().startsWith("Backend ", ignoreCase = true) }
+    ) {
+        load().asReversed().asSequence()
+            .filter { it.runId == runId && it.baseRevision == baseRevision }
+            .mapNotNull { it.rejectedPlan }
+            .flatMap { it.operations.asSequence() }
+            .firstOrNull { it.action == PLAN_OPERATION_CREATE && it.path !in currentPaths }
+            ?.let(retained::add)
+    }
     val operations = output.operations.filter { it.action != PLAN_OPERATION_VERIFY } +
         retained + output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
     val compiledOperations = operations.mapIndexed { index, operation -> operation.copy(order = index + 1) }
