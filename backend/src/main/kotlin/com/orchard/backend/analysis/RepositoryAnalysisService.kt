@@ -930,7 +930,8 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
         .filter { it.action != PLAN_OPERATION_VERIFY }
         .map { it.path }
         .toSet()
-    files.forEach { (path, file) ->
+    val scopedPaths = output.scopeCoverage.flatMap { it.evidencePaths }.toSet()
+    files.filterKeys { it in scopedPaths }.forEach { (path, file) ->
         forbiddenLiterals.forEach { literal ->
             val count = lexicalEvidenceCount(file.content, literal)
             if (count > 0 && path !in mutationPaths) {

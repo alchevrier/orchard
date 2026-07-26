@@ -716,6 +716,20 @@ class RepositoryExecutionPlanStoreTest {
             ),
             output,
         ))
+        assertNull(repositoryForbiddenLiteralComplianceDiagnostic(
+            listOf(criterion),
+            CodingRepositoryContext(
+                listOf(
+                    CodingContextFile(path, "[Orchard lexical query counts: serif=0]\n"),
+                    CodingContextFile(
+                        "backend/src/test/CodingWorkerTest.kt",
+                        "[Orchard lexical query counts: serif=7]\n",
+                    ),
+                ),
+                omittedFileCount = 0,
+            ),
+            output,
+        ))
         assertEquals(
             "Scope '$scope' marks $path compliant, but pinned evidence is unavailable.",
             repositoryForbiddenLiteralComplianceDiagnostic(
