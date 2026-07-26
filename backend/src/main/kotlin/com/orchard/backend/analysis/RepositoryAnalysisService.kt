@@ -1178,6 +1178,7 @@ private fun canonicalAuthorityText(value: String): String = value
     .replace('\u00a0', ' ')
     .trim()
     .replace(Regex("\\s+"), " ")
+    .removeSuffix(".")
 
 private fun requiresSourceOperation(scope: String): Boolean = canonicalAuthorityText(scope)
     .substringBefore(' ')

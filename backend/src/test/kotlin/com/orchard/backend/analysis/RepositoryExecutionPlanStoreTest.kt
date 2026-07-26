@@ -216,7 +216,7 @@ class RepositoryExecutionPlanStoreTest {
                     "src/Main.kt",
                     "main",
                     "Update it.",
-                    listOf("Use platform\u2011default sans.", "Keep machine\u2011readable output."),
+                    listOf("Use platform\u2011default sans", "Keep machine\u2011readable output"),
                 )
             ),
         )
