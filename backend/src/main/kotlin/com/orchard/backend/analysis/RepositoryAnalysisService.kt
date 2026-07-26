@@ -520,6 +520,9 @@ class RepositoryAnalysisService(
         )?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
         }
+        repositoryMissingImplementationEscalationDiagnostic(output.unresolvedQuestions)?.let {
+            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
+        }
         if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
             return blockAttempt(
                 run.runId,
@@ -1011,6 +1014,15 @@ internal fun repositoryArchitectEscalationEvidenceDiagnostic(
         } ?: return@firstNotNullOfOrNull null
         "Architect escalation contradicts compliant pinned evidence for $path: $unsupported"
     }
+}
+
+internal fun repositoryMissingImplementationEscalationDiagnostic(unresolvedQuestions: List<String>): String? {
+    val unsupported = unresolvedQuestions.firstOrNull { question ->
+        question.contains(Regex("\\b(?:missing|absent|no)\\b", RegexOption.IGNORE_CASE)) &&
+            question.contains(Regex("\\b(?:concrete\\s+)?(?:source\\s+)?files?\\b", RegexOption.IGNORE_CASE)) &&
+            question.contains(Regex("\\bimplement(?:s|ed|ation|ing)?\\b", RegexOption.IGNORE_CASE))
+    } ?: return null
+    return "Architect escalation treats required new implementation as missing evidence; emit grounded CREATE operations instead: $unsupported"
 }
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {

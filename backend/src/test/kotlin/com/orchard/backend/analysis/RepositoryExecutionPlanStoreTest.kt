@@ -793,6 +793,17 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `missing requested implementation requires create operations rather than architect escalation`() {
+        val claim = "Missing concrete backend source files that implement the append-only correlation authority."
+
+        assertEquals(
+            "Architect escalation treats required new implementation as missing evidence; emit grounded CREATE operations instead: $claim",
+            repositoryMissingImplementationEscalationDiagnostic(listOf(claim)),
+        )
+        assertNull(repositoryMissingImplementationEscalationDiagnostic(listOf("Two existing authorities claim ownership; which one is canonical?")))
+    }
+
+    @Test
     fun `repository analysis bounds source operations per coding slice`() {
         val original = plan(1, 1, "a".repeat(40)).content
         val operations = (1..4).map { order ->
