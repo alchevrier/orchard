@@ -1020,7 +1020,7 @@ internal fun ambiguousReplacementAnchorDiagnostic(content: String, old: String):
         }.firstOrNull()
     }.distinct().take(MAX_AMBIGUOUS_ANCHOR_SUGGESTIONS).toList()
     if (suggestions.isEmpty()) return ""
-    return "; exact source-backed unique anchor suggestions: " +
+    return "; submit one separate replacement for each occurrence using these exact source-backed unique anchor suggestions: " +
         suggestions.joinToString(" | ") { Json.encodeToString(it) }
 }
 

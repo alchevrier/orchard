@@ -1190,6 +1190,7 @@ class CodingWorkerTest {
 
         assertTrue(diagnostic.contains("fontWeight = FontWeight.Medium,"))
         assertTrue(diagnostic.contains("fontWeight = FontWeight.Bold,"))
+        assertTrue(diagnostic.contains("submit one separate replacement for each occurrence"))
         assertTrue(diagnostic.contains("exact source-backed unique anchor suggestions"))
     }
 
