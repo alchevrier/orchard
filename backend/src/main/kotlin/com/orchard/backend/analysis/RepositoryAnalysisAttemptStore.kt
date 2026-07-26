@@ -130,9 +130,20 @@ fun RepositoryAnalysisAttemptStore.retryDiagnostic(runId: Long, baseRevision: St
             append("\nPreviously rejected defects that must remain fixed:")
             previous.forEach { append("\n- ").append(it) }
         }
-        blockedAttempts.lastOrNull { it.rejectedPlan != null }?.rejectedPlan?.let { rejectedPlan ->
+        val latestRejectedPlan = blockedAttempts.lastOrNull { it.rejectedPlan != null }?.rejectedPlan
+        latestRejectedPlan?.let { rejectedPlan ->
             append("\nLatest schema-valid rejected plan candidate; preserve valid authority and correct only the diagnosed defects:\n")
             append(Json.encodeToString(rejectedPlan))
+        }
+        if (latestRejectedPlan?.operations?.none { it.action == PLAN_OPERATION_CREATE } == true) {
+            blockedAttempts.asReversed()
+                .asSequence()
+                .mapNotNull { it.rejectedPlan }
+                .firstOrNull { plan -> plan.operations.any { it.action == PLAN_OPERATION_CREATE } }
+                ?.let { anchor ->
+                    append("\nGrounded CREATE anchor from the most recent earlier candidate; retain its new-file ownership unless the current rejection explicitly invalidates it:\n")
+                    append(Json.encodeToString(anchor))
+                }
         }
     }
 }

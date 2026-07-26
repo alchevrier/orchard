@@ -181,6 +181,33 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `repository analysis retry retains a grounded create anchor after candidate regression`() {
+        val directory = createTempDirectory("orchard-analysis-create-anchor-")
+        val store = FileRepositoryAnalysisAttemptStore(directory)
+        val revision = "a".repeat(40)
+        val original = plan(1, 1, revision).content
+        val createPlan = original.copy(operations = original.operations.map { it.copy(action = PLAN_OPERATION_CREATE, path = "src/New.kt") })
+        val regressedPlan = original.copy(operations = original.operations.map { it.copy(path = "src/Existing.kt") })
+        listOf(createPlan, regressedPlan).forEachIndexed { index, rejectedPlan ->
+            store.appendNext { attemptId ->
+                RepositoryAnalysisAttempt(
+                    attemptId, 11, revision, ANALYSIS_ATTEMPT_BLOCKED,
+                    RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name, "Rejection ${index + 1}.", "b".repeat(64),
+                    rejectedPlan = rejectedPlan,
+                )
+            }
+            store.appendNext { attemptId ->
+                RepositoryAnalysisAttempt(attemptId, 11, revision, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, "RETRY_AUTHORIZED", "Authorized.")
+            }
+        }
+
+        val diagnostic = requireNotNull(store.retryDiagnostic(11, revision))
+        assertTrue(diagnostic.contains("Latest schema-valid rejected plan candidate"))
+        assertTrue(diagnostic.contains("Grounded CREATE anchor from the most recent earlier candidate"))
+        assertTrue(diagnostic.contains("\"path\":\"src/New.kt\""))
+    }
+
+    @Test
     fun `repository analysis attempt store reads legacy records without rejected plan field`() {
         val directory = createTempDirectory("orchard-legacy-analysis-attempt-")
         val value = """{"attemptId":1,"runId":11,"baseRevision":"${"a".repeat(40)}","state":"BLOCKED","resultStatus":"INVALID_ANALYSIS","diagnostic":"Legacy rejection.","promptHash":"${"b".repeat(64)}","recordedAt":"2026-07-26T00:00:00Z"}"""
