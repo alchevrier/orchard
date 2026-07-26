@@ -492,11 +492,14 @@ class RepositoryAnalysisService(
                 output.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
             )
         }
-        val compiledOutput = compileRepositoryScopeAuthority(
-            run.workDefinition?.definition?.scope.orEmpty(),
-            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
-            boundedContext,
-            output,
+        val compiledOutput = compileRepositoryVerificationAuthority(
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
+            compileRepositoryScopeAuthority(
+                run.workDefinition?.definition?.scope.orEmpty(),
+                run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+                boundedContext,
+                output,
+            ),
         )
         val failedCandidatePaths = failedCandidateCorrectionPaths(
             baseRevision,
@@ -930,6 +933,11 @@ internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysi
             "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan."
     } else null
 }
+
+internal fun compileRepositoryVerificationAuthority(
+    requiredCommands: List<String>,
+    output: RepositoryAnalysisPlanContent,
+): RepositoryAnalysisPlanContent = output.copy(verificationCommands = requiredCommands)
 
 private fun lexicalEvidenceCount(content: String, literal: String): Int {
     val summary = content.substringBefore(']')

@@ -726,6 +726,19 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `repository analysis compiles exact verification command authority`() {
+        val original = plan(1, 1, "a".repeat(40)).content.copy(
+            verificationCommands = listOf("invented command"),
+        )
+        val required = listOf("./gradlew test", "Inspect deterministic layout evidence.")
+
+        assertEquals(
+            required,
+            compileRepositoryVerificationAuthority(required, original).verificationCommands,
+        )
+    }
+
+    @Test
     fun `repository selectors require every matched owner and an affine test operation`() {
         val context = CodingRepositoryContext(
             listOf(
