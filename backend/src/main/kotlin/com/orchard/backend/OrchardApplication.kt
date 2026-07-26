@@ -817,6 +817,24 @@ fun Application.workspaceApi(
             }
             call.respond(status, workspaceResponse(workspace, companyControl))
         }
+        post("/api/company/runs/{runId}/repair") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (runId == null || runId <= 0 || companyControl == null) {
+                call.respond(if (runId == null || runId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = workspace.requireAuditRepair(
+                runId,
+                "Post-acceptance deterministic verification invalidated the candidate evidence.",
+            )
+            val status = when (result.status) {
+                WorkflowMutationStatus.RECORDED -> HttpStatusCode.Accepted
+                WorkflowMutationStatus.RUN_NOT_FOUND -> HttpStatusCode.NotFound
+                WorkflowMutationStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+                else -> HttpStatusCode.Conflict
+            }
+            call.respond(status, workspaceResponse(workspace, companyControl))
+        }
         post("/api/company-audits/runs/{runId}/retry") {
             val runId = call.parameters["runId"]?.toLongOrNull()
             if (runId == null || runId <= 0 || companyAudit == null) {
