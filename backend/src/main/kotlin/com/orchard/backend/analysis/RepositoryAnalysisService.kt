@@ -440,7 +440,8 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
         ).toSet()
-        val requiredEvidencePaths = selectedEvidencePaths + affineProductionOwnerPaths(context, selectedEvidencePaths)
+        val affineTestPaths = context.files.asSequence().map { it.path }.filter(::isTestSourcePath).toSet()
+        val requiredEvidencePaths = selectedEvidencePaths + affineProductionOwnerPaths(context, selectedEvidencePaths + affineTestPaths)
         val queryTokens = repositoryAnalysisTokens(query)
         val boundedContext = compactRepositoryContextToBudget(
             context,

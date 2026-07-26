@@ -1202,6 +1202,22 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `collected test pins affine production owner without evidence selectors`() {
+        val owner = "frontend/src/desktopMain/ui/DurableConversationWorkspace.kt"
+        val test = "frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"
+        val context = CodingRepositoryContext(
+            listOf(
+                CodingContextFile(owner, "fun DurableConversationWorkspace()"),
+                CodingContextFile(test, "class DurableConversationWorkspaceTest"),
+            ),
+            0,
+        )
+        val collectedTests = context.files.map { it.path }.filter { "/desktopTest/" in it }.toSet()
+
+        assertEquals(setOf(owner), affineProductionOwnerPaths(context, collectedTests))
+    }
+
+    @Test
     fun `repository analysis compiles exact verification command authority`() {
         val original = plan(1, 1, "a".repeat(40)).content.copy(
             verificationCommands = listOf("invented command"),
