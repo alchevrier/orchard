@@ -276,6 +276,8 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("matchedDeclarations selected from its complete source before content excerpting"))
         assert(prompt.contains("do not claim an owner or surface is absent when matchedDeclarations identifies it"))
         assert(prompt.contains("requiredEvidencePathGroups is deterministic evidence authority"))
+        assert(prompt.contains("forbiddenLiteralFacts is deterministic complete-source compliance authority keyed by exact path and literal"))
+        assert(prompt.contains("never mark a path compliant when one of its forbiddenLiteralFacts has a positive count"))
         assert(prompt.contains("Group IDs are selector IDs"))
         assert(prompt.contains("Never omit a grouped path"))
         assert(prompt.contains("each value is a list of selector IDs"))
@@ -699,6 +701,29 @@ class RepositoryExecutionPlanStoreTest {
                 listOf(criterion),
                 CodingRepositoryContext(emptyList(), omittedFileCount = 1),
                 output,
+            ),
+        )
+    }
+
+    @Test
+    fun `forbidden literal facts preserve exact path counts`() {
+        val guidedGenesisPath = "frontend/src/main/GuidedGenesisWorkspace.kt"
+        val binderPath = "frontend/src/main/OrchardCircuitBinder.kt"
+
+        assertEquals(
+            listOf(
+                RepositoryForbiddenLiteralFact(guidedGenesisPath, "FontFamily.Serif", 6),
+                RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0),
+            ),
+            repositoryForbiddenLiteralFacts(
+                listOf("None of the bounded production files contains FontFamily.Serif or another decorative family."),
+                CodingRepositoryContext(
+                    listOf(
+                        CodingContextFile(guidedGenesisPath, "[Orchard lexical query counts: serif=6]\n"),
+                        CodingContextFile(binderPath, "[Orchard lexical query counts: serif=0]\n"),
+                    ),
+                    omittedFileCount = 0,
+                ),
             ),
         )
     }

@@ -97,6 +97,13 @@ private data class RepositoryAnalysisTaskContext(
 )
 
 @Serializable
+internal data class RepositoryForbiddenLiteralFact(
+    val path: String,
+    val literal: String,
+    val count: Int,
+)
+
+@Serializable
 private data class RepositoryAnalysisEnvelope(
     val executionProfileId: String,
     val baseRevision: String,
@@ -108,6 +115,7 @@ private data class RepositoryAnalysisEnvelope(
     val requiredScope: List<String>,
     val requiredEvidencePathGroups: List<RequiredEvidencePathGroup>,
     val requiredScopeEvidencePathGroupIds: List<List<String>>,
+    val forbiddenLiteralFacts: List<RepositoryForbiddenLiteralFact>,
     val priorRejectedAnalysisDiagnostic: String?,
     val priorRejectedCodingPlanDiagnostic: String?,
     val requiredAcceptanceCriteria: List<String>,
@@ -403,6 +411,10 @@ class RepositoryAnalysisService(
             requiredRepositoryScopeEvidencePathGroupIds(
                 run.workDefinition?.definition?.scope.orEmpty(),
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+            ),
+            repositoryForbiddenLiteralFacts(
+                run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+                complianceContext,
             ),
             attemptStore.retryDiagnostic(run.runId, baseRevision),
             rejectedCodingPlanDiagnostic,
@@ -932,6 +944,15 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
 private fun forbiddenComplianceLiterals(acceptanceCriteria: List<String>): List<String> = acceptanceCriteria.flatMap { criterion ->
     FORBIDDEN_CONTAINS_LITERAL.findAll(criterion).map { it.groupValues[1] }.toList()
 }.distinct()
+
+internal fun repositoryForbiddenLiteralFacts(
+    acceptanceCriteria: List<String>,
+    context: CodingRepositoryContext,
+): List<RepositoryForbiddenLiteralFact> = context.files.flatMap { file ->
+    forbiddenComplianceLiterals(acceptanceCriteria).map { literal ->
+        RepositoryForbiddenLiteralFact(file.path, literal, lexicalEvidenceCount(file.content, literal))
+    }
+}
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {
     val sourceOperations = output.operations.count { it.action != PLAN_OPERATION_VERIFY }
