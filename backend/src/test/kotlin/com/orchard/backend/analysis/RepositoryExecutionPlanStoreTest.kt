@@ -1015,9 +1015,15 @@ class RepositoryExecutionPlanStoreTest {
             scopeCoverage = listOf(ExecutionPlanScopeCoverage(
                 scope = "Required owners and focused tests",
                 evidencePaths = operations.take(3).map(ExecutionPlanOperation::path),
+                operationOrders = listOf(1, 2, 3),
             )),
         )
         assertNull(repositorySourceOperationBudgetDiagnostic(requiredThree))
+        assertEquals(
+            "Execution plan has 4 source operations; at most 3 are allowed for this bounded coding slice. " +
+                "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan.",
+            repositorySourceOperationBudgetDiagnostic(requiredThree.copy(operations = operations)),
+        )
     }
 
     @Test
