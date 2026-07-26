@@ -1116,7 +1116,7 @@ private val FORBIDDEN_CONTAINS_LITERAL = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-private const val MAX_SOURCE_OPERATIONS_PER_PLAN = 3
+private const val MAX_SOURCE_OPERATIONS_PER_PLAN = 2
 
 private fun canonicalAuthorityText(value: String): String = value
     .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")

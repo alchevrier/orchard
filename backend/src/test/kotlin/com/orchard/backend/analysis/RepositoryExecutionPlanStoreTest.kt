@@ -710,11 +710,11 @@ class RepositoryExecutionPlanStoreTest {
         }
 
         assertEquals(
-            "Execution plan has 4 source operations; at most 3 are allowed per bounded coding slice. " +
+            "Execution plan has 3 source operations; at most 2 are allowed per bounded coding slice. " +
                 "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan.",
-            repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations)),
+            repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations.take(3))),
         )
-        assertNull(repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations.take(3))))
+        assertNull(repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations.take(2))))
     }
 
     @Test
