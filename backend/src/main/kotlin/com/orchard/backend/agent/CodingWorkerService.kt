@@ -1429,6 +1429,15 @@ internal fun sourceGroundedRetryDiagnostic(
                 .filterNot { it.startsWith("[Orchard excerpt lines ") }
                 .joinToString("\n")
                 .let { takeUtf8Prefix(it, MAX_RETRY_SOURCE_PREFIX_BYTES) }
+            val sourceSuffix = contextFile.content.lineSequence()
+                .filterNot { it.startsWith("[Orchard excerpt lines ") }
+                .toList()
+                .asReversed()
+                .runningFold(emptyList<String>()) { lines, line -> listOf(line) + lines }
+                .takeWhile { it.joinToString("\n").encodeToByteArray().size <= MAX_RETRY_SOURCE_SUFFIX_BYTES }
+                .lastOrNull()
+                .orEmpty()
+                .joinToString("\n")
             val literalAnchors = RETRY_DIAGNOSTIC_LITERAL.findAll(diagnostic)
                 .map { it.value }
                 .filter { literal -> Regex(Regex.escape(literal)).findAll(contextFile.content).count() > 1 }
@@ -1438,7 +1447,7 @@ internal fun sourceGroundedRetryDiagnostic(
                 .map { takeUtf8Prefix(it.substringAfter(": "), MAX_RETRY_LITERAL_ANCHOR_BYTES) }
                 .take(1)
                 .toList()
-            (literalAnchors + sourcePrefix + sourceBackedDeclarationAnchors(contextFile).take(1))
+            (literalAnchors + sourcePrefix + sourceSuffix)
                 .filter(String::isNotEmpty)
                 .distinct()
                 .map { contextFile.path to it }
@@ -1554,6 +1563,7 @@ private const val SOURCE_ANCHOR_LINES = 4
 private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
 private const val MAX_SOURCE_ANCHOR_BYTES = 1_024
 private const val MAX_RETRY_SOURCE_PREFIX_BYTES = 512
+private const val MAX_RETRY_SOURCE_SUFFIX_BYTES = 512
 private const val MAX_RETRY_LITERAL_ANCHOR_BYTES = 2_048
 private const val MAX_RETRY_SOURCE_ANCHORS = 4
 private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024

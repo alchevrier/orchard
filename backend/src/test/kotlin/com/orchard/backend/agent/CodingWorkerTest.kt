@@ -588,6 +588,7 @@ class CodingWorkerTest {
                 |import java.io.File
                 |
                 |class OrchardCircuitBinderTest
+                |fun existingSourcePolicyTest() = check(true)
                 |""".trimMargin(),
             contentHash = "c".repeat(64),
             matchedDeclarations = listOf("class OrchardCircuitBinderTest"),
@@ -614,6 +615,7 @@ class CodingWorkerTest {
         assertTrue(groundedLegacyDiagnostic.contains("MaterialTheme.colors.copy"))
         assertTrue(groundedLegacyDiagnostic.contains("import java.io.File"))
         assertTrue(groundedLegacyDiagnostic.contains("class OrchardCircuitBinderTest"))
+        assertTrue(groundedLegacyDiagnostic.contains("fun existingSourcePolicyTest"))
         assertTrue(groundedLegacyDiagnostic.contains("val heading = FontFamily.Serif"))
         assertTrue(groundedLegacyDiagnostic.contains("val body = FontFamily.Serif"))
         assertTrue(
