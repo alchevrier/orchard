@@ -842,7 +842,12 @@ class DesktopNetworkClientTest {
             respond(
                 content = """{
                     "conversation":{"conversationId":3,"title":"Orchard work","actor":"HUMAN","createdAt":"2026-06-21T00:00:00Z","hash":"${"a".repeat(64)}"},
-                    "messages":[],"objectives":[],"commands":[],"activities":[],"events":[],"lastEventId":9
+                    "messages":[],"objectives":[{
+                        "objectiveId":8,"revision":1,"conversationId":3,"projectId":5,
+                        "title":"Independent Inbox","outcome":"Consolidated authority","state":"READY",
+                        "sourceMessageId":4,"sourceMessageHash":"${"b".repeat(64)}","actor":"HUMAN",
+                        "createdAt":"2026-06-21T00:00:01Z","hash":"${"c".repeat(64)}"
+                    }],"commands":[],"activities":[],"events":[],"lastEventId":9
                 }""".trimIndent(),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
@@ -858,6 +863,7 @@ class DesktopNetworkClientTest {
 
         assertEquals(9, projection.lastEventId)
         assertEquals("Orchard work", projection.conversation.title)
+        assertEquals(50, projection.objectives.single().priority)
         client.close()
     }
 

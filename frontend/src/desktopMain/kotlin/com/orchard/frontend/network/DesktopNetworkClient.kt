@@ -466,7 +466,7 @@ class DesktopNetworkClient(private val client: HttpClient = createHttpClient()) 
     val title: String,
     val outcome: String,
     val constraints: List<String> = emptyList(),
-    val priority: Int,
+    val priority: Int = 50,
     val dependencyObjectiveIds: List<Long> = emptyList(),
     val state: String,
     val sourceMessageId: Long,
