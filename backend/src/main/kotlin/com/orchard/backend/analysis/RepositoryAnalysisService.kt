@@ -903,9 +903,11 @@ internal fun repositoryScopeCoverageDiagnostic(
             }
             val requiredTestPaths = coverage.evidencePaths.filter(::isTestSourcePath).distinct().sorted()
             val changedTestPaths = linkedSourceOperations.asSequence()
-                .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) }
+                .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path) }
                 .mapTo(hashSetOf()) { it.path }
-            if (requiresTestSource(coverage.scope) && requiredTestPaths.none { it in changedTestPaths }) {
+            val regressionSatisfied = if (requiredTestPaths.isEmpty()) changedTestPaths.isNotEmpty()
+            else requiredTestPaths.any { it in changedTestPaths }
+            if (requiresTestSource(coverage.scope) && !regressionSatisfied) {
                 return testSourceOperationDiagnostic(index, requiredTestPaths)
             }
             val unsatisfiedPaths = coverage.evidencePaths
@@ -1111,12 +1113,19 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
     val unsatisfiedPaths = requiredPaths - sourceOperationPaths - compliantEvidencePaths
     acceptedScope.forEachIndexed { index, scope ->
         if (!requiresTestSource(scope)) return@forEachIndexed
+        val coverage = output.scopeCoverage[index]
         val requiredTestPaths = requiredRepositoryScopeEvidencePathGroupIds(acceptedScope, selectors)[index]
             .flatMap { requiredRepositoryPathsBySelector(selectors, context)[it].orEmpty() }
             .filter(::isTestSourcePath)
             .distinct()
             .sorted()
-        if (requiredTestPaths.none { it in changedTestPaths }) return testSourceOperationDiagnostic(index, requiredTestPaths)
+        val linkedChangedTestPaths = output.operations.asSequence()
+            .filter { it.order in coverage.operationOrders }
+            .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path) }
+            .mapTo(hashSetOf()) { it.path }
+        val regressionSatisfied = if (requiredTestPaths.isEmpty()) linkedChangedTestPaths.isNotEmpty()
+        else requiredTestPaths.any { it in changedTestPaths }
+        if (!regressionSatisfied) return testSourceOperationDiagnostic(index, requiredTestPaths)
     }
     val diagnostics = listOfNotNull(
         missingEvidence.takeIf { it.isNotEmpty() }?.let {

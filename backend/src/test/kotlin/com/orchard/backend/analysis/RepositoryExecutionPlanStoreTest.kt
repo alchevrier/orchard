@@ -543,6 +543,16 @@ class RepositoryExecutionPlanStoreTest {
                 "DELETE and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(scope, unmatchedEvidence),
         )
+        val createdRegression = unmatchedEvidence.copy(
+            scopeCoverage = scope.mapIndexed { index, clause ->
+                ExecutionPlanScopeCoverage(clause, listOf("src/Other.kt"), if (index == 1) listOf(1, 2) else listOf(1))
+            },
+            operations = listOf(
+                ExecutionPlanOperation(1, PLAN_OPERATION_CREATE, "src/Other.kt", null, "Create owner.", listOf("Behavior works.")),
+                ExecutionPlanOperation(2, PLAN_OPERATION_CREATE, "src/NewTest.kt", null, "Create regression.", listOf("Behavior works.")),
+            ),
+        )
+        assertNull(repositoryScopeCoverageDiagnostic(scope, createdRegression))
         assertNull(
             repositoryScopeCoverageDiagnostic(
                 listOf("Inspect the owners."),
