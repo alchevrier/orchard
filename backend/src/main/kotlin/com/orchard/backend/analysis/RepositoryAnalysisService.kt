@@ -956,6 +956,9 @@ private fun RepositoryExecutionPlan.coversAcceptedScope(
     run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
     context,
     content,
+) == null && repositoryImplementationOwnerDiagnostic(
+    context,
+    content,
 ) == null && repositoryForbiddenLiteralComplianceDiagnostic(
     run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
     complianceContext,
