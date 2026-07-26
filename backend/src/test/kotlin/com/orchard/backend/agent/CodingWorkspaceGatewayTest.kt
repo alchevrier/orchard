@@ -160,6 +160,19 @@ class CodingWorkspaceGatewayTest {
         assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 3_200)
     }
 
+    @Test
+    fun `plan context preserves small files before excerpting large evidence files`() {
+        val budgets = planContextFileBudgets(
+            sourceBytes = listOf(138_022, 59_886, 79_317, 60_007, 9_182),
+            totalBytes = 30_000,
+            minimumBytes = 128,
+        )
+
+        assertEquals(9_182, budgets[4])
+        assertEquals(30_000, budgets.sum())
+        assertTrue(budgets.take(4).all { it >= 128 })
+    }
+
     private companion object {
         val contextJson = Json { encodeDefaults = true }
     }

@@ -180,9 +180,15 @@ class LocalCodingWorkspaceGateway(
         if (sources.size != distinctPaths.size) {
             return CodingRepositoryContext(emptyList(), distinctPaths.size - sources.size)
         }
-        fun context(maxFileBytes: Int): CodingRepositoryContext = CodingRepositoryContext(
-            files = sources.map { (relative, source) ->
-                val content = focusedContextExcerpt(source, queryTokens, maxFileBytes)
+        fun context(totalContentBytes: Int): CodingRepositoryContext {
+            val budgets = planContextFileBudgets(
+                sources.map { (_, source) -> minOf(source.encodeToByteArray().size, MAX_CONTEXT_FILE_BYTES) },
+                totalContentBytes,
+                MIN_PLAN_CONTEXT_FILE_BYTES,
+            )
+            return CodingRepositoryContext(
+            files = sources.mapIndexed { index, (relative, source) ->
+                val content = focusedContextExcerpt(source, queryTokens, budgets[index])
                 CodingContextFile(
                     path = relative,
                     content = content,
@@ -192,16 +198,19 @@ class LocalCodingWorkspaceGateway(
             },
             omittedFileCount = 0,
         )
-        var maxFileBytes = minOf(MAX_CONTEXT_FILE_BYTES, maxSerializedBytes / distinctPaths.size)
-        require(maxFileBytes >= MIN_PLAN_CONTEXT_FILE_BYTES) { "Repository plan context budget is too small" }
-        var selected = context(maxFileBytes)
+        }
+        var totalContentBytes = minOf(MAX_CONTEXT_FILE_BYTES * distinctPaths.size, maxSerializedBytes)
+        require(totalContentBytes >= MIN_PLAN_CONTEXT_FILE_BYTES * distinctPaths.size) {
+            "Repository plan context budget is too small"
+        }
+        var selected = context(totalContentBytes)
         var serializedBytes = CONTEXT_JSON.encodeToString(selected).encodeToByteArray().size
-        while (serializedBytes > maxSerializedBytes && maxFileBytes > MIN_PLAN_CONTEXT_FILE_BYTES) {
-            maxFileBytes = maxOf(
-                MIN_PLAN_CONTEXT_FILE_BYTES,
-                minOf(maxFileBytes - 1, maxFileBytes * maxSerializedBytes / serializedBytes),
+        while (serializedBytes > maxSerializedBytes && totalContentBytes > MIN_PLAN_CONTEXT_FILE_BYTES * distinctPaths.size) {
+            totalContentBytes = maxOf(
+                MIN_PLAN_CONTEXT_FILE_BYTES * distinctPaths.size,
+                minOf(totalContentBytes - 1, totalContentBytes * maxSerializedBytes / serializedBytes),
             )
-            selected = context(maxFileBytes)
+            selected = context(totalContentBytes)
             serializedBytes = CONTEXT_JSON.encodeToString(selected).encodeToByteArray().size
         }
         require(serializedBytes <= maxSerializedBytes && selected.files.all { it.content.isNotEmpty() }) {
@@ -940,6 +949,32 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
             .lastOrNull()
             ?.let(::append)
     }
+}
+
+internal fun planContextFileBudgets(sourceBytes: List<Int>, totalBytes: Int, minimumBytes: Int): List<Int> {
+    require(sourceBytes.isNotEmpty() && minimumBytes > 0 && totalBytes >= minimumBytes * sourceBytes.size)
+    val budgets = MutableList(sourceBytes.size) { minimumBytes }
+    var remaining = totalBytes - minimumBytes * sourceBytes.size
+    val unresolved = sourceBytes.indices.sortedBy(sourceBytes::get).toMutableList()
+    while (unresolved.isNotEmpty()) {
+        val index = unresolved.first()
+        val desired = (sourceBytes[index] - minimumBytes).coerceAtLeast(0)
+        if (desired > remaining) break
+        budgets[index] += desired
+        remaining -= desired
+        unresolved.removeAt(0)
+    }
+    if (remaining > 0 && unresolved.isNotEmpty()) {
+        unresolved.forEachIndexed { position, index ->
+            val allocation = minOf(
+                sourceBytes[index] - budgets[index],
+                remaining / (unresolved.size - position),
+            )
+            budgets[index] += allocation
+            remaining -= allocation
+        }
+    }
+    return budgets
 }
 
 private fun lexicalMatchSummary(content: String, queryTokens: Set<String>, maxBytes: Int): String {
