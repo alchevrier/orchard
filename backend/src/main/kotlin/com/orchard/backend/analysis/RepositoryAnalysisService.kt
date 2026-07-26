@@ -553,6 +553,7 @@ class RepositoryAnalysisService(
             context,
             output,
         )?.let { return it }
+        repositorySourceOperationBudgetDiagnostic(output)?.let { return it }
         if (output.operations.map { it.order } != (1..output.operations.size).toList()) return "Execution operations are not strictly ordered."
         repositoryAcceptanceCoverageDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
@@ -892,6 +893,14 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
     return null
 }
 
+internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {
+    val sourceOperations = output.operations.count { it.action != PLAN_OPERATION_VERIFY }
+    return if (sourceOperations > MAX_SOURCE_OPERATIONS_PER_PLAN) {
+        "Execution plan has $sourceOperations source operations; at most $MAX_SOURCE_OPERATIONS_PER_PLAN are allowed per bounded coding slice. " +
+            "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan."
+    } else null
+}
+
 private fun lexicalEvidenceCount(content: String, literal: String): Int {
     val summarized = Regex("${Regex.escape(literal)}=(\\d+)", RegexOption.IGNORE_CASE)
         .find(content.substringBefore(']'))
@@ -1102,6 +1111,8 @@ private val FORBIDDEN_CONTAINS_LITERAL = Regex(
     "\\bnone\\b[^.]*?\\bcontains\\s+([A-Za-z_][A-Za-z0-9_.]*)",
     RegexOption.IGNORE_CASE,
 )
+
+private const val MAX_SOURCE_OPERATIONS_PER_PLAN = 3
 
 private fun canonicalAuthorityText(value: String): String = value
     .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")

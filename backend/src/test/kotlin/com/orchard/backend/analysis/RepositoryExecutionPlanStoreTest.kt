@@ -695,6 +695,28 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `repository analysis bounds source operations per coding slice`() {
+        val original = plan(1, 1, "a".repeat(40)).content
+        val operations = (1..4).map { order ->
+            ExecutionPlanOperation(
+                order,
+                PLAN_OPERATION_MODIFY,
+                "src/Owner$order.kt",
+                null,
+                "Update owner $order.",
+                listOf("Behavior works."),
+            )
+        }
+
+        assertEquals(
+            "Execution plan has 4 source operations; at most 3 are allowed per bounded coding slice. " +
+                "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan.",
+            repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations)),
+        )
+        assertNull(repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations.take(3))))
+    }
+
+    @Test
     fun `repository selectors require every matched owner and an affine test operation`() {
         val context = CodingRepositoryContext(
             listOf(
