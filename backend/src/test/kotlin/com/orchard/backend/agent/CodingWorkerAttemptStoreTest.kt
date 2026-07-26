@@ -17,7 +17,7 @@ import kotlin.test.assertFalse
 
 class CodingWorkerAttemptStoreTest {
     @Test
-    fun `verification failed candidate requires a durable plan block`() {
+    fun `candidate and invalid proposal blocks are durable`() {
         val base = CodingWorkerResult(
             executionId = 1,
             status = CODING_EXECUTION_FAILED,

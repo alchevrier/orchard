@@ -430,7 +430,7 @@ class CodingWorkerService(
         )
         if (proposal == null) return finish(
             claim,
-            CODING_EXECUTION_FAILED,
+            CODING_EXECUTION_BLOCKED,
             CodingWorkerTickStatus.INVALID_PROPOSAL,
             "The coding model returned invalid or oversized proposal JSON.",
             modelExecutionId = modelExecution.executionId,
