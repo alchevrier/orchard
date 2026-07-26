@@ -17,6 +17,20 @@ import kotlin.test.assertFalse
 
 class CodingWorkerAttemptStoreTest {
     @Test
+    fun `verification failed candidate requires a durable plan block`() {
+        val base = CodingWorkerResult(
+            executionId = 1,
+            status = CODING_EXECUTION_FAILED,
+            diagnostic = "Verification failed.",
+            hash = "a".repeat(64),
+        )
+
+        assertFalse(codingTerminalPlanBlockRequired(base))
+        assertTrue(codingTerminalPlanBlockRequired(base.copy(revision = "b".repeat(40))))
+        assertTrue(codingTerminalPlanBlockRequired(base.copy(status = CODING_EXECUTION_BLOCKED)))
+    }
+
+    @Test
     fun `only explicit retry authority releases a blocked coding execution`() {
         assertTrue(codingExecutionBlockRemains(CODING_EXECUTION_BLOCKED, null))
         assertTrue(codingExecutionBlockRemains(CODING_EXECUTION_BLOCKED, CODING_ATTEMPT_BLOCKED))

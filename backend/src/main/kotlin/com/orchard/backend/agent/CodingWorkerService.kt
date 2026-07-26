@@ -997,14 +997,14 @@ class CodingWorkerService(
             .groupBy { Triple(it.claim.runId, it.claim.executionPlanId, it.claim.executionPlanHash) }
             .values
             .mapNotNull { executions -> executions.maxByOrNull { it.claim.executionId } }
-            .filter { it.result?.status == CODING_EXECUTION_BLOCKED }
+                .filter { execution -> execution.result?.let(::codingTerminalPlanBlockRequired) == true }
             .forEach { execution -> recordTerminalPlanBlock(execution.claim, requireNotNull(execution.result)) }
     }
 
     private fun recordTerminalPlanBlock(claim: CodingWorkerClaim, result: CodingWorkerResult): String? {
         val planId = claim.executionPlanId ?: return null
         val planHash = claim.executionPlanHash ?: return null
-        if (result.status != CODING_EXECUTION_BLOCKED) return null
+        if (!codingTerminalPlanBlockRequired(result)) return null
         val latest = attemptStore.latestAttempt(claim.runId, planId, planHash)
         if (latest?.state in setOf(CODING_ATTEMPT_BLOCKED, CODING_ATTEMPT_RETRY_AUTHORIZED)) return null
         return runCatching {
@@ -1143,6 +1143,10 @@ internal fun codingPlanContextQuery(executionPlan: RepositoryExecutionPlan?): St
         }
     }
 }
+
+internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
+    result.status == CODING_EXECUTION_BLOCKED ||
+        (result.status == CODING_EXECUTION_FAILED && result.revision != null)
 
 internal fun codingRetryableTerminalFailure(
     executions: List<CodingWorkerExecutionView>,
