@@ -1477,6 +1477,35 @@ class RepositoryExecutionPlanStoreTest {
         assertEquals(listOf(1, 2), compiled.scopeCoverage.single().operationOrders)
     }
 
+    @Test
+    fun `backend scope authority links retained backend create after reconciliation`() {
+        val scope = listOf("Backend correlation authority and focused tests", "Compose Desktop Inbox integration and focused tests")
+        val test = "frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"
+        val created = "backend/src/main/correlation/ConversationDomainCorrelation.kt"
+        val selectors = listOf(RepositoryEvidenceSelector(
+            selectorId = "tests",
+            scopeIndexes = listOf(0, 1),
+            pathGlobs = listOf("frontend/src/desktopTest/**"),
+        ))
+        val context = CodingRepositoryContext(
+            listOf(CodingContextFile(test, "class DurableConversationWorkspaceTest", matchedEvidenceSelectorIds = listOf("tests"))),
+            0,
+        )
+        val original = plan(1, 1, "a".repeat(40)).content
+        val output = original.copy(
+            operations = listOf(
+                original.operations.first().copy(order = 1, action = PLAN_OPERATION_MODIFY, path = test),
+                original.operations.first().copy(order = 2, action = PLAN_OPERATION_CREATE, path = created),
+            ),
+            scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf(test), operationOrders = listOf(1)) },
+        )
+
+        val compiled = compileRepositoryScopeAuthority(scope, selectors, context, output)
+
+        assertEquals(listOf(1, 2), compiled.scopeCoverage[0].operationOrders)
+        assertEquals(listOf(1), compiled.scopeCoverage[1].operationOrders)
+    }
+
     private fun plan(planId: Long, revision: Int, baseRevision: String): RepositoryExecutionPlan =
         newRepositoryExecutionPlan(
             planId = planId,

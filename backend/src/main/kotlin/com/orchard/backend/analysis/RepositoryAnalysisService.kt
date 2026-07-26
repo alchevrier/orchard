@@ -567,7 +567,12 @@ class RepositoryAnalysisService(
         )
         val compiledOutput = compileRepositoryVerificationAuthority(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
-            compileRepositoryScopeAuthority(acceptedScope, selectors, boundedContext, reconciledOutput),
+            compileRepositoryScopeAuthority(
+                acceptedScope,
+                selectors,
+                boundedContext,
+                compileRepositoryImplementationOwners(boundedContext, reconciledOutput),
+            ),
         )
         val failedCandidatePaths = failedCandidateCorrectionPaths(
             baseRevision,
@@ -1427,12 +1432,18 @@ internal fun compileRepositoryScopeAuthority(
             val retainedCreateOperations = coverage.operationOrders.asSequence()
                 .mapNotNull { order -> output.operations.firstOrNull { it.order == order } }
                 .filter { it.action == PLAN_OPERATION_CREATE }
-                .toList()
-            val evidencePaths = (selectedEvidencePaths + retainedCreateOperations.map { it.path }).distinct().sorted()
+                .toMutableList()
+            if (canonicalAuthorityText(scope).lowercase().startsWith("backend ")) {
+                retainedCreateOperations += output.operations.filter {
+                    it.action == PLAN_OPERATION_CREATE && it.path.lowercase().startsWith("backend/src/main/")
+                }
+            }
+            val distinctCreateOperations = retainedCreateOperations.distinctBy { it.path }
+            val evidencePaths = (selectedEvidencePaths + distinctCreateOperations.map { it.path }).distinct().sorted()
             val sourceOperationOrders = compiledOperations.asSequence()
                 .filter { operation ->
                     operation.action != PLAN_OPERATION_VERIFY &&
-                        (operation.path in selectedEvidencePaths || retainedCreateOperations.any { it.path == operation.path })
+                        (operation.path in selectedEvidencePaths || distinctCreateOperations.any { it.path == operation.path })
                 }
                 .map { it.order }
             val sourceOperationPaths = compiledOperations.asSequence()
