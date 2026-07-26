@@ -967,8 +967,9 @@ internal fun repositoryArchitectEscalationEvidenceDiagnostic(
     unresolvedQuestions: List<String>,
 ): String? = facts.firstNotNullOfOrNull { fact ->
     if (fact.count != 0) return@firstNotNullOfOrNull null
+    val basename = fact.path.substringAfterLast('/')
     val unsupported = unresolvedQuestions.firstOrNull { question ->
-        question.contains(fact.path, ignoreCase = true) &&
+        (question.contains(fact.path, ignoreCase = true) || question.contains(basename, ignoreCase = true)) &&
             question.contains(fact.literal, ignoreCase = true) &&
             question.contains(Regex("\\bcontains?\\b", RegexOption.IGNORE_CASE))
     } ?: return@firstNotNullOfOrNull null

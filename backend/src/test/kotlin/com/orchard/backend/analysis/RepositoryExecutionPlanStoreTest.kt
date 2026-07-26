@@ -742,6 +742,14 @@ class RepositoryExecutionPlanStoreTest {
             listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 1)),
             listOf(claim),
         ))
+        assertEquals(
+            "Architect escalation contradicts pinned evidence: $binderPath contains FontFamily.Serif 0 times, but unresolvedQuestions claims: " +
+                "OrchardCircuitBinder.kt still contains FontFamily.Serif literals.",
+            repositoryArchitectEscalationEvidenceDiagnostic(
+                listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0)),
+                listOf("OrchardCircuitBinder.kt still contains FontFamily.Serif literals."),
+            ),
+        )
     }
 
     @Test
