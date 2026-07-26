@@ -241,7 +241,7 @@ private fun GenesisHeader(
         Modifier.fillMaxWidth().height(68.dp).background(GenesisSurface).padding(horizontal = 28.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("ORCHARD", fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold, fontSize = 20.sp, color = GenesisInk)
+        Text("ORCHARD", fontFamily = FontFamily.Default, fontWeight = FontWeight.Bold, fontSize = 20.sp, color = GenesisInk)
         Divider(Modifier.padding(horizontal = 18.dp).height(22.dp).width(1.dp), color = GenesisLine)
         Column(Modifier.weight(1f)) {
             Text(projectTitle.ifBlank { "New product" }, color = GenesisInk, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
@@ -350,7 +350,7 @@ private fun ConversationSurface(
                 "Is this a new local product, existing local work, or organization-governed work?"
             },
             modifier = Modifier.padding(top = 12.dp),
-            fontFamily = FontFamily.Serif,
+            fontFamily = FontFamily.Default,
             fontWeight = FontWeight.Medium,
             fontSize = 25.sp,
             lineHeight = 32.sp,
@@ -763,7 +763,7 @@ private fun ReadyConversation(
                 ?: "Company circuit is ready",
             Modifier.padding(top = 16.dp),
             color = GenesisInk,
-            fontFamily = FontFamily.Serif,
+            fontFamily = FontFamily.Default,
             fontWeight = FontWeight.Bold,
             fontSize = 21.sp,
         )
@@ -836,7 +836,7 @@ private fun ProjectionSurface(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("LIVE PRODUCT STATE", color = GenesisBlue, fontWeight = FontWeight.Bold, fontSize = 10.sp)
-                Text("What the conversation has resolved", color = GenesisInk, fontFamily = FontFamily.Serif, fontSize = 22.sp, modifier = Modifier.padding(top = 7.dp))
+                Text("What the conversation has resolved", color = GenesisInk, fontFamily = FontFamily.Default, fontSize = 22.sp, modifier = Modifier.padding(top = 7.dp))
             }
             Icon(Icons.Default.Lock, contentDescription = null, tint = GenesisMuted, modifier = Modifier.size(17.dp))
             Text("Authority projection", color = GenesisMuted, fontSize = 10.sp, modifier = Modifier.padding(start = 7.dp))
@@ -1437,7 +1437,7 @@ private fun CompanyProjection(
 private fun EmptyProjection() {
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Box(Modifier.size(44.dp).background(Color(0xFFE7EAE8), CircleShape))
-        Text("The product will take shape here", Modifier.padding(top = 15.dp), color = GenesisInk, fontFamily = FontFamily.Serif, fontSize = 18.sp)
+        Text("The product will take shape here", Modifier.padding(top = 15.dp), color = GenesisInk, fontFamily = FontFamily.Default, fontSize = 18.sp)
         Text("Each resolved decision becomes durable, correlated state.", Modifier.padding(top = 6.dp), color = GenesisMuted, fontSize = 11.sp)
     }
 }
@@ -1451,7 +1451,7 @@ private fun GenesisProjection(genesis: ProjectGenesisViewResponse) {
     }
     if (revision.experience.productPromise.isNotBlank()) {
         ProjectionSection("EXPERIENCE CONTRACT") {
-            Text(revision.experience.productPromise, color = GenesisInk, fontFamily = FontFamily.Serif, fontSize = 18.sp, lineHeight = 24.sp)
+            Text(revision.experience.productPromise, color = GenesisInk, fontFamily = FontFamily.Default, fontSize = 18.sp, lineHeight = 24.sp)
             MetadataLine("For ${revision.experience.audience}", revision.experience.emotionalQualities.joinToString("  /  "))
             ProjectionList("Primary journey", revision.experience.primaryJourney)
             ProjectionList("Interaction principles", revision.experience.interactionPrinciples)

@@ -1,11 +1,15 @@
 package com.orchard.backend.agent
 
 import com.orchard.backend.analysis.DISPOSITION_COMPLETE
+import com.orchard.backend.analysis.ExecutableWorkPackage
+import com.orchard.backend.analysis.ExecutableWorkPackageStore
 import com.orchard.backend.analysis.PLAN_OPERATION_CREATE
 import com.orchard.backend.analysis.PLAN_OPERATION_DELETE
 import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
+import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
+import com.orchard.backend.analysis.compileExecutableWorkPackage
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.RISK_HIGH
@@ -78,8 +82,10 @@ private data class CodingWorkerModelEnvelope(
     val allowedActions: List<String>,
     val forbiddenActions: List<String>,
     val requiredOutputSchema: String,
+    val currentRevision: String,
     val run: WorkflowRunView,
     val executionPlan: RepositoryExecutionPlan? = null,
+    val workPackage: ExecutableWorkPackage? = null,
     val priorRejectedCodingDiagnostic: String? = null,
     val repositoryContext: CodingRepositoryContext,
 )
@@ -97,6 +103,8 @@ class CodingWorkerService(
     private val repositoryAnalysis: RepositoryAnalysisService? = null,
     private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
     private val attemptStore: CodingWorkerAttemptStore = TransientCodingWorkerAttemptStore(),
+    private val workPackageStore: ExecutableWorkPackageStore = TransientExecutableWorkPackageStore(),
+    private val pullRequestStore: CandidatePullRequestStore = TransientCandidatePullRequestStore(),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -105,6 +113,8 @@ class CodingWorkerService(
         require(retryBudget in 1..MAX_RETRY_BUDGET) { "Coding worker retry budget is invalid" }
         workerStore.loadEvents()
         attemptStore.load()
+        workPackageStore.load()
+        pullRequestStore.load()
         bootstrapFailedCandidateRestorations()
         bootstrapLegacyAttemptBlocks()
         bootstrapApplicationFailureBlocks()
@@ -115,6 +125,8 @@ class CodingWorkerService(
     fun executions(): List<CodingWorkerExecutionView> = codingWorkerExecutions(workerStore.loadEvents())
 
     fun attempts(): List<CodingWorkerAttempt> = attemptStore.load()
+
+    fun pullRequests(): List<CandidatePullRequest> = pullRequestStore.load()
 
     suspend fun tick(): CodingWorkerTickResult {
         val executions = codingWorkerExecutions(workerStore.loadEvents())
@@ -208,7 +220,18 @@ class CodingWorkerService(
         val run = candidateRuns(executions).singleOrNull { it.runId == runId }
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
         val workspacePath = requireNotNull(run.context.workspaceReservation).path
-        val restorationDiagnostic = restoreLatestFailedCandidate(run.runId, workspacePath, executions)
+        val latestFailedExecution = executions.lastOrNull {
+            it.claim.runId == run.runId && it.result?.status == CODING_EXECUTION_FAILED && it.result.revision != null
+        }
+        val latestAuditRepairExecution = executions.lastOrNull {
+            run.state == RUN_STATE_EVIDENCE_BLOCKED && it.claim.runId == run.runId &&
+                it.result?.status == CODING_EXECUTION_COMPLETED && it.result.revision != null && it.claim.workPackageId != null
+        }
+        val retainedExecution = listOfNotNull(latestFailedExecution, latestAuditRepairExecution)
+            .maxByOrNull { it.claim.executionId }
+        val restorationDiagnostic = if (latestFailedExecution?.claim?.workPackageId == null) {
+            restoreLatestFailedCandidate(run.runId, workspacePath, executions)
+        } else null
         if (restorationDiagnostic != null) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
         }
@@ -216,7 +239,12 @@ class CodingWorkerService(
         if (repositoryAnalysis != null && executionPlan == null) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.ANALYSIS_REQUIRED)
         }
-        if (executionPlan != null && workspaceGateway.currentRevision(workspacePath) != executionPlan.baseRevision) {
+        val currentRevision = workspaceGateway.currentRevision(workspacePath)
+        val retainedCandidateIsCurrent = retainedExecution?.let {
+            it.claim.executionPlanId == executionPlan?.planId && it.claim.executionPlanHash == executionPlan?.hash &&
+                it.result?.revision == currentRevision && it.claim.workPackageId != null
+        } == true
+        if (executionPlan != null && currentRevision != executionPlan.baseRevision && !retainedCandidateIsCurrent) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_STALE)
         }
         if (executionPlan?.content?.disposition == DISPOSITION_COMPLETE) {
@@ -251,10 +279,35 @@ class CodingWorkerService(
         val binding = modelProvider.bindingProfile()
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
         val toolchainPolicy = toolchainResolution.getOrNull()
+        val workPackage = executionPlan?.let { plan ->
+            val definition = run.workDefinition
+                ?: return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_BLOCKED, diagnostic = "The accepted plan has no work-definition authority.")
+            runCatching {
+                workPackageStore.load().lastOrNull {
+                    it.runId == run.runId && it.design.executionPlanId == plan.planId &&
+                        it.design.executionPlanHash == plan.hash && it.intent.definitionId == definition.definitionId &&
+                        it.intent.definitionHash == definition.hash
+                } ?: run {
+                    val packageContext = workspaceGateway.collectIntelligenceContext(
+                        workspacePath,
+                        plan.baseRevision,
+                        codingPlanContextPaths(plan),
+                    )
+                    workPackageStore.appendNext(run.runId) { packageId, revision ->
+                        compileExecutableWorkPackage(packageId, revision, definition, plan, packageContext)
+                    }
+                }
+            }.getOrElse { error ->
+                return CodingWorkerTickResult(
+                    CodingWorkerTickStatus.PLAN_BLOCKED,
+                    diagnostic = "Executable work-package admission failed: ${error.message.orEmpty()}",
+                )
+            }
+        }
         val claim = try {
             requireNotNull(workerStore.appendNext { eventId, preceding ->
                 val currentExecutions = codingWorkerExecutions(preceding)
-                val claim = newClaim(eventId, currentExecutions, run, binding, toolchainPolicy, assignment, executionPlan)
+                val claim = newClaim(eventId, currentExecutions, run, binding, toolchainPolicy, assignment, executionPlan, workPackage)
                 CodingWorkerEvent(eventId = eventId, claim = claim)
             }.claim)
         } catch (_: Exception) {
@@ -307,11 +360,14 @@ class CodingWorkerService(
         ) = CodingWorkerModelEnvelope(
             executionProfile = profile,
             workflowStepId = CODING_WORKFLOW_STEP_ID,
-            allowedActions = listOf(CODING_FILE_WRITE, CODING_FILE_REPLACE, CODING_FILE_DELETE),
+            allowedActions = workPackage?.ownership?.allowedActions
+                ?: listOf(CODING_FILE_WRITE, CODING_FILE_REPLACE, CODING_FILE_DELETE),
             forbiddenActions = listOf("EXECUTE_COMMAND", "APPROVE_CRITERION", "COMPLETE_WORKFLOW", "PUSH", "MERGE"),
-            requiredOutputSchema = CODING_PROPOSAL_SCHEMA,
+            requiredOutputSchema = if (workPackage == null) CODING_PROPOSAL_SCHEMA else BOUNDED_TOOL_BATCH_SCHEMA,
+            currentRevision = requireNotNull(currentRevision),
             run = codingWorkerRunProjection(run),
             executionPlan = executionPlan,
+            workPackage = workPackage,
             priorRejectedCodingDiagnostic = retryDiagnostic,
             repositoryContext = repositoryContext,
         )
@@ -320,7 +376,8 @@ class CodingWorkerService(
             retryDiagnostic: String? = priorRejectedCodingDiagnostic,
         ): String {
             val envelopeJson = json.encodeToString(envelope(repositoryContext, retryDiagnostic))
-            return "$systemPrompt\n\nAuthoritative coding execution envelope:\n$envelopeJson"
+            val promptPolicy = if (workPackage == null) systemPrompt else BOUNDED_TOOL_SYSTEM_PROMPT
+            return "$promptPolicy\n\nAuthoritative coding execution envelope:\n$envelopeJson"
         }
         val planContextBudget = executionPlan?.let {
             val emptyContext = CodingRepositoryContext(emptyList(), 0)
@@ -335,7 +392,7 @@ class CodingWorkerService(
             executionPlan?.let { plan ->
                 workspaceGateway.collectPlanContext(
                     workspacePath = workspacePath,
-                    repositoryRevision = plan.baseRevision,
+                    repositoryRevision = requireNotNull(currentRevision),
                     paths = planPaths,
                     query = contextQuery,
                     maxSerializedBytes = requireNotNull(planContextBudget),
@@ -409,9 +466,13 @@ class CodingWorkerService(
         val outputWithinBudget = generation.promptTokens <= profile.inputBudgetTokens &&
             generation.completionTokens <= profile.outputBudgetTokens &&
             estimateModelTokens(generation.text) <= profile.outputBudgetTokens
-        val proposal = if (outputWithinBudget) {
+        val proposal = if (outputWithinBudget && workPackage == null) {
             runCatching { strictOutputJson.decodeFromString<CodingPatchProposal>(generation.text) }.getOrNull()
         } else null
+        val toolBatch = if (outputWithinBudget && workPackage != null) {
+            runCatching { strictOutputJson.decodeFromString<BoundedCodingToolBatch>(generation.text) }.getOrNull()
+        } else null
+        val schemaValid = proposal != null || toolBatch != null
         val modelExecution = recordModelExecution(
             profile,
             binding,
@@ -420,7 +481,7 @@ class CodingWorkerService(
             prompt,
             generation,
             elapsedMillis(startedAt),
-            proposal != null,
+            schemaValid,
             admission.evidence,
         ) ?: return finish(
             claim,
@@ -428,15 +489,18 @@ class CodingWorkerService(
             CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
             "Model execution provenance could not be saved.",
         )
-        if (proposal == null) return finish(
+        if (!schemaValid) return finish(
             claim,
             CODING_EXECUTION_BLOCKED,
             CodingWorkerTickStatus.INVALID_PROPOSAL,
             INVALID_CODING_PROPOSAL_DIAGNOSTIC,
             modelExecutionId = modelExecution.executionId,
         )
-        val proposalHash = sha256(strictOutputJson.encodeToString(proposal))
-        if (executionPlan != null) {
+        val proposalHash = sha256(
+            proposal?.let { strictOutputJson.encodeToString(it) }
+                ?: strictOutputJson.encodeToString(requireNotNull(toolBatch))
+        )
+        if (executionPlan != null && proposal != null) {
             val rejectedAnchorDiagnostic = runCatching {
                 codingRejectedAnchorDiagnostic(
                     proposal = proposal,
@@ -523,13 +587,23 @@ class CodingWorkerService(
             proposalHash,
         )
         val candidate = runCatching {
-            workspaceGateway.applyAndCommit(
-                requireNotNull(run.context.workspaceReservation).path,
-                proposal,
-                claim.executionId,
-            )
+            if (toolBatch != null) {
+                workspaceGateway.applyBoundedToolBatch(
+                    requireNotNull(run.context.workspaceReservation).path,
+                    requireNotNull(workPackage),
+                    toolBatch,
+                    claim.executionId,
+                )
+            } else {
+                workspaceGateway.applyAndCommit(
+                    requireNotNull(run.context.workspaceReservation).path,
+                    requireNotNull(proposal),
+                    claim.executionId,
+                )
+            }
         }.getOrElse { error ->
-            val applicationDiagnostic = codingApplicationDiagnostic(error.message.orEmpty(), proposal)
+            val applicationDiagnostic = proposal?.let { codingApplicationDiagnostic(error.message.orEmpty(), it) }
+                ?: "The bounded coding tool batch could not be applied: ${error.message.orEmpty()}"
             if (executionPlan != null) {
                 val storageDiagnostic = recordCorrectiveRejection(
                     run.runId,
@@ -550,7 +624,7 @@ class CodingWorkerService(
             return finish(
                 claim,
                 CODING_EXECUTION_FAILED,
-                CodingWorkerTickStatus.APPLICATION_FAILED,
+                if (toolBatch == null) CodingWorkerTickStatus.APPLICATION_FAILED else CodingWorkerTickStatus.PLAN_BLOCKED,
                 applicationDiagnostic,
                 modelExecution.executionId,
                 proposalHash,
@@ -598,7 +672,7 @@ class CodingWorkerService(
                 proposalHash,
                 candidate,
             )
-            if (failed.status != CodingWorkerTickStatus.STORAGE_UNAVAILABLE) {
+            if (failed.status != CodingWorkerTickStatus.STORAGE_UNAVAILABLE && workPackage == null) {
                 runCatching {
                     workspaceGateway.revertCandidate(
                         requireNotNull(run.context.workspaceReservation).path,
@@ -611,6 +685,25 @@ class CodingWorkerService(
         }
         val evidenceResult = submitEvidence(run, candidate, toolchainPolicy)
         return if (evidenceResult == null) {
+            if (workPackage != null) {
+                val pullRequest = runCatching {
+                    pullRequestStore.load().lastOrNull {
+                        it.runId == run.runId && it.candidateRevision == candidate.revision
+                    } ?: pullRequestStore.appendNext { pullRequestId ->
+                        val evidence = workspace.snapshot(MESSAGE_READY).workflowRuns.single { it.runId == run.runId }.evidence
+                        newCandidatePullRequest(pullRequestId, workPackage, candidate, evidence)
+                    }
+                }
+                if (pullRequest.isFailure) return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    pullRequest.exceptionOrNull()?.message,
+                    modelExecution.executionId,
+                    proposalHash,
+                    candidate,
+                )
+            }
             finish(
                 claim,
                 CODING_EXECUTION_COMPLETED,
@@ -621,6 +714,25 @@ class CodingWorkerService(
                 candidate,
             )
         } else {
+            if (workPackage != null) {
+                val plan = requireNotNull(executionPlan)
+                val storageDiagnostic = recordCorrectiveRejection(
+                    run.runId,
+                    plan.planId,
+                    plan.hash,
+                    proposalHash,
+                    evidenceResult,
+                )
+                if (storageDiagnostic != null) return finish(
+                    claim,
+                    CODING_EXECUTION_FAILED,
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    storageDiagnostic,
+                    modelExecution.executionId,
+                    proposalHash,
+                    candidate,
+                )
+            }
             val failed = finish(
                 claim,
                 CODING_EXECUTION_FAILED,
@@ -630,7 +742,7 @@ class CodingWorkerService(
                 proposalHash,
                 candidate,
             )
-            if (failed.status != CodingWorkerTickStatus.STORAGE_UNAVAILABLE) {
+            if (failed.status != CodingWorkerTickStatus.STORAGE_UNAVAILABLE && workPackage == null) {
                 runCatching {
                     workspaceGateway.revertCandidate(
                         requireNotNull(run.context.workspaceReservation).path,
@@ -675,7 +787,11 @@ class CodingWorkerService(
                     currentPlan = repositoryAnalysis?.currentPlan(run.runId),
                     bindToCurrentPlan = repositoryAnalysis != null,
                     retryBudget = retryBudget,
-                )
+                ) || run.state == RUN_STATE_EVIDENCE_BLOCKED && executions.lastOrNull {
+                    it.claim.runId == run.runId
+                }?.let { execution ->
+                    execution.claim.workPackageId != null && execution.result?.status == CODING_EXECUTION_COMPLETED
+                } == true
             }
             .sortedBy { it.runId }
             .toList()
@@ -689,6 +805,7 @@ class CodingWorkerService(
         toolchainPolicy: ResolvedToolchainPolicy?,
         assignment: com.orchard.backend.company.StaffAssignment?,
         executionPlan: RepositoryExecutionPlan?,
+        workPackage: ExecutableWorkPackage?,
     ): CodingWorkerClaim {
         val draft = CodingWorkerClaim(
             executionId = executionId,
@@ -702,6 +819,8 @@ class CodingWorkerService(
             riskClass = assignment?.risk,
             executionPlanId = executionPlan?.planId,
             executionPlanHash = executionPlan?.hash,
+            workPackageId = workPackage?.packageId,
+            workPackageHash = workPackage?.hash,
             toolchainPackId = toolchainPolicy?.packId,
             toolchainPackVersion = toolchainPolicy?.packVersion,
             toolchainProfileId = toolchainPolicy?.profileId,
@@ -1111,6 +1230,7 @@ class CodingWorkerService(
     private companion object {
         const val CODING_WORKFLOW_STEP_ID = "DELIVER_CHANGE:CODING_PATCH"
         const val CODING_PROPOSAL_SCHEMA = "coding-patch-proposal-v2"
+        const val BOUNDED_TOOL_BATCH_SCHEMA = "bounded-coding-tool-batch-v1"
         const val CODING_EVIDENCE_PRODUCER = "orchard-coding-worker-v1"
         const val DEFAULT_RETRY_BUDGET = 3
         const val MAX_RETRY_BUDGET = 10
@@ -1125,6 +1245,15 @@ class CodingWorkerService(
             ) { "Missing coding worker prompt" }
             return stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         }
+
+        private val BOUNDED_TOOL_SYSTEM_PROMPT = """
+            You are Orchard's bounded implementation worker.
+
+            Return exactly one JSON object matching bounded-coding-tool-batch-v1:
+            {"summary":"short implementation description","expectedRevision":"40-character current revision from the envelope","operations":[{"action":"REWRITE_FILE|CREATE_FILE|DELETE_FILE|REPLACE_LITERAL","path":"authorized relative path","content":null,"expectedLiteral":null,"replacement":null,"expectedCount":null}]}
+
+            Treat workPackage as complete intent, design, ownership, source, check, and escalation authority. Implement the required behavior without redesigning it. Use only paths inside workPackage.ownership.paths and only actions allowed by workPackage.ownership.allowedActions. REWRITE_FILE supplies complete resulting UTF-8 content. CREATE_FILE is valid only for workPackage.ownership.createPaths. REPLACE_LITERAL supplies expectedLiteral, replacement, and its exact expectedCount; Orchard validates cardinality. Use expectedRevision from the current repository context. Do not emit exact source anchors, commands, Markdown, approvals, evidence, Git actions, or claims that checks passed.
+        """.trimIndent()
     }
 }
 

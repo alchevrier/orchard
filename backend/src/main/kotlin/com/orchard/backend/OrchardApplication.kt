@@ -12,9 +12,11 @@ import com.orchard.backend.agent.GenesisProposalStatus
 import com.orchard.backend.agent.CodingWorkerTickStatus
 import com.orchard.backend.agent.FileCodingWorkerAttemptStore
 import com.orchard.backend.agent.FileCodingWorkerStore
+import com.orchard.backend.agent.FileCandidatePullRequestStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
+import com.orchard.backend.analysis.FileExecutableWorkPackageStore
 import com.orchard.backend.analysis.FileRepositoryAnalysisAttemptStore
 import com.orchard.backend.analysis.FileRepositoryBaselineAnalysisStore
 import com.orchard.backend.analysis.FileRepositoryIntelligenceGraphStore
@@ -274,6 +276,8 @@ fun main() {
         repositoryAnalysis = repositoryAnalysis,
         profileSettingsStore = modelProfileSettingsStore,
         attemptStore = codingWorkerAttemptStore,
+        workPackageStore = FileExecutableWorkPackageStore(OrchardPaths.WORKSPACE_DIR),
+        pullRequestStore = FileCandidatePullRequestStore(OrchardPaths.WORKSPACE_DIR),
     )
     val companyAudit = CompanyAuditService(
         workspace,
@@ -1342,6 +1346,17 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(attempts)
+        }
+        get("/api/coding-worker/pull-requests") {
+            if (codingWorker == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val pullRequests = runCatching { codingWorker.pullRequests() }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(pullRequests)
         }
         post("/api/coding-worker/runs/{runId}/retry") {
             val runId = call.parameters["runId"]?.toLongOrNull()

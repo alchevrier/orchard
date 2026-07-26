@@ -4,9 +4,11 @@
 
 Orchard is a cloneable, runnable work-in-progress prototype for turning natural-language intent into governed, evidence-producing software workflows. Its local-first stack combines a durable conversational conductor, a Compose Desktop control surface, a Ktor backend, deterministic workflow validation, repository execution, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 10.2 is in progress. The durable multi-objective conductor, repository onboarding, workload-specific model onboarding, and hardware-aware local model presets are implemented and validated. Completion remains intentionally blocked on the three-change Orchard-on-Orchard replacement proof.
+> **Project status:** Milestone 10.2.1 is in progress. The real `qwen3-coder:30b` typography replay changed exactly two admitted files, repaired an injected compile failure on the same candidate lineage, and passed the full build. Completion now requires measured small/large by minimal/full comparison records; the Ollama proxy's operation-shaped response cancellation is bypassed through the supported local compatible-provider boundary.
 
-> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The active milestone is 10.2: Durable Multi-Objective Conversational Conductor.
+> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The next milestone is 10.2.1: Executable Work Packages and Persistent Coding.
+
+> **Architecture:** [ADR 046](docs/adrs/046-executable-work-packages-and-persistent-coding.md) defines the proposed replacement coding architecture and the authority boundaries preserved from ADR 036.
 
 ## Documentation
 
@@ -39,9 +41,10 @@ Implemented and validated:
 
 Completion gate:
 
-- Orchard must use the conductor to deliver three consecutive changes to Orchard itself: a bounded defect, a backend/frontend contract change, and a persistence-compatible authority change.
-- Each change must reach local promotion through planning, coding, verification, independent audit, and acceptance with no source edits outside admitted Orchard worktrees.
-- The proof must report human interventions, failed attempts, elapsed time, provider and token usage, final evidence, and any attempted bypass. Until then, ADR 044 remains `Proposed` and Milestone 10.2 remains `IN_PROGRESS`.
+- The original replacement proof is paused. A bounded typography experiment showed that deterministic governance rejects invalid candidates correctly, but one-shot model-authored exact-text patches and candidate reversion after local failures do not form a viable coding loop, even with the 120B binding.
+- Milestone 10.2.1 must provide an adequate executable work package, bounded editing tools, persistent candidate repair, PR-centered independent review, and measured smaller-model execution before the three-change proof resumes.
+- After that milestone, Orchard must deliver a bounded defect, a backend/frontend contract change, and a persistence-compatible authority change through verification, independent audit, acceptance, and local promotion with no source edits outside admitted Orchard worktrees.
+- The proof must report human interventions, failed attempts, elapsed time, provider and token usage, peak memory, final evidence, and any attempted bypass. Until then, ADR 044 remains `Proposed` and Milestone 10.2 remains `IN_PROGRESS`.
 
 See [Durable Conversations](docs/user-guide/conversations.md) for operation and [ADR 044](docs/adrs/044-durable-multi-objective-conversational-conductor.md) for the proposed architectural decision.
 

@@ -14,6 +14,12 @@ import kotlin.test.assertTrue
 
 class ProjectInboxWorkspaceTest {
     @Test
+    fun `platform typography remains source bound`() {
+        val source = java.nio.file.Files.readString(java.nio.file.Path.of("src/desktopMain/kotlin/com/orchard/frontend/ui/GuidedGenesisWorkspace.kt"))
+        assertTrue(!source.contains("FontFamily.Serif"))
+    }
+
+    @Test
     fun `inbox filters toggle independently for backend intersection filtering`() {
         var filters = emptySet<ProjectInboxFilter>()
 

@@ -32,6 +32,8 @@ data class CodingWorkerClaim(
     val riskClass: String? = null,
     val executionPlanId: Long? = null,
     val executionPlanHash: String? = null,
+    val workPackageId: Long? = null,
+    val workPackageHash: String? = null,
     val toolchainPackId: String? = null,
     val toolchainPackVersion: Int? = null,
     val toolchainProfileId: String? = null,
@@ -190,6 +192,15 @@ internal fun codingWorkerClaimHash(claim: CodingWorkerClaim): String = stagedPla
     "${claim.executionId}:${claim.runId}:${claim.attempt}:${claim.contextHash}:${claim.workspacePath}:" +
         "${claim.bindingFingerprint}:${claim.assignmentId}:${claim.staffRole.orEmpty()}:${claim.riskClass.orEmpty()}:" +
         "${claim.executionPlanId}:${claim.executionPlanHash.orEmpty()}:" +
+        "${claim.workPackageId}:${claim.workPackageHash.orEmpty()}:" +
+        "${claim.toolchainPackId.orEmpty()}:${claim.toolchainPackVersion}:" +
+        "${claim.toolchainProfileId.orEmpty()}:${claim.toolchainPolicyHash.orEmpty()}:${claim.claimedAt}"
+)
+
+private fun preWorkPackageCodingWorkerClaimHash(claim: CodingWorkerClaim): String = stagedPlanHash(
+    "${claim.executionId}:${claim.runId}:${claim.attempt}:${claim.contextHash}:${claim.workspacePath}:" +
+        "${claim.bindingFingerprint}:${claim.assignmentId}:${claim.staffRole.orEmpty()}:${claim.riskClass.orEmpty()}:" +
+        "${claim.executionPlanId}:${claim.executionPlanHash.orEmpty()}:" +
         "${claim.toolchainPackId.orEmpty()}:${claim.toolchainPackVersion}:" +
         "${claim.toolchainProfileId.orEmpty()}:${claim.toolchainPolicyHash.orEmpty()}:${claim.claimedAt}"
 )
@@ -249,6 +260,7 @@ private fun validateCodingWorkerEvent(
         )
         val staffingAuthority = listOfNotNull(claim.assignmentId, claim.staffRole, claim.riskClass)
         val planAuthority = listOfNotNull(claim.executionPlanId, claim.executionPlanHash)
+        val workPackageAuthority = listOfNotNull(claim.workPackageId, claim.workPackageHash)
         require(staffingAuthority.isEmpty() || staffingAuthority.size == 3) {
             "Coding worker claim has partial staffing authority"
         }
@@ -266,6 +278,15 @@ private fun validateCodingWorkerEvent(
                 "Coding worker execution-plan authority is invalid"
             }
         }
+        require(workPackageAuthority.isEmpty() || workPackageAuthority.size == 2) {
+            "Coding worker claim has partial work-package authority"
+        }
+        if (workPackageAuthority.isNotEmpty()) {
+            require(planAuthority.size == 2 && requireNotNull(claim.workPackageId) > 0 &&
+                requireNotNull(claim.workPackageHash).matches(SHA256)) {
+                "Coding worker work-package authority is invalid"
+            }
+        }
         require(toolchainAuthority.isEmpty() || toolchainAuthority.size == 4) {
             "Coding worker claim has partial toolchain authority"
         }
@@ -278,10 +299,12 @@ private fun validateCodingWorkerEvent(
             ) { "Coding worker claim toolchain authority is invalid" }
         }
         val currentHash = codingWorkerClaimHash(claim.copy(hash = ""))
+        val preWorkPackageHash = if (workPackageAuthority.isEmpty()) preWorkPackageCodingWorkerClaimHash(claim.copy(hash = "")) else null
         val prePlanHash = if (planAuthority.isEmpty()) prePlanCodingWorkerClaimHash(claim.copy(hash = "")) else null
         val preCompanyHash = if (staffingAuthority.isEmpty()) preCompanyCodingWorkerClaimHash(claim.copy(hash = "")) else null
         val legacyHash = if (toolchainAuthority.isEmpty()) legacyCodingWorkerClaimHash(claim.copy(hash = "")) else null
-        require(claim.hash == currentHash || claim.hash == prePlanHash || claim.hash == preCompanyHash || claim.hash == legacyHash) {
+        require(claim.hash == currentHash || claim.hash == preWorkPackageHash || claim.hash == prePlanHash ||
+            claim.hash == preCompanyHash || claim.hash == legacyHash) {
             "Coding worker claim hash mismatch"
         }
         require(executions.none { it.claim.runId == claim.runId && it.result == null }) {

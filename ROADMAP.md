@@ -5,11 +5,11 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `5` |
+| Version | `6` |
 | Status | `ACTIVE` |
-| Updated | `2026-07-21` |
+| Updated | `2026-07-26` |
 | Delivered baseline | Milestone 10.1 |
-| Next milestone | `10.2` Durable Multi-Objective Conversational Conductor |
+| Next milestone | `10.2.1` Executable Work Packages and Persistent Coding |
 | Canonical path | `ROADMAP.md` |
 
 ## How To Use This Roadmap
@@ -133,7 +133,7 @@ Non-goals:
 ### Milestone 10.2: Durable Multi-Objective Conversational Conductor
 
 - State: `IN_PROGRESS`
-- Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`
+- Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`, `10.2.1`
 - Governing ADRs: ADR 010, ADR 011, ADR 038 through ADR 045; ADR 044 and ADR 045 must be accepted before completion.
 
 Goal: deliver the first complete Orchard operating experience: repository-first entry into a project, an inbox-style interface for following and driving ticket work, and a Jira-like project overview, all backed by the durable multi-objective conductor from discussion through local promotion.
@@ -196,10 +196,11 @@ Delivery slices:
   - Inspect installed model endpoints and bindings, register environment-referenced local or remote providers, and assign compatible bindings independently to conversation, definition, design synthesis, repository analysis, coding, and audit profiles.
   - Treat model installation or download as explicit machine setup; onboarding registers and verifies models but does not run package managers or `ollama pull`.
 7. **Orchard-on-Orchard replacement proof**
+  - Resume only after Milestone 10.2.1 replaces the falsified one-shot exact-replacement execution model.
   - Use one conversation to deliver three consecutive Orchard changes: a bounded defect, a cross-backend/frontend contract, and an authority change with persistence compatibility, tests, and an ADR.
-  - Each change passes through planning, coding, verification, independent audit, acceptance, and local promotion.
+  - Each change passes through design, an adequate executable work package, persistent coding and repair, verification, a candidate PR, independent audit, acceptance, and local promotion.
   - Conversation, explicit admission, provider configuration, and inspection are allowed; repository source edits outside Orchard's admitted coding worktrees are not.
-  - Report human interventions, failed attempts, elapsed time, model/provider usage, tokens, and final promoted evidence.
+  - Report human interventions, failed attempts, elapsed time, model/provider usage, tokens, peak memory, final promoted evidence, and any attempted bypass.
 
 Exit evidence:
 
@@ -220,7 +221,7 @@ Exit evidence:
 - A user can create a report scope, subscribe to it, receive a meaningful evidence-backed delta, reply from its canonical thread, and observe the admitted consequence on the same ticket and project board after restart.
 - The inbox and Jira-like board preserve one ticket identity and state; neither projection can drift from or silently overwrite the other.
 - Workload-specific model assignments survive restart, reject incompatible context/capability budgets, and persist only credential references rather than secrets.
-- The three defined Orchard-on-Orchard proof changes reach local promotion with no source edits outside Orchard worktrees and no bypass of the conductor or existing governance gates.
+- After Milestone 10.2.1, the three defined Orchard-on-Orchard proof changes reach local promotion with no source edits outside Orchard worktrees and no bypass of the conductor or existing governance gates.
 - Full backend/frontend build, clean diagnostics, compatibility tests, ADR acceptance, user/developer documentation, and committed milestone.
 
 Non-goals:
@@ -250,6 +251,90 @@ Onboarding-gate evidence recorded on 2026-07-19:
 - Focused tests cover canonical local onboarding, restart idempotency, real HTTP Git cloning, embedded-credential rejection, model registration, compatible coding assignment, and incompatible-budget rejection.
 - At that date, the remaining gate for the original onboarding scope was to run the three required Orchard-on-Orchard changes through the newly onboarded authority and record the proof report.
 - These records prove the technical repository and model gate only. They do not claim completion of the Version 5 direct-to-project onboarding, baseline reports, subscriptions, canonical ticket threads, inbox, or board experience.
+
+Execution-model experiment recorded on 2026-07-26:
+
+- Orchard attempted a bounded two-file typography change through revision-pinned repository analysis, coding, verification, evidence, audit, acceptance, and promotion authority.
+- Deterministic governance correctly rejected ambiguous or fabricated anchors, missing operations, cosmetic changes, tautological tests, partial semantic changes, and compile failures; no rejected candidate reached promotion.
+- The 120B coding binding repeatedly failed to express the simple implementation through one-shot exact-text replacement proposals. Near-complete candidates were reverted and the repository was replanned instead of repairing local compile or test defects on the same candidate.
+- This falsifies the current design assumption that additional context, exact replacement diagnostics, and bounded retries make one-shot model-authored patch serialization a viable general coding interface.
+- The replacement proof is paused. Its durable attempts and retained candidates remain experiment evidence, and the backend dispatcher was stopped cleanly with the isolated worktree clean.
+- Completion of Milestone 10.2 now depends on Milestone 10.2.1 and a successful replay using a materially smaller local coding model.
+
+### Milestone 10.2.1: Executable Work Packages and Persistent Coding
+
+- State: `IN_PROGRESS`
+- Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`
+- Unblocks: `10.2`
+- Governing ADR: ADR 046 (proposed until the replacement runtime and replay evidence are complete)
+
+Goal: replace speculative one-shot patch generation with an engineering loop in which approved design becomes an adequate executable work package, a coding worker implements and repairs one persistent candidate, and independent analysis reviews the resulting PR against code, design, and intent.
+
+Operating model:
+
+- Principal authority owns need, intent, desired outcomes, and constraints.
+- Senior design authority converts intent into a technical solution using the architecture bank and identifies ownership boundaries, risks, invariants, and verification strategy.
+- Repository knowledge supports reuse and implementation discovery without pretending the design already knows every final changed file.
+- A deterministic work-package compiler and independent adequacy verifier prove that a coding assignment is actionable before coding begins.
+- The coding worker explores within admitted boundaries, proposes the actual file scope, writes code and tests, compiles, runs focused checks, and repairs the same isolated candidate until it passes or reports a genuine design blocker.
+- A candidate PR freezes the actual diff, claims, tests, evidence, and deviations. Independent analysis then verifies that the claims match the code and that the implementation matches the admitted intent and design.
+
+Deliverables:
+
+1. **Versioned executable work package**
+  - Pin intent revision, admitted design, repository revision, ownership boundary, allowed actions, constraints, invariants, expected behavior, verification strategy, and escalation conditions.
+  - Include full editable source for bounded files or stable symbol-scoped source for larger files, plus relevant APIs, imports, repository conventions, and neighboring examples.
+  - Distinguish likely design paths from the final implementation scope discovered by the coder.
+2. **Independent package adequacy verification**
+  - Reject missing behavior, contradictory constraints, unavailable APIs, insufficient source, unverifiable outcomes, and assignments that require the coder to make an architectural decision.
+  - Answer whether a competent bounded coder can execute the package without rediscovering intent or design.
+3. **Bounded coding tool protocol**
+  - Replace model-authored exact old-text anchors with trusted operations such as bounded file rewrite, symbol replacement, class-member insertion, deterministic literal replacement with expected cardinality, file creation, deletion, source reads, and named checks.
+  - Validate revision, path authority, syntax boundaries, operation cardinality, and resulting diff transactionally.
+4. **Persistent candidate repair loop**
+  - Preserve one isolated branch and candidate lineage across compile, test, lint, and semantic failures.
+  - Return focused diagnostics and relevant source to the coding worker, checkpoint valid progress, and reserve repository reanalysis for stale authority or genuine design/scope defects.
+  - Revert only when the package is abandoned, superseded, or proven invalid.
+5. **PR-centered independent review**
+  - Produce a local candidate PR artifact containing the actual diff, changed paths, implementation claims, tests, commands, evidence, and declared deviations.
+  - Review claim truthfulness separately from intent and design alignment.
+  - Preserve independent verification, architecture audit, quality audit, company acceptance, and controlled local promotion.
+6. **Hardware and model degradation baseline**
+  - Define supported 16, 32, 64, and 128 GiB profiles rather than treating a 64 GB model as the minimum viable coder.
+  - Benchmark small, medium, and large coding bindings on the same fixed task suite and record completion, repair count, fabricated references, scope violations, changed lines, time, tokens, and peak memory.
+  - Compare minimal tooling with the full Orchard architecture to measure what the system contributes beyond raw model capability.
+
+Exit evidence:
+
+- Replay the bounded typography task with no model-authored exact-text anchors and no repository reanalysis for local compile or test defects.
+- A materially smaller local coding model changes exactly the required files, writes substantive production-bound tests, repairs at least one injected compile failure on the same candidate lineage, and reaches a reviewable PR.
+- The coder may refine exact changed paths within the admitted ownership boundary; out-of-bound changes fail closed or escalate to design authority.
+- Package adequacy tests reject missing source, unavailable imports or helpers, contradictory requirements, unverifiable outcomes, and hidden design decisions before coding starts.
+- Deterministic tool tests cover stale revisions, ambiguous symbols, unexpected replacement cardinality, unauthorized paths, malformed source, partial application, restart recovery, and transactional rollback.
+
+Implementation evidence recorded on 2026-07-26:
+
+- Versioned executable work packages, deterministic adequacy admission, locked JSONL persistence, and package-pinned coding claims are implemented.
+- Package-backed coding emits bounded tool batches rather than exact-text patch anchors. Trusted source reads, rewrites, creation, deletion, cardinality-checked literal replacement, and named checks fail closed at the package boundary.
+- Verification and audit failures preserve and repair the current candidate lineage without repository reanalysis. The governed company scenario reaches audit, acceptance, and promotion through this persistent loop.
+- Candidate PR artifacts freeze claims, paths, checks, evidence, and deviations; independent audit receives the PR with separate claim-truthfulness and intent/design review questions.
+- The deterministic typography replay removes all six Serif uses present in the production source, injects a failing check, and repairs it on a direct descendant commit under one package.
+- Durable benchmark records and the required small/large by minimal/full matrix are implemented for 16, 32, 64, and 128 GiB hardware profiles.
+- The real `qwen3-coder:30b` replay completed on 2026-07-26 through Ollama 0.32.4's local llama.cpp-compatible runner endpoint. The model removed all six Serif references, added a production-source-bound test, received and repaired one injected unresolved-symbol failure, and produced passing frontend and full-build evidence on direct descendant commit `650215a4cb5033d95f76e1bff195a11af25590bb` of failed candidate `7fa08722b02d29e3d845478638d2ef0926e16f0e`.
+- The candidate changed exactly the two admitted files, with 12 additions and 6 deletions. Accepted and corrective runner calls recorded 1,070 input tokens and 1,093 output tokens; the installed model artifact is 18 GB. Early malformed schema and source operations were rejected before mutation.
+- Ollama 0.32.4's `/api/generate` and `/api/chat` proxy paths canceled this operation-shaped response after 72 generated tokens while the underlying local runner completed normally. The replay used Orchard's supported local compatible-provider boundary; provider conformance must retain a regression for this proxy behavior.
+- The milestone remains `IN_PROGRESS` until the required small/large by minimal/full comparison is populated with measured records rather than synthetic matrix fixtures.
+- PR analysis proves both that implementation claims match the actual code and that the result satisfies the pinned intent and design.
+- Verification, independent audit, acceptance, and promotion remain separate from coding authority and reject self-approval.
+- The benchmark reports quality degradation across model and hardware tiers and demonstrates measurable architectural compensation for smaller models.
+- Full backend/frontend build, clean diagnostics, accepted ADR, updated user/developer documentation, and committed milestone.
+
+Non-goals:
+
+- Guaranteeing that every task succeeds on the smallest supported model.
+- Allowing the coding worker to alter intent, weaken design constraints, approve its own package, or accept its own implementation.
+- Unrestricted shell access or mutation outside admitted worktrees and ownership boundaries.
+- Remote Git hosting integration; the first PR artifact and promotion remain local and revision-pinned.
 
 ### Milestone 10.3: Identity, Delegation, Quorum, and Signed Decisions
 

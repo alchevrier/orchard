@@ -13,11 +13,15 @@ import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.analysis.compactRepositoryContextToBudget
 import com.orchard.backend.analysis.TransientRepositoryExecutionPlanStore
 import com.orchard.backend.analysis.TransientRepositoryAnalysisAttemptStore
+import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
 import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_BLOCKED
 import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
 import com.orchard.backend.analysis.RepositoryEvidenceCitation
 import com.orchard.backend.agent.CODING_FILE_REPLACE
 import com.orchard.backend.agent.CODING_FILE_WRITE
+import com.orchard.backend.agent.BOUNDED_TOOL_REWRITE_FILE
+import com.orchard.backend.agent.BoundedCodingToolBatch
+import com.orchard.backend.agent.BoundedCodingToolOperation
 import com.orchard.backend.agent.CodingFileOperation
 import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
@@ -448,6 +452,7 @@ class CompanyCircuitTest {
             LocalCodingWorkspaceGateway(),
             companyControl = company,
         )
+        val workPackages = TransientExecutableWorkPackageStore()
         val worker = CodingWorkerService(
             workspace = workspace,
             modelProviders = listOf(staff),
@@ -456,6 +461,7 @@ class CompanyCircuitTest {
             companyControl = company,
             repositoryAnalysis = analysis,
             retryBudget = 5,
+            workPackageStore = workPackages,
         )
 
         assertEquals(CodingWorkerTickStatus.ANALYSIS_REQUIRED, worker.tick().status)
@@ -465,23 +471,27 @@ class CompanyCircuitTest {
         val initialRevision = LocalCodingWorkspaceGateway().currentRevision(reservedPath.toString())
         val initialReadme = Files.readString(reservedPath.resolve("README.md"))
         assertEquals(CodingWorkerTickStatus.PLAN_BLOCKED, worker.tick().status)
+        assertEquals(1, workPackages.load().size)
+        assertEquals(workPackages.load().single().packageId, worker.executions().single().claim.workPackageId)
+        assertEquals(workPackages.load().single().hash, worker.executions().single().claim.workPackageHash)
         assertEquals(1, staff.codingCallCount)
         assertEquals(initialRevision, LocalCodingWorkspaceGateway().currentRevision(reservedPath.toString()))
         assertEquals(initialReadme, Files.readString(reservedPath.resolve("README.md")))
         assertEquals(CodingWorkerTickStatus.VERIFICATION_FAILED, worker.tick().status)
         assertEquals(2, staff.codingCallCount)
-        assertEquals(CodingWorkerTickStatus.IDLE, worker.tick().status)
-        assertEquals(2, staff.codingCallCount)
-        assertEquals(CodingWorkerTickStatus.RETRY_AUTHORIZED, worker.authorizeRetry(1).status)
-        assertEquals(CodingWorkerTickStatus.PLAN_STALE, worker.tick().status)
-        assertEquals(2, staff.codingCallCount)
-        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick().status)
         val secondAttempt = worker.tick()
         assertEquals(
             CodingWorkerTickStatus.CANDIDATE_COMPLETED,
             secondAttempt.status,
             secondAttempt.execution?.result?.diagnostic,
         )
+        assertEquals(1, workPackages.load().size)
+        assertEquals(workPackages.load().single().packageId, secondAttempt.execution?.claim?.workPackageId)
+        assertEquals(workPackages.load().single().hash, secondAttempt.execution?.claim?.workPackageHash)
+        val firstPullRequest = worker.pullRequests().single()
+        assertEquals(secondAttempt.execution?.result?.revision, firstPullRequest.candidateRevision)
+        assertEquals(workPackages.load().single().hash, firstPullRequest.workPackageHash)
+        assertTrue(firstPullRequest.evidence.all { it.passed })
         val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
         assertTrue(company.projectView(1).escalations.any { it.runId == runId && it.requiredRole == ROLE_IMPLEMENTER })
 
@@ -539,9 +549,8 @@ class CompanyCircuitTest {
             audit.attempts().map { it.state },
         )
         assertEquals("EVIDENCE_BLOCKED", workspace.snapshot(MESSAGE_READY).workflowRuns.single().state)
-        assertEquals(CodingWorkerTickStatus.PLAN_STALE, worker.tick().status)
-        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick().status)
         assertEquals(CodingWorkerTickStatus.CANDIDATE_COMPLETED, worker.tick().status)
+        assertEquals(2, worker.pullRequests().size)
         assertTrue(analysis.plans().drop(1).all { it.content.disposition == DISPOSITION_PARTIALLY_IMPLEMENTED })
         assertTrue(analysis.plans().all { "build.gradle.kts" in it.content.reuse })
         assertTrue(worker.executions().all { it.claim.executionPlanId != null && it.claim.executionPlanHash != null })
@@ -637,8 +646,9 @@ class CompanyCircuitTest {
         val bindings = FileRepositoryBindingStore(state)
         val workspace = workspace(state, bindings)
         workspace.beginBatch()
-        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Existing product")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Repository product")))
         workspace.commitBatch()
+        workspace.beginBatch()
         assertEquals(
             ProjectGenesisStatus.RECORDED,
             workspace.advanceProjectGenesis(
@@ -670,6 +680,7 @@ class CompanyCircuitTest {
             ).status,
         )
         val experienced = requireNotNull(workspace.snapshot(MESSAGE_READY).projectGenesis.single().revision)
+        workspace.commitBatch()
         assertEquals(
             ProjectGenesisFirstOutcomeStatus.CREATED,
             workspace.createProjectGenesisFirstOutcome(
@@ -894,7 +905,7 @@ class CompanyCircuitTest {
         ): ModelGeneration {
             if (codingCalls == 1) {
                 assertTrue(prompt.contains("priorRejectedCodingDiagnostic"))
-                assertTrue(prompt.contains("Unauthorized coding operations: WRITE README.md"))
+                assertTrue(prompt.contains("outside the work-package ownership boundary"))
             }
             val content = when (codingCalls++) {
                 0 -> "plugins { base }\n"
@@ -902,31 +913,24 @@ class CompanyCircuitTest {
                 2 -> "plugins { base }\n\ndescription = \"Initial governed candidate\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
                 else -> "plugins { base }\n\ndescription = \"Repaired after independent audit\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
             }
+            val envelope = Json.parseToJsonElement(
+                prompt.substringAfter("Authoritative coding execution envelope:\n")
+            ).jsonObject
+            val expectedRevision = envelope.getValue("currentRevision").jsonPrimitive.content
             val operations = if (codingCalls == 1) {
                 listOf(
-                    CodingFileOperation(CODING_FILE_WRITE, "build.gradle.kts", content),
-                    CodingFileOperation(CODING_FILE_WRITE, "README.md", "Unauthorized scope expansion.\n"),
+                    BoundedCodingToolOperation(BOUNDED_TOOL_REWRITE_FILE, "build.gradle.kts", content = content),
+                    BoundedCodingToolOperation(BOUNDED_TOOL_REWRITE_FILE, "README.md", content = "Unauthorized scope expansion.\n"),
                 )
             } else {
-                val envelope = Json.parseToJsonElement(
-                    prompt.substringAfter("Authoritative coding execution envelope:\n")
-                ).jsonObject
-                val currentContent = requireNotNull(envelope["repositoryContext"]).jsonObject
-                    .getValue("files").jsonArray
-                    .map { it.jsonObject }
-                    .single { it.getValue("path").jsonPrimitive.content == "build.gradle.kts" }
-                    .getValue("content").jsonPrimitive.content
                 listOf(
-                    CodingFileOperation(
-                        CODING_FILE_REPLACE,
-                        "build.gradle.kts",
-                        replacements = listOf(CodingTextReplacement(currentContent, content)),
-                    )
+                    BoundedCodingToolOperation(BOUNDED_TOOL_REWRITE_FILE, "build.gradle.kts", content = content)
                 )
             }
             val output = Json.encodeToString(
-                CodingPatchProposal(
+                BoundedCodingToolBatch(
                     summary = "Implement the governed local experience.",
+                    expectedRevision = expectedRevision,
                     operations = operations,
                 )
             )
@@ -1001,6 +1005,9 @@ class CompanyCircuitTest {
         ): ModelGeneration {
             auditMaxOutputTokens = maxOutputTokens
             auditContextWindowTokens = contextWindowTokens
+            assertTrue(prompt.contains("candidatePullRequest"))
+            assertTrue(prompt.contains("Does the actual code and evidence support every candidate PR implementation claim?"))
+            assertTrue(prompt.contains("Does the implementation satisfy the admitted intent and design without undeclared deviation?"))
             val auditCall = auditCalls++
             if (auditCall in 1..2) {
                 auditCorrectionDiagnosticObserved = auditCorrectionDiagnosticObserved || prompt.contains("blank summary")

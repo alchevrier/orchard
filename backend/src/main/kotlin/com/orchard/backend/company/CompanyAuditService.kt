@@ -51,6 +51,8 @@ private data class AuditEnvelope(
     val changedPaths: List<String>,
     val rules: List<ArchitectureRule>,
     val objectiveEvidence: List<AuditEvidence>,
+    val candidatePullRequest: com.orchard.backend.agent.CandidatePullRequest? = null,
+    val reviewQuestions: List<String> = emptyList(),
     val priorRejectedAuditDiagnostic: String? = null,
     val repositoryContext: com.orchard.backend.agent.CodingRepositoryContext,
 )
@@ -220,6 +222,13 @@ class CompanyAuditService(
             objectiveEvidence = run.evidence.filter { it.revision == revision }.map {
                 AuditEvidence(it.evidenceId, it.kind, it.revision, it.passed, it.summary)
             },
+            candidatePullRequest = codingWorker.pullRequests().singleOrNull {
+                it.runId == run.runId && it.candidateRevision == revision
+            },
+            reviewQuestions = listOf(
+                "Does the actual code and evidence support every candidate PR implementation claim?",
+                "Does the implementation satisfy the admitted intent and design without undeclared deviation?",
+            ),
             priorRejectedAuditDiagnostic = priorRejectedAuditDiagnostic,
             repositoryContext = repositoryContext,
         )
