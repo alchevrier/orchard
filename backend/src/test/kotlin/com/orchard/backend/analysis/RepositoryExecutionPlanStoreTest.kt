@@ -258,6 +258,7 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("A valid response has exactly this shape:"))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
         assert(prompt.contains("If priorRejectedCodingPlanDiagnostic is non-null"))
+        assert(prompt.contains("a supplied neighboring authority may establish the owning package and filename convention for a CREATE path"))
         assert(prompt.contains("Revise the operation authority to correct that exact plan defect"))
         assert(prompt.contains("Re-evaluate every blocked source-operation path independently"))
         assert(prompt.contains("otherwise remove that source operation and classify the path in compliantEvidencePaths"))
