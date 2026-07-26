@@ -357,6 +357,12 @@ class LocalCodingWorkspaceGateway(
             .filter { Files.isRegularFile(it) && !Files.isSymbolicLink(it) }
             .toList()
         val queryTokens = tokens(query)
+        val affineOwnerNames = tracked.asSequence()
+            .map { root.relativize(it).toString().replace('\\', '/') }
+            .filter(::isTestSourcePath)
+            .map { it.substringAfterLast('/').substringBeforeLast('.').removeSuffix("Test").lowercase() }
+            .filter(String::isNotBlank)
+            .toSet()
         val selectorMatchers = selectors.associateWith { selector ->
             selector.pathGlobs.map { FileSystems.getDefault().getPathMatcher("glob:$it") }
         }
@@ -377,7 +383,7 @@ class LocalCodingWorkspaceGateway(
             val lowerContent = source.lowercase()
             val score = queryTokens.sumOf { token ->
                 (if (lowerPath.contains(token)) 20 else 0) + (if (lowerContent.contains(token)) 1 else 0)
-            } + foundationScore(relative) + ownershipScore(relative, queryTokens, selectorIds)
+            } + foundationScore(relative) + ownershipScore(relative, queryTokens, selectorIds, affineOwnerNames)
             RankedContextFile(
                 score,
                 relative,
@@ -736,13 +742,21 @@ class LocalCodingWorkspaceGateway(
         return if (name in FOUNDATION_FILES || path.startsWith("docs/")) 10 else 0
     }
 
-    private fun ownershipScore(path: String, queryTokens: Set<String>, selectorIds: List<String>): Int {
+    private fun ownershipScore(
+        path: String,
+        queryTokens: Set<String>,
+        selectorIds: List<String>,
+        affineOwnerNames: Set<String>,
+    ): Int {
         val selectedOwner = selectorIds.isNotEmpty()
         val normalizedPath = path.lowercase()
         val testOwner = isTestSourcePath(path) &&
             queryTokens.any { it !in GENERIC_TEST_TOKENS && normalizedPath.contains(it) }
+        val affineProductionOwner = !isTestSourcePath(path) &&
+            path.substringAfterLast('/').substringBeforeLast('.').lowercase() in affineOwnerNames
         return (if (selectedOwner) OWNERSHIP_SCORE_BONUS else 0) +
-            (if (testOwner) OWNERSHIP_SCORE_BONUS else 0)
+            (if (testOwner) OWNERSHIP_SCORE_BONUS else 0) +
+            (if (affineProductionOwner) OWNERSHIP_SCORE_BONUS else 0)
     }
 
     private fun selectorMatchesSource(selector: RepositoryEvidenceSelector, source: String): Boolean = when {

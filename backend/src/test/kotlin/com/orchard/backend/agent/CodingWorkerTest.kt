@@ -1139,6 +1139,31 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `analysis context retains production owner paired by test basename`() {
+        val repository = initializedRepository()
+        repeat(110) { index ->
+            Files.writeString(repository.resolve("src/Distractor$index.kt"), "fun inboxCorrelation$index() = Unit\n")
+        }
+        Files.createDirectories(repository.resolve("frontend/src/desktopMain/ui"))
+        Files.createDirectories(repository.resolve("frontend/src/desktopTest/ui"))
+        val owner = "frontend/src/desktopMain/ui/DurableConversationWorkspace.kt"
+        Files.writeString(repository.resolve(owner), "fun durableConversationWorkspace() = Unit\n")
+        Files.writeString(
+            repository.resolve("frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"),
+            "class DurableConversationWorkspaceTest\n",
+        )
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add affine workspace owner")
+
+        val context = LocalCodingWorkspaceGateway().collectAnalysisContext(
+            repository.toString(),
+            "Implement cross-project Inbox correlation integration.",
+        )
+
+        assertTrue(context.files.any { it.path == owner })
+    }
+
+    @Test
     fun `focused excerpts retain late owning declarations over repeated early usages`() {
         val content = buildString {
             repeat(300) { appendLine("Text(fontFamily = FontFamily.Monospace) // usage $it") }
