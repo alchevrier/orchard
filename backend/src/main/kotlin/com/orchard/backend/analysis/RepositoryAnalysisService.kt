@@ -626,6 +626,7 @@ class RepositoryAnalysisService(
         rejectedPlan: RepositoryAnalysisPlanContent?,
         rejectedCodingPlanDiagnostic: String?,
     ): String? {
+        repositoryImplementationOwnerDiagnostic(context, output)?.let { return it }
         repositoryScopeAuthorityDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
@@ -797,6 +798,31 @@ internal fun repositoryAcceptanceCoverageDiagnostic(
         if (missing.isNotEmpty()) append(" Missing: ").append(missing.joinToString(" | "))
         if (unexpected.isNotEmpty()) append(" Unexpected: ").append(unexpected.joinToString(" | "))
     }
+}
+
+internal fun repositoryImplementationOwnerDiagnostic(
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): String? {
+    val operations = output.operations.associateBy { it.order }
+    val productionByName = context.files.asSequence()
+        .filterNot { isTestSourcePath(it.path) }
+        .associateBy { it.path.substringAfterLast('/').substringBeforeLast('.').lowercase() }
+    output.scopeCoverage.forEachIndexed { index, coverage ->
+        if (!requiresImplementationSource(coverage.scope)) return@forEachIndexed
+        val linked = coverage.operationOrders.mapNotNull(operations::get)
+        if (linked.any { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && !isTestSourcePath(it.path) }) {
+            return@forEachIndexed
+        }
+        val owner = linked.asSequence()
+            .filter { isTestSourcePath(it.path) }
+            .map { it.path.substringAfterLast('/').substringBeforeLast('.').removeSuffix("Test").lowercase() }
+            .mapNotNull(productionByName::get)
+            .firstOrNull()
+            ?: return@forEachIndexed
+        return "Scope coverage ${index + 1} requires a linked CREATE or MODIFY operation for available production owner ${owner.path}."
+    }
+    return null
 }
 
 internal fun repositoryAnalysisGenerationWithinBudget(

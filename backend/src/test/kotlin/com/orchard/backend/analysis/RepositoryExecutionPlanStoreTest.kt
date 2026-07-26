@@ -1111,6 +1111,30 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `implementation diagnostic names admitted owner paired to linked test`() {
+        val original = plan(1, 1, "a".repeat(40)).content
+        val owner = "frontend/src/desktopMain/ui/DurableConversationWorkspace.kt"
+        val test = "frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"
+        val operation = original.operations.first().copy(order = 1, action = PLAN_OPERATION_MODIFY, path = test)
+        val output = original.copy(
+            operations = listOf(operation),
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(
+                scope = "Compose Desktop Inbox integration with focused tests",
+                evidencePaths = listOf(test),
+                operationOrders = listOf(1),
+            )),
+        )
+
+        assertEquals(
+            "Scope coverage 1 requires a linked CREATE or MODIFY operation for available production owner $owner.",
+            repositoryImplementationOwnerDiagnostic(
+                CodingRepositoryContext(listOf(CodingContextFile(owner, "fun DurableConversationWorkspace()")), 0),
+                output,
+            ),
+        )
+    }
+
+    @Test
     fun `repository analysis compiles exact verification command authority`() {
         val original = plan(1, 1, "a".repeat(40)).content.copy(
             verificationCommands = listOf("invented command"),
