@@ -22,7 +22,10 @@ import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProfileResolver
+import com.orchard.backend.vector.ModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.TransientModelProfileSettingsStore
+import com.orchard.backend.vector.effectiveModelExecutionProfile
 import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.vector.modelBindingFingerprint
 import com.orchard.backend.workspace.MESSAGE_READY
@@ -134,6 +137,7 @@ class RepositoryAnalysisService(
     private val attemptStore: RepositoryAnalysisAttemptStore = TransientRepositoryAnalysisAttemptStore(),
     private val codingAttemptStore: CodingWorkerAttemptStore? = null,
     private val codingWorkerStore: CodingWorkerStore? = null,
+    private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
@@ -393,7 +397,11 @@ class RepositoryAnalysisService(
         if (currentPlan != null && rejectedCodingPlanDiagnostic == null) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, run.runId)
         }
-        val profile = DefaultModelExecutionProfiles.broadRepositoryAnalysis
+        val defaultProfile = DefaultModelExecutionProfiles.broadRepositoryAnalysis
+        val profileOverride = runCatching { profileSettingsStore.load() }.getOrElse {
+            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
+        }.singleOrNull { it.profileId == defaultProfile.id }
+        val profile = effectiveModelExecutionProfile(defaultProfile, profileOverride)
         val assignment = companyControl?.let { company ->
             if (company.assign(run.runId, ROLE_ANALYST_DESIGNER, RISK_HIGH).status != CompanyMutationStatus.RECORDED) return RepositoryAnalysisTickResult(
                 RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL,

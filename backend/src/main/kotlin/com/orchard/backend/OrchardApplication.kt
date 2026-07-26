@@ -230,6 +230,7 @@ fun main() {
         attemptStore = FileRepositoryAnalysisAttemptStore(OrchardPaths.WORKSPACE_DIR),
         codingAttemptStore = codingWorkerAttemptStore,
         codingWorkerStore = codingWorkerStore,
+        profileSettingsStore = modelProfileSettingsStore,
     )
     val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
     val standardsPolicy = StandardsPolicyService(
