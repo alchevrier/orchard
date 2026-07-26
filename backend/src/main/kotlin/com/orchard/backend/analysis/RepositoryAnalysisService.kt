@@ -545,6 +545,7 @@ class RepositoryAnalysisService(
                 prompt,
                 RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED,
                 resolvedOutput.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
+                resolvedOutput,
             )
         }
         val compiledOutput = compileRepositoryVerificationAuthority(
