@@ -509,6 +509,15 @@ class RepositoryAnalysisService(
         )?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
         }
+        repositoryArchitectEscalationEvidenceDiagnostic(
+            repositoryForbiddenLiteralFacts(
+                run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+                complianceContext,
+            ),
+            output.unresolvedQuestions,
+        )?.let {
+            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
+        }
         if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
             return blockAttempt(
                 run.runId,
@@ -951,6 +960,19 @@ internal fun repositoryForbiddenLiteralFacts(
     forbiddenComplianceLiterals(acceptanceCriteria).map { literal ->
         RepositoryForbiddenLiteralFact(file.path, literal, lexicalEvidenceCount(file.content, literal))
     }
+}
+
+internal fun repositoryArchitectEscalationEvidenceDiagnostic(
+    facts: List<RepositoryForbiddenLiteralFact>,
+    unresolvedQuestions: List<String>,
+): String? = facts.firstNotNullOfOrNull { fact ->
+    if (fact.count != 0) return@firstNotNullOfOrNull null
+    val unsupported = unresolvedQuestions.firstOrNull { question ->
+        question.contains(fact.path, ignoreCase = true) &&
+            question.contains(fact.literal, ignoreCase = true) &&
+            question.contains(Regex("\\bcontains?\\b", RegexOption.IGNORE_CASE))
+    } ?: return@firstNotNullOfOrNull null
+    "Architect escalation contradicts pinned evidence: ${fact.path} contains ${fact.literal} 0 times, but unresolvedQuestions claims: $unsupported"
 }
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {

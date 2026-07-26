@@ -727,6 +727,24 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `architect escalation cannot contradict path bound forbidden literal facts`() {
+        val binderPath = "frontend/src/main/OrchardCircuitBinder.kt"
+        val claim = "The file $binderPath contains FontFamily.Serif literals required by the shared theme."
+
+        assertEquals(
+            "Architect escalation contradicts pinned evidence: $binderPath contains FontFamily.Serif 0 times, but unresolvedQuestions claims: $claim",
+            repositoryArchitectEscalationEvidenceDiagnostic(
+                listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0)),
+                listOf(claim),
+            ),
+        )
+        assertNull(repositoryArchitectEscalationEvidenceDiagnostic(
+            listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 1)),
+            listOf(claim),
+        ))
+    }
+
+    @Test
     fun `repository analysis bounds source operations per coding slice`() {
         val original = plan(1, 1, "a".repeat(40)).content
         val operations = (1..4).map { order ->
