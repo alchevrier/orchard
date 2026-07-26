@@ -1114,6 +1114,31 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `generic test scope does not crowd production owners out of analysis context`() {
+        val repository = initializedRepository()
+        repeat(110) { index ->
+            Files.writeString(
+                repository.resolve("src/Unrelated${index}Test.kt"),
+                "class Unrelated${index}Test // focused executable tests\n",
+            )
+        }
+        val ownerPath = "src/ConversationAuthority.kt"
+        Files.writeString(
+            repository.resolve(ownerPath),
+            "class ConversationAuthority // append-only conversation authority\n",
+        )
+        run(repository, "git", "add", ".")
+        run(repository, "git", "commit", "-m", "Add analysis crowding fixture")
+
+        val context = LocalCodingWorkspaceGateway().collectAnalysisContext(
+            repository.toString(),
+            "Implement append-only conversation authority and focused executable tests.",
+        )
+
+        assertTrue(context.files.any { it.path == ownerPath })
+    }
+
+    @Test
     fun `focused excerpts retain late owning declarations over repeated early usages`() {
         val content = buildString {
             repeat(300) { appendLine("Text(fontFamily = FontFamily.Monospace) // usage $it") }

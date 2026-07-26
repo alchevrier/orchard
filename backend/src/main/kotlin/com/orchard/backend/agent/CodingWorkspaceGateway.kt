@@ -738,7 +738,9 @@ class LocalCodingWorkspaceGateway(
 
     private fun ownershipScore(path: String, queryTokens: Set<String>, selectorIds: List<String>): Int {
         val selectedOwner = selectorIds.isNotEmpty()
-        val testOwner = queryTokens.any { it == "test" || it == "tests" || it == "regression" } && isTestSourcePath(path)
+        val normalizedPath = path.lowercase()
+        val testOwner = isTestSourcePath(path) &&
+            queryTokens.any { it !in GENERIC_TEST_TOKENS && normalizedPath.contains(it) }
         return (if (selectedOwner) OWNERSHIP_SCORE_BONUS else 0) +
             (if (testOwner) OWNERSHIP_SCORE_BONUS else 0)
     }
@@ -788,6 +790,7 @@ class LocalCodingWorkspaceGateway(
         const val MAX_SUMMARY_LENGTH = 2_000
         const val MAX_COMMAND_LENGTH = 1_024
         const val MAX_COMMAND_ARGUMENTS = 64
+        val GENERIC_TEST_TOKENS = setOf("test", "tests", "regression")
         const val MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
         const val MAX_OBSERVATION_SUMMARY = 4_096
         const val CONTEXT_COMMAND_TIMEOUT_SECONDS = 10L
