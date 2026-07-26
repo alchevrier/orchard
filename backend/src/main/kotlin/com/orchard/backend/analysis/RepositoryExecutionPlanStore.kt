@@ -244,7 +244,8 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
         coverage.scope.isNotBlank() && coverage.evidencePaths.isNotEmpty() && coverage.evidencePaths.all(::validPath) &&
             coverage.compliantEvidencePaths.distinct().size == coverage.compliantEvidencePaths.size &&
             coverage.compliantEvidencePaths.all { it in coverage.evidencePaths } &&
-            coverage.operationOrders.isNotEmpty() && coverage.operationOrders.all { it > 0 }
+                (coverage.operationOrders.isNotEmpty() || coverage.compliantEvidencePaths.isNotEmpty()) &&
+                coverage.operationOrders.all { it > 0 }
     }) { "Execution plan scope coverage is invalid" }
     if (plan.content.disposition == DISPOSITION_COMPLETE) require(plan.content.operations.all { it.action == PLAN_OPERATION_VERIFY })
     else require(plan.content.operations.any { it.action != PLAN_OPERATION_VERIFY }) { "Executable plan has no source operation" }

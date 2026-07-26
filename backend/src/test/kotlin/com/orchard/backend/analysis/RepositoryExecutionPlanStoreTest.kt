@@ -549,6 +549,41 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `execution plan store accepts compliant evidence without an operation order`() {
+        val directory = createTempDirectory("repository-plan-compliant-evidence-")
+        val store = FileRepositoryExecutionPlanStore(directory)
+        val original = plan(1, 1, "a".repeat(40))
+        val compliant = original.copy(
+            content = original.content.copy(
+                scopeCoverage = listOf(ExecutionPlanScopeCoverage(
+                    scope = "Preserve the existing owner.",
+                    evidencePaths = listOf("src/Main.kt"),
+                    operationOrders = emptyList(),
+                    compliantEvidencePaths = listOf("src/Main.kt"),
+                )),
+            ),
+            hash = "",
+        ).let { it.copy(hash = repositoryExecutionPlanHash(it)) }
+
+        store.appendNext(compliant.runId) { _, _ -> compliant }
+
+        assertEquals(compliant, store.load().single())
+        val uncovered = compliant.copy(
+            planId = 2,
+            revision = 2,
+            content = compliant.content.copy(
+                scopeCoverage = compliant.content.scopeCoverage.map {
+                    it.copy(compliantEvidencePaths = emptyList())
+                },
+            ),
+            hash = "",
+        ).let { it.copy(hash = repositoryExecutionPlanHash(it)) }
+        assertFailsWith<IllegalArgumentException> {
+            store.appendNext(uncovered.runId) { _, _ -> uncovered }
+        }
+    }
+
+    @Test
     fun `verification failed candidate paths require corrective source operations`() {
         val content = plan(1, 1, "a".repeat(40)).content.copy(
             operations = listOf(
