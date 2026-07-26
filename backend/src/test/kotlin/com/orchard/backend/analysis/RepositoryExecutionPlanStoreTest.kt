@@ -814,6 +814,17 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `required regression mutation is not an architect question`() {
+        val claim = "Is DesktopNetworkClientTest.kt sufficient, or does it require modification?"
+
+        assertEquals(
+            "Architect escalation asks whether accepted regression scope requires a test mutation; emit the required linked CREATE or MODIFY operation instead: $claim",
+            repositoryRequiredTestEscalationDiagnostic(listOf("Add focused desktop tests."), listOf(claim)),
+        )
+        assertNull(repositoryRequiredTestEscalationDiagnostic(listOf("Inspect the production owner."), listOf(claim)))
+    }
+
+    @Test
     fun `repository analysis bounds source operations per coding slice`() {
         val original = plan(1, 1, "a".repeat(40)).content
         val operations = (1..4).map { order ->

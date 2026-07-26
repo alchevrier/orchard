@@ -531,6 +531,12 @@ class RepositoryAnalysisService(
         repositoryMissingImplementationEscalationDiagnostic(output.unresolvedQuestions)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
         }
+        repositoryRequiredTestEscalationDiagnostic(
+            run.workDefinition?.definition?.scope.orEmpty(),
+            output.unresolvedQuestions,
+        )?.let {
+            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
+        }
         if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
             return blockAttempt(
                 run.runId,
@@ -1033,6 +1039,20 @@ internal fun repositoryMissingImplementationEscalationDiagnostic(unresolvedQuest
             question.contains(Regex("\\bimplement(?:s|ed|ation|ing)?\\b", RegexOption.IGNORE_CASE))
     } ?: return null
     return "Architect escalation treats required new implementation as missing evidence; emit grounded CREATE operations instead: $unsupported"
+}
+
+internal fun repositoryRequiredTestEscalationDiagnostic(
+    acceptedScope: List<String>,
+    unresolvedQuestions: List<String>,
+): String? {
+    if (acceptedScope.none(::requiresTestSource)) return null
+    val unsupported = unresolvedQuestions.firstOrNull { question ->
+        (question.contains(Regex("\\b(?:test|tests|regression)\\b", RegexOption.IGNORE_CASE)) ||
+            question.contains(Regex("Test\\.[A-Za-z0-9]+", RegexOption.IGNORE_CASE))) &&
+            question.contains(Regex("\\b(?:sufficient|require(?:s|d)?|need(?:s|ed)?)\\b", RegexOption.IGNORE_CASE)) &&
+            question.contains(Regex("\\bmodif(?:y|ied|ication)\\b", RegexOption.IGNORE_CASE))
+    } ?: return null
+    return "Architect escalation asks whether accepted regression scope requires a test mutation; emit the required linked CREATE or MODIFY operation instead: $unsupported"
 }
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {
