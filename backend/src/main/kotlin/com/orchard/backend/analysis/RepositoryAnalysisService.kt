@@ -1392,8 +1392,10 @@ private fun requiresTestSource(scope: String): Boolean {
     return "test" in normalized || "regression" in normalized
 }
 
-private fun requiresImplementationSource(scope: String): Boolean = canonicalAuthorityText(scope)
-    .startsWith("Backend ", ignoreCase = true)
+private fun requiresImplementationSource(scope: String): Boolean {
+    val normalized = canonicalAuthorityText(scope).lowercase()
+    return normalized.startsWith("backend ") || "compose desktop" in normalized || "integration" in normalized
+}
 
 private fun isTestSourcePath(path: String): Boolean {
     val normalized = path.replace('\\', '/').lowercase()

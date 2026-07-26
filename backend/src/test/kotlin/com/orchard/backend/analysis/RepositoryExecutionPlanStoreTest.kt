@@ -1088,7 +1088,7 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
-    fun `backend scope cannot be satisfied by a test mutation alone`() {
+    fun `implementation scope cannot be satisfied by a test mutation alone`() {
         val original = plan(1, 1, "a".repeat(40)).content
         val testOperation = original.operations.first().copy(
             order = 1,
@@ -1098,7 +1098,7 @@ class RepositoryExecutionPlanStoreTest {
         val output = original.copy(
             operations = listOf(testOperation),
             scopeCoverage = listOf(ExecutionPlanScopeCoverage(
-                scope = "Backend durable correlation authority and focused tests",
+                scope = "Compose Desktop Inbox integration and focused tests",
                 evidencePaths = listOf(testOperation.path),
                 operationOrders = listOf(1),
             )),
