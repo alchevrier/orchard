@@ -884,6 +884,27 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `matching create operation resolves missing implementation question`() {
+        val original = plan(1, 1, "a".repeat(40)).content
+        val question = "Concrete backend source files implementing immutable projection revision derivation are missing."
+        val output = original.copy(
+            operations = original.operations.map {
+                it.copy(action = PLAN_OPERATION_CREATE, path = "src/ProjectionAuthority.kt", instruction = "Implement immutable projection revisions.")
+            },
+            unresolvedQuestions = listOf(question, "Which existing authority wins a real ownership conflict?"),
+        )
+
+        assertEquals(
+            listOf("Which existing authority wins a real ownership conflict?"),
+            compileResolvedCreateQuestions(output).unresolvedQuestions,
+        )
+        assertEquals(listOf(question), compileResolvedCreateQuestions(output.copy(
+            operations = output.operations.map { it.copy(path = "src/Correlation.kt", instruction = "Implement correlation records.") },
+            unresolvedQuestions = listOf(question),
+        )).unresolvedQuestions)
+    }
+
+    @Test
     fun `required regression mutation is not an architect question`() {
         val claim = "Is DesktopNetworkClientTest.kt sufficient, or does it require modification?"
 

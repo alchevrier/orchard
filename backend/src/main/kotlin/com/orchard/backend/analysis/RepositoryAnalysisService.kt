@@ -510,10 +510,11 @@ class RepositoryAnalysisService(
         repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
+        val resolvedOutput = compileResolvedCreateQuestions(output)
         repositoryForbiddenLiteralComplianceDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             complianceContext,
-            output,
+            resolvedOutput,
         )?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
         }
@@ -523,27 +524,27 @@ class RepositoryAnalysisService(
                 complianceContext,
             ),
             complianceContext,
-            output.scopeCoverage.flatMap { it.compliantEvidencePaths },
-            output.unresolvedQuestions,
+            resolvedOutput.scopeCoverage.flatMap { it.compliantEvidencePaths },
+            resolvedOutput.unresolvedQuestions,
         )?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
         }
-        repositoryMissingImplementationEscalationDiagnostic(output.unresolvedQuestions)?.let {
-            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
+        repositoryMissingImplementationEscalationDiagnostic(resolvedOutput.unresolvedQuestions)?.let {
+            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, resolvedOutput)
         }
         repositoryRequiredTestEscalationDiagnostic(
             run.workDefinition?.definition?.scope.orEmpty(),
-            output.unresolvedQuestions,
+            resolvedOutput.unresolvedQuestions,
         )?.let {
-            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
+            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, resolvedOutput)
         }
-        if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
+        if (resolvedOutput.unresolvedQuestions.isNotEmpty() || resolvedOutput.disposition == DISPOSITION_CONFLICTING) {
             return blockAttempt(
                 run.runId,
                 baseRevision,
                 prompt,
                 RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED,
-                output.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
+                resolvedOutput.unresolvedQuestions.joinToString(" ").ifBlank { "Conflicting implementations require an architect decision." },
             )
         }
         val compiledOutput = compileRepositoryVerificationAuthority(
@@ -552,7 +553,7 @@ class RepositoryAnalysisService(
                 run.workDefinition?.definition?.scope.orEmpty(),
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
                 boundedContext,
-                output,
+                resolvedOutput,
             ),
         )
         val failedCandidatePaths = failedCandidateCorrectionPaths(
@@ -1046,6 +1047,28 @@ internal fun repositoryMissingImplementationEscalationDiagnostic(unresolvedQuest
     } ?: return null
     return "Architect escalation treats required new implementation as missing evidence; emit grounded CREATE operations instead: $unsupported"
 }
+
+internal fun compileResolvedCreateQuestions(output: RepositoryAnalysisPlanContent): RepositoryAnalysisPlanContent {
+    val createAuthorities = output.operations.filter { it.action == PLAN_OPERATION_CREATE }.map { operation ->
+        canonicalAuthorityText("${operation.path} ${operation.instruction}").lowercase()
+    }
+    if (createAuthorities.isEmpty()) return output
+    val unresolved = output.unresolvedQuestions.filterNot { question ->
+        repositoryMissingImplementationEscalationDiagnostic(listOf(question)) != null &&
+            authorityTerms(question).any { term -> createAuthorities.any { term in it } }
+    }
+    return output.copy(unresolvedQuestions = unresolved)
+}
+
+private fun authorityTerms(value: String): Set<String> = Regex("[A-Za-z][A-Za-z-]{7,}")
+    .findAll(value)
+    .map { canonicalAuthorityText(it.value).lowercase() }
+    .filterNot { it in GENERIC_MISSING_IMPLEMENTATION_TERMS }
+    .toSet()
+
+private val GENERIC_MISSING_IMPLEMENTATION_TERMS = setOf(
+    "concrete", "backend", "source", "implementing", "implementation", "missing", "created", "codebase",
+)
 
 internal fun repositoryRequiredTestEscalationDiagnostic(
     acceptedScope: List<String>,
