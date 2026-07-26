@@ -280,6 +280,7 @@ class RepositoryExecutionPlanStoreTest {
         assert(prompt.contains("Never omit a grouped path"))
         assert(prompt.contains("each value is a list of selector IDs"))
         assert(prompt.contains("copy that exact union to the matching scopeCoverage evidencePaths"))
+        assert(prompt.contains("Any test or regression scope requiring a test source mutation must consume one of those current-plan slots and must never be deferred."))
         assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
         assert(prompt.contains("each evidencePath must be the same string as either a CREATE, MODIFY, or DELETE operation path, or an entry in compliantEvidencePaths"))
         assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this path requirement"))
