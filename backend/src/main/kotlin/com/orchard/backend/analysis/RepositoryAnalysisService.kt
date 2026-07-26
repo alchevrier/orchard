@@ -517,7 +517,7 @@ class RepositoryAnalysisService(
             createResolvedOutput.scopeCoverage.flatMap { it.evidencePaths }.filter(::isTestSourcePath).toSet(),
             createResolvedOutput,
         )
-        val resolvedOutput = compileResolvedTestQuestions(retainedOutput)
+        val resolvedOutput = compileResolvedTestQuestions(compileResolvedCreateQuestions(retainedOutput))
         repositoryForbiddenLiteralComplianceDiagnostic(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             complianceContext,
