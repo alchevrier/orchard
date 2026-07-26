@@ -910,8 +910,11 @@ internal fun repositoryForbiddenLiteralComplianceDiagnostic(
         forbiddenLiterals.forEach { literal ->
             val count = lexicalEvidenceCount(file.content, literal)
             if (count > 0 && path !in mutationPaths) {
+                val selectedPaths = mutationPaths.sorted().joinToString(", ").ifBlank { "<none>" }
                 return "Pinned evidence contains forbidden literal $literal $count time${if (count == 1) "" else "s"} in $path, " +
-                    "so the execution plan must include a source mutation on that exact path."
+                    "so the execution plan must include a source mutation on that exact path. " +
+                    "Currently selected source mutation paths: $selectedPaths. " +
+                    "If the source-operation budget is full, replace a selected mutation rather than omitting $path."
             }
         }
     }

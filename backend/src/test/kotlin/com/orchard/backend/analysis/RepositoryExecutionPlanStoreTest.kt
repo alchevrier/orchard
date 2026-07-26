@@ -627,7 +627,9 @@ class RepositoryExecutionPlanStoreTest {
         val criterion = "None of the bounded production files contains FontFamily.Serif or another decorative family."
 
         assertEquals(
-            "Pinned evidence contains forbidden literal FontFamily.Serif 5 times in $path, so the execution plan must include a source mutation on that exact path.",
+            "Pinned evidence contains forbidden literal FontFamily.Serif 5 times in $path, so the execution plan must include a source mutation on that exact path. " +
+                "Currently selected source mutation paths: src/Main.kt. " +
+                "If the source-operation budget is full, replace a selected mutation rather than omitting $path.",
             repositoryForbiddenLiteralComplianceDiagnostic(
                 listOf(criterion),
                 CodingRepositoryContext(
