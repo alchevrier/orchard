@@ -600,6 +600,47 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `rejected anchor reuse includes literal centered unique suggestions`() {
+        val path = "src/Theme.kt"
+        val old = "fontFamily = FontFamily.Serif,"
+        val attempts = listOf(CodingWorkerAttempt(
+            attemptId = 1,
+            runId = 19,
+            executionPlanId = 23,
+            executionPlanHash = "a".repeat(64),
+            state = CODING_ATTEMPT_BLOCKED,
+            resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+            diagnostic = "REPLACE $path replacement 1 old text occurs 2 times; ${rejectedReplacementAnchor(old)}",
+        ))
+        val proposal = CodingPatchProposal("Update typography", listOf(CodingFileOperation(
+            action = CODING_FILE_REPLACE,
+            path = path,
+            replacements = listOf(CodingTextReplacement(old, "fontFamily = FontFamily.Default,")),
+        )))
+        val context = CodingRepositoryContext(listOf(CodingContextFile(
+            path = path,
+            content = """
+                Text(
+                    fontFamily = FontFamily.Serif,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    fontFamily = FontFamily.Serif,
+                    fontWeight = FontWeight.Bold,
+                )
+            """.trimIndent(),
+            contentHash = "b".repeat(64),
+        )), 0)
+
+        val diagnostic = codingRejectedAnchorDiagnostic(
+            proposal, attempts, runId = 19, planId = 23, planHash = "a".repeat(64), repositoryContext = context,
+        )
+
+        assertTrue(diagnostic?.contains("fontWeight = FontWeight.Medium,") == true)
+        assertTrue(diagnostic?.contains("fontWeight = FontWeight.Bold,") == true)
+    }
+
+    @Test
     fun `explicit retry rejects an active coding execution before resolving its plan`() {
         val store = TransientCodingWorkerStore()
         store.append(CodingWorkerEvent(eventId = 1, claim = claim(executionId = 1, runId = 19, attempt = 1)))

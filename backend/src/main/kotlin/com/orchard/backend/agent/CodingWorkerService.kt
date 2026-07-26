@@ -1328,10 +1328,12 @@ internal fun codingRejectedAnchorDiagnostic(
                 val contextFile = repositoryContext.files.singleOrNull { it.path == operation.path }
                 val declarations = contextFile?.matchedDeclarations.orEmpty().take(MAX_REJECTED_ANCHOR_DECLARATIONS)
                 val anchors = contextFile?.let(::sourceBackedDeclarationAnchors).orEmpty()
+                val literalAnchors = contextFile?.let { ambiguousReplacementAnchorDiagnostic(it.content, replacement.old) }.orEmpty()
                 return buildString {
                     append("The coding proposal reuses a previously rejected source anchor: REPLACE ")
                     append(operation.path).append(" replacement ").append(index + 1).append("; ")
                     append(fingerprint).append(". Select a different exact anchor from the supplied source.")
+                    append(literalAnchors)
                     if (anchors.isNotEmpty()) {
                         append(" Exact contiguous source text near matched declarations: ")
                         append(anchors.joinToString(" | ") { Json.encodeToString(it) })
