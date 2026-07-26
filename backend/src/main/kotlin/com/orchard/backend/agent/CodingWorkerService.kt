@@ -1295,7 +1295,7 @@ internal fun automaticCodingCorrectionAvailable(
         it.state == CODING_ATTEMPT_RETRY_AUTHORIZED
 } < MAX_AUTOMATIC_CODING_CORRECTIONS
 
-private const val MAX_AUTOMATIC_CODING_CORRECTIONS = 2
+private const val MAX_AUTOMATIC_CODING_CORRECTIONS = 3
 
 internal fun codingProposalShapeDiagnostic(proposal: CodingPatchProposal): String? {
     val malformed = proposal.operations.mapNotNull { operation ->

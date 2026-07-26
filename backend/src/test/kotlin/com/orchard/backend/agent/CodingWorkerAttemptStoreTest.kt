@@ -190,15 +190,16 @@ class CodingWorkerAttemptStoreTest {
     }
 
     @Test
-    fun `automatic correction permits two bounded repairs per execution plan`() {
+    fun `automatic correction permits three bounded repairs per execution plan`() {
         val firstBlock = attempt(1, CODING_ATTEMPT_BLOCKED, "First defect.")
         val authorization = attempt(2, CODING_ATTEMPT_RETRY_AUTHORIZED, "One correction.")
         val consumed = attempt(3, CODING_ATTEMPT_RETRY_CONSUMED, "Correction consumed.")
         val secondAuthorization = attempt(4, CODING_ATTEMPT_RETRY_AUTHORIZED, "Second correction.")
+        val thirdAuthorization = attempt(5, CODING_ATTEMPT_RETRY_AUTHORIZED, "Third correction.")
 
         assertTrue(automaticCodingCorrectionAvailable(listOf(firstBlock), RUN_ID, PLAN_ID, PLAN_HASH))
         assertTrue(automaticCodingCorrectionAvailable(listOf(firstBlock, authorization, consumed), RUN_ID, PLAN_ID, PLAN_HASH))
-        assertFalse(
+        assertTrue(
             automaticCodingCorrectionAvailable(
                 listOf(firstBlock, authorization, consumed, secondAuthorization),
                 RUN_ID,
@@ -206,9 +207,17 @@ class CodingWorkerAttemptStoreTest {
                 PLAN_HASH,
             )
         )
+        assertFalse(
+            automaticCodingCorrectionAvailable(
+                listOf(firstBlock, authorization, consumed, secondAuthorization, thirdAuthorization),
+                RUN_ID,
+                PLAN_ID,
+                PLAN_HASH,
+            )
+        )
         assertTrue(
             automaticCodingCorrectionAvailable(
-                listOf(firstBlock, authorization, consumed, secondAuthorization),
+                listOf(firstBlock, authorization, consumed, secondAuthorization, thirdAuthorization),
                 RUN_ID,
                 PLAN_ID + 1,
                 PLAN_HASH,
