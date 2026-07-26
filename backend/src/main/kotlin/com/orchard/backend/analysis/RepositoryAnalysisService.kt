@@ -556,7 +556,8 @@ class RepositoryAnalysisService(
             )
         }
         val acceptedScope = run.workDefinition?.definition?.scope.orEmpty()
-        val scopedOutput = compileRepositoryScopeAuthority(acceptedScope, selectors, boundedContext, resolvedOutput)
+        val ownerResolvedOutput = compileRepositoryImplementationOwners(boundedContext, resolvedOutput)
+        val scopedOutput = compileRepositoryScopeAuthority(acceptedScope, selectors, boundedContext, ownerResolvedOutput)
         val reconciledOutput = attemptStore.compileRetainedExactPathOperations(
             run.runId,
             baseRevision,
@@ -823,6 +824,42 @@ internal fun repositoryImplementationOwnerDiagnostic(
         return "Scope coverage ${index + 1} requires a linked CREATE or MODIFY operation for available production owner ${owner.path}."
     }
     return null
+}
+
+internal fun compileRepositoryImplementationOwners(
+    context: CodingRepositoryContext,
+    output: RepositoryAnalysisPlanContent,
+): RepositoryAnalysisPlanContent {
+    val productionByName = context.files.asSequence()
+        .filterNot { isTestSourcePath(it.path) }
+        .associateBy { it.path.substringAfterLast('/').substringBeforeLast('.').lowercase() }
+    val operations = output.operations.toMutableList()
+    val linkedOwners = mutableMapOf<Int, Int>()
+    output.scopeCoverage.forEachIndexed { coverageIndex, coverage ->
+        if (!requiresImplementationSource(coverage.scope)) return@forEachIndexed
+        val linked = coverage.operationOrders.mapNotNull { order -> operations.find { it.order == order } }
+        if (linked.any { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && !isTestSourcePath(it.path) }) {
+            return@forEachIndexed
+        }
+        val testOperation = linked.firstOrNull {
+            it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path)
+        } ?: return@forEachIndexed
+        val owner = productionByName[
+            testOperation.path.substringAfterLast('/').substringBeforeLast('.').removeSuffix("Test").lowercase()
+        ] ?: return@forEachIndexed
+        val ownerOrder = operations.firstOrNull { it.path == owner.path }?.order ?: (operations.size + 1).also { order ->
+            operations += testOperation.copy(order = order, action = PLAN_OPERATION_MODIFY, path = owner.path, symbol = null)
+        }
+        linkedOwners[coverageIndex] = ownerOrder
+    }
+    if (linkedOwners.isEmpty()) return output
+    return output.copy(
+        operations = operations,
+        scopeCoverage = output.scopeCoverage.mapIndexed { index, coverage ->
+            val ownerOrder = linkedOwners[index] ?: return@mapIndexed coverage
+            coverage.copy(operationOrders = (coverage.operationOrders + ownerOrder).distinct().sorted())
+        },
+    )
 }
 
 internal fun repositoryAnalysisGenerationWithinBudget(

@@ -1135,6 +1135,30 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `implementation owner compiler links admitted production owner from exact test operation`() {
+        val original = plan(1, 1, "a".repeat(40)).content
+        val owner = "frontend/src/desktopMain/ui/DurableConversationWorkspace.kt"
+        val test = "frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"
+        val operation = original.operations.first().copy(order = 1, action = PLAN_OPERATION_MODIFY, path = test)
+        val output = original.copy(
+            operations = listOf(operation),
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(
+                scope = "Compose Desktop Inbox integration with focused tests",
+                evidencePaths = listOf(test),
+                operationOrders = listOf(1),
+            )),
+        )
+        val context = CodingRepositoryContext(listOf(CodingContextFile(owner, "fun DurableConversationWorkspace()")), 0)
+
+        val compiled = compileRepositoryImplementationOwners(context, output)
+
+        assertEquals(listOf(test, owner), compiled.operations.map { it.path })
+        assertEquals(listOf(1, 2), compiled.scopeCoverage.single().operationOrders)
+        assertNull(repositoryImplementationOwnerDiagnostic(context, compiled))
+        assertEquals(output, compileRepositoryImplementationOwners(CodingRepositoryContext(emptyList(), 0), output))
+    }
+
+    @Test
     fun `repository analysis compiles exact verification command authority`() {
         val original = plan(1, 1, "a".repeat(40)).content.copy(
             verificationCommands = listOf("invented command"),
