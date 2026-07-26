@@ -554,6 +554,46 @@ class CodingWorkerService(
                 proposalHash,
             )
         }
+        val semanticDiagnostic = executionPlan?.let { plan ->
+            val productionPaths = plan.content.scopeCoverage
+                .flatMap { it.evidencePaths }
+                .filterNot(::isCandidateTestSourcePath)
+                .distinct()
+            val candidateContext = runCatching {
+                workspaceGateway.collectIntelligenceContext(
+                    requireNotNull(run.context.workspaceReservation).path,
+                    candidate.revision,
+                    productionPaths,
+                )
+            }.getOrElse { error ->
+                return@let "Candidate semantic verification could not inspect scoped production paths: ${error.message.orEmpty()}"
+            }
+            candidateForbiddenLiteralDiagnostic(
+                run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+                candidateContext,
+            )
+        }
+        if (semanticDiagnostic != null) {
+            val failed = finish(
+                claim,
+                CODING_EXECUTION_FAILED,
+                CodingWorkerTickStatus.VERIFICATION_FAILED,
+                semanticDiagnostic,
+                modelExecution.executionId,
+                proposalHash,
+                candidate,
+            )
+            if (failed.status != CodingWorkerTickStatus.STORAGE_UNAVAILABLE) {
+                runCatching {
+                    workspaceGateway.revertCandidate(
+                        requireNotNull(run.context.workspaceReservation).path,
+                        candidate.revision,
+                        claim.executionId,
+                    )
+                }
+            }
+            return failed
+        }
         val evidenceResult = submitEvidence(run, candidate, toolchainPolicy)
         return if (evidenceResult == null) {
             finish(
@@ -1147,6 +1187,33 @@ internal fun codingPlanContextQuery(executionPlan: RepositoryExecutionPlan?): St
 internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
     result.status == CODING_EXECUTION_BLOCKED ||
         (result.status == CODING_EXECUTION_FAILED && result.revision != null)
+
+internal fun candidateForbiddenLiteralDiagnostic(
+    acceptanceCriteria: List<String>,
+    context: CodingRepositoryContext,
+): String? {
+    if (context.omittedFileCount != 0) return "Candidate semantic verification is missing scoped production paths."
+    val forbiddenLiterals = acceptanceCriteria.flatMap { criterion ->
+        Regex(
+            "\\bnone\\b[^.]*?\\bcontains\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+            RegexOption.IGNORE_CASE,
+        ).findAll(criterion).map { it.groupValues[1] }.toList()
+    }.distinct()
+    context.files.forEach { file ->
+        forbiddenLiterals.forEach { literal ->
+            val count = Regex(Regex.escape(literal), RegexOption.IGNORE_CASE).findAll(file.content).count()
+            if (count > 0) {
+                return "Candidate retains forbidden literal $literal $count time${if (count == 1) "" else "s"} in ${file.path}."
+            }
+        }
+    }
+    return null
+}
+
+private fun isCandidateTestSourcePath(path: String): Boolean {
+    val normalized = path.replace('\\', '/').lowercase()
+    return "/test/" in normalized || normalized.substringAfterLast('/').contains("test.")
+}
 
 internal fun codingRetryableTerminalFailure(
     executions: List<CodingWorkerExecutionView>,

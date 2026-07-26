@@ -52,6 +52,33 @@ import kotlinx.serialization.json.Json
 
 class CodingWorkerTest {
     @Test
+    fun `candidate semantic verification rejects residual forbidden literals`() {
+        val criterion = "None of the bounded production files contains FontFamily.Serif or another decorative family."
+
+        assertEquals(
+            "Candidate retains forbidden literal FontFamily.Serif 5 times in src/GuidedGenesisWorkspace.kt.",
+            candidateForbiddenLiteralDiagnostic(
+                listOf(criterion),
+                CodingRepositoryContext(
+                    listOf(CodingContextFile("src/GuidedGenesisWorkspace.kt", "FontFamily.Serif\n".repeat(5))),
+                    omittedFileCount = 0,
+                ),
+            ),
+        )
+        assertNull(candidateForbiddenLiteralDiagnostic(
+            listOf(criterion),
+            CodingRepositoryContext(
+                listOf(CodingContextFile("src/GuidedGenesisWorkspace.kt", "FontFamily.Default")),
+                omittedFileCount = 0,
+            ),
+        ))
+        assertEquals(
+            "Candidate semantic verification is missing scoped production paths.",
+            candidateForbiddenLiteralDiagnostic(listOf(criterion), CodingRepositoryContext(emptyList(), omittedFileCount = 1)),
+        )
+    }
+
+    @Test
     fun `governed worker does not substitute generic tests for acceptance evidence`() = runTest {
         val directory = createTempDirectory("orchard-coding-worker-e2e-")
         val repository = initializedRepository()
