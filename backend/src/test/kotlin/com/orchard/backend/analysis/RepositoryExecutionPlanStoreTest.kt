@@ -1159,6 +1159,32 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `unrelated production operation does not satisfy affine implementation owner`() {
+        val original = plan(1, 1, "a".repeat(40)).content
+        val owner = "frontend/src/desktopMain/ui/DurableConversationWorkspace.kt"
+        val test = "frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"
+        val backend = "backend/src/main/Correlation.kt"
+        val output = original.copy(
+            operations = listOf(
+                original.operations.first().copy(order = 1, action = PLAN_OPERATION_MODIFY, path = test),
+                original.operations.first().copy(order = 2, action = PLAN_OPERATION_CREATE, path = backend),
+            ),
+            scopeCoverage = listOf(ExecutionPlanScopeCoverage(
+                scope = "Compose Desktop Inbox integration with focused tests",
+                evidencePaths = listOf(test, backend),
+                operationOrders = listOf(1, 2),
+            )),
+        )
+        val context = CodingRepositoryContext(listOf(CodingContextFile(owner, "fun DurableConversationWorkspace()")), 0)
+
+        assertEquals(
+            "Scope coverage 1 requires a linked CREATE or MODIFY operation for available production owner $owner.",
+            repositoryImplementationOwnerDiagnostic(context, output),
+        )
+        assertEquals(listOf(test, backend, owner), compileRepositoryImplementationOwners(context, output).operations.map { it.path })
+    }
+
+    @Test
     fun `required test evidence pins its affine production owner`() {
         val owner = "frontend/src/desktopMain/ui/DurableConversationWorkspace.kt"
         val test = "frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"

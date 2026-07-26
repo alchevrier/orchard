@@ -813,16 +813,16 @@ internal fun repositoryImplementationOwnerDiagnostic(
     output.scopeCoverage.forEachIndexed { index, coverage ->
         if (!requiresImplementationSource(coverage.scope)) return@forEachIndexed
         val linked = coverage.operationOrders.mapNotNull(operations::get)
-        if (linked.any { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && !isTestSourcePath(it.path) }) {
-            return@forEachIndexed
-        }
         val owner = linked.asSequence()
             .filter { isTestSourcePath(it.path) }
             .map { it.path.substringAfterLast('/').substringBeforeLast('.').removeSuffix("Test").lowercase() }
             .mapNotNull(productionByName::get)
             .firstOrNull()
-            ?: return@forEachIndexed
-        return "Scope coverage ${index + 1} requires a linked CREATE or MODIFY operation for available production owner ${owner.path}."
+        if (owner != null && linked.none {
+                it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && it.path == owner.path
+            }) {
+            return "Scope coverage ${index + 1} requires a linked CREATE or MODIFY operation for available production owner ${owner.path}."
+        }
     }
     return null
 }
@@ -839,15 +839,15 @@ internal fun compileRepositoryImplementationOwners(
     output.scopeCoverage.forEachIndexed { coverageIndex, coverage ->
         if (!requiresImplementationSource(coverage.scope)) return@forEachIndexed
         val linked = coverage.operationOrders.mapNotNull { order -> operations.find { it.order == order } }
-        if (linked.any { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && !isTestSourcePath(it.path) }) {
-            return@forEachIndexed
-        }
         val testOperation = linked.firstOrNull {
             it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path)
         } ?: return@forEachIndexed
         val owner = productionByName[
             testOperation.path.substringAfterLast('/').substringBeforeLast('.').removeSuffix("Test").lowercase()
         ] ?: return@forEachIndexed
+        if (linked.any {
+                it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && it.path == owner.path
+            }) return@forEachIndexed
         val ownerOrder = operations.firstOrNull { it.path == owner.path }?.order ?: (operations.size + 1).also { order ->
             operations += testOperation.copy(order = order, action = PLAN_OPERATION_MODIFY, path = owner.path, symbol = null)
         }
