@@ -1139,6 +1139,10 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
 }
 
 private fun testSourceOperationDiagnostic(scopeIndex: Int, requiredTestPaths: List<String>): String {
+    if (requiredTestPaths.isEmpty()) {
+        return "Scope coverage ${scopeIndex + 1} requires a linked CREATE or MODIFY operation for a concrete test source path. " +
+            "Add the test operation order to this scope coverage row; VERIFY and compliant evidence cannot satisfy regression scope."
+    }
     val paths = requiredTestPaths.joinToString(", ").ifBlank { "<none selected>" }
     return "Scope coverage ${scopeIndex + 1} requires a CREATE or MODIFY operation for its pinned test source path: $paths. " +
         "DELETE and compliant evidence cannot satisfy regression scope."

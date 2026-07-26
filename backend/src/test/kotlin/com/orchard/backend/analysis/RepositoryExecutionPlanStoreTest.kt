@@ -539,8 +539,8 @@ class RepositoryExecutionPlanStoreTest {
             scopeCoverage = scope.map { ExecutionPlanScopeCoverage(it, listOf("src/Other.kt"), listOf(1)) },
         )
         assertEquals(
-            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: <none selected>. " +
-                "DELETE and compliant evidence cannot satisfy regression scope.",
+            "Scope coverage 2 requires a linked CREATE or MODIFY operation for a concrete test source path. " +
+                "Add the test operation order to this scope coverage row; VERIFY and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(scope, unmatchedEvidence),
         )
         val createdRegression = unmatchedEvidence.copy(
@@ -1065,8 +1065,8 @@ class RepositoryExecutionPlanStoreTest {
             repositoryScopeAuthorityDiagnostic(scope, selectors, context, missingPinnedOwner),
         )
         assertEquals(
-            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
-                "<none selected>. DELETE and compliant evidence cannot satisfy regression scope.",
+            "Scope coverage 2 requires a linked CREATE or MODIFY operation for a concrete test source path. " +
+                "Add the test operation order to this scope coverage row; VERIFY and compliant evidence cannot satisfy regression scope.",
             repositoryScopeCoverageDiagnostic(
                 scope,
                 complete.copy(
