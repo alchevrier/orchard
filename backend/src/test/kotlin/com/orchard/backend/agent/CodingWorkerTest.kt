@@ -997,6 +997,21 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `focused excerpts prioritize present literals over absent query noise`() {
+        val content = buildString {
+            repeat(300) { appendLine("val filler$it = $it") }
+            appendLine("Text(fontFamily = FontFamily.Serif)")
+            repeat(300) { appendLine("val trailing$it = $it") }
+        }
+        val absentTokens = (1..200).mapTo(mutableSetOf()) { "absent$it" }
+
+        val excerpt = focusedContextExcerpt(content, absentTokens + "serif", 512)
+
+        assertTrue(excerpt.contains("serif=1"))
+        assertTrue(excerpt.encodeToByteArray().size <= 512)
+    }
+
+    @Test
     fun `focused excerpts reserve rare surface owner declarations`() {
         val content = buildString {
             repeat(100) { appendLine("Text(\"project workspace usage $it\")") }

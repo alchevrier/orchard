@@ -946,8 +946,9 @@ private fun lexicalMatchSummary(content: String, queryTokens: Set<String>, maxBy
     if (maxBytes <= 0 || queryTokens.isEmpty()) return ""
     val lower = content.lowercase()
     val entries = queryTokens.asSequence()
-        .sorted()
-        .map { token -> "$token=${Regex(Regex.escape(token)).findAll(lower).count()}" }
+        .map { token -> token to Regex(Regex.escape(token)).findAll(lower).count() }
+        .sortedWith(compareBy<Pair<String, Int>> { it.second == 0 }.thenBy { it.first })
+        .map { (token, count) -> "$token=$count" }
         .toList()
     return entries.asSequence().runningFold("[Orchard lexical query counts: ") { summary, entry ->
         val separator = if (summary.endsWith(": ")) "" else ", "
