@@ -561,6 +561,7 @@ class CodingWorkerTest {
                 replacements = listOf(CodingTextReplacement(old, "fontFamily = FontFamily.Default")),
             )),
         )
+        val testPath = "src/OrchardCircuitBinderTest.kt"
         val context = CodingRepositoryContext(listOf(CodingContextFile(
             path = path,
             content = """[Orchard excerpt lines 40-46 of 100]
@@ -578,6 +579,16 @@ class CodingWorkerTest {
                 "private fun UnrelatedPanel() = Unit",
                 "private fun OrchardTheme(content: @Composable () -> Unit)",
             ),
+        ), CodingContextFile(
+            path = testPath,
+            content = """package orchard
+                |
+                |import java.io.File
+                |
+                |class OrchardCircuitBinderTest
+                |""".trimMargin(),
+            contentHash = "c".repeat(64),
+            matchedDeclarations = listOf("class OrchardCircuitBinderTest"),
         )), 0)
 
         val diagnostic = codingRejectedAnchorDiagnostic(
@@ -594,10 +605,12 @@ class CodingWorkerTest {
         assertTrue(diagnostic.contains("Exact contiguous source text near matched declarations"))
         assertTrue(diagnostic.contains("MaterialTheme.colors.copy"))
         assertTrue(!diagnostic.contains("[Orchard excerpt lines"))
-        val legacyDiagnostic = attempts.single().diagnostic
+        val legacyDiagnostic = attempts.single().diagnostic + " Required test path: $testPath."
         val groundedLegacyDiagnostic = sourceGroundedRetryDiagnostic(legacyDiagnostic, context)
         assertTrue(requireNotNull(groundedLegacyDiagnostic).contains("Exact contiguous source text for this correction"))
         assertTrue(groundedLegacyDiagnostic.contains("MaterialTheme.colors.copy"))
+        assertTrue(groundedLegacyDiagnostic.contains("import java.io.File"))
+        assertTrue(groundedLegacyDiagnostic.contains("class OrchardCircuitBinderTest"))
         assertTrue(
             Json.encodeToString(groundedLegacyDiagnostic).encodeToByteArray().size -
                 Json.encodeToString(legacyDiagnostic).encodeToByteArray().size < 4_096,

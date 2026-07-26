@@ -1424,10 +1424,17 @@ internal fun sourceGroundedRetryDiagnostic(
     if (diagnostic == null || SOURCE_GROUNDED_RETRY_MARKER in diagnostic) return diagnostic
     val anchors = repositoryContext.files.asSequence()
         .filter { it.path in diagnostic }
-        .mapNotNull { contextFile ->
-            sourceBackedDeclarationAnchors(contextFile).firstOrNull()?.let { contextFile.path to it }
+        .flatMap { contextFile ->
+            val sourcePrefix = contextFile.content.lineSequence()
+                .filterNot { it.startsWith("[Orchard excerpt lines ") }
+                .joinToString("\n")
+                .let { takeUtf8Prefix(it, MAX_RETRY_SOURCE_PREFIX_BYTES) }
+            (listOf(sourcePrefix) + sourceBackedDeclarationAnchors(contextFile).take(1))
+                .filter(String::isNotEmpty)
+                .distinct()
+                .map { contextFile.path to it }
         }
-        .take(1)
+        .take(MAX_RETRY_SOURCE_ANCHORS)
         .toList()
     if (anchors.isEmpty()) return diagnostic
     return buildString {
@@ -1537,6 +1544,8 @@ private const val MAX_REJECTED_ANCHOR_EXAMPLES = 2
 private const val SOURCE_ANCHOR_LINES = 4
 private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
 private const val MAX_SOURCE_ANCHOR_BYTES = 1_024
+private const val MAX_RETRY_SOURCE_PREFIX_BYTES = 512
+private const val MAX_RETRY_SOURCE_ANCHORS = 4
 private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024
 private const val INVALID_CODING_PROPOSAL_DIAGNOSTIC = "The coding model returned invalid or oversized proposal JSON."
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
