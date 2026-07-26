@@ -28,6 +28,7 @@ class CodingWorkerAttemptStoreTest {
         assertFalse(codingTerminalPlanBlockRequired(base))
         assertTrue(codingTerminalPlanBlockRequired(base.copy(revision = "b".repeat(40))))
         assertTrue(codingTerminalPlanBlockRequired(base.copy(status = CODING_EXECUTION_BLOCKED)))
+        assertTrue(codingTerminalPlanBlockRequired(base.copy(diagnostic = "The coding model returned invalid or oversized proposal JSON.")))
     }
 
     @Test

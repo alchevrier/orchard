@@ -432,7 +432,7 @@ class CodingWorkerService(
             claim,
             CODING_EXECUTION_BLOCKED,
             CodingWorkerTickStatus.INVALID_PROPOSAL,
-            "The coding model returned invalid or oversized proposal JSON.",
+            INVALID_CODING_PROPOSAL_DIAGNOSTIC,
             modelExecutionId = modelExecution.executionId,
         )
         val proposalHash = sha256(strictOutputJson.encodeToString(proposal))
@@ -1197,7 +1197,9 @@ internal fun codingPlanContextPaths(executionPlan: RepositoryExecutionPlan?): Li
 
 internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
     result.status == CODING_EXECUTION_BLOCKED ||
-        (result.status == CODING_EXECUTION_FAILED && result.revision != null)
+        (result.status == CODING_EXECUTION_FAILED && (
+            result.revision != null || result.diagnostic == INVALID_CODING_PROPOSAL_DIAGNOSTIC
+        ))
 
 internal fun candidateForbiddenLiteralDiagnostic(
     acceptanceCriteria: List<String>,
@@ -1474,6 +1476,7 @@ private const val SOURCE_ANCHOR_LINES = 4
 private const val SOURCE_GROUNDED_RETRY_MARKER = "Exact contiguous source text for this correction"
 private const val MAX_SOURCE_ANCHOR_BYTES = 1_024
 private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024
+private const val INVALID_CODING_PROPOSAL_DIAGNOSTIC = "The coding model returned invalid or oversized proposal JSON."
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
 private const val MIN_SOURCE_ANCHOR_TOKEN_LENGTH = 4
 private val CAMEL_CASE_TOKEN = Regex("[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
