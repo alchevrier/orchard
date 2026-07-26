@@ -571,11 +571,24 @@ class CodingWorkerService(
             )
         }
         if (semanticDiagnostic != null) {
+            val correctionStorageDiagnostic = executionPlan?.let { plan ->
+                recordCorrectiveRejection(
+                    run.runId,
+                    plan.planId,
+                    plan.hash,
+                    proposalHash,
+                    semanticDiagnostic,
+                )
+            }
             val failed = finish(
                 claim,
                 CODING_EXECUTION_FAILED,
-                CodingWorkerTickStatus.VERIFICATION_FAILED,
-                semanticDiagnostic,
+                if (correctionStorageDiagnostic == null) {
+                    CodingWorkerTickStatus.VERIFICATION_FAILED
+                } else {
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE
+                },
+                correctionStorageDiagnostic ?: semanticDiagnostic,
                 modelExecution.executionId,
                 proposalHash,
                 candidate,
