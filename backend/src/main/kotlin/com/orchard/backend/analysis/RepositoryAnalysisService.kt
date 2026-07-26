@@ -514,6 +514,7 @@ class RepositoryAnalysisService(
                 run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
                 complianceContext,
             ),
+            output.scopeCoverage.flatMap { it.compliantEvidencePaths },
             output.unresolvedQuestions,
         )?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
@@ -964,16 +965,28 @@ internal fun repositoryForbiddenLiteralFacts(
 
 internal fun repositoryArchitectEscalationEvidenceDiagnostic(
     facts: List<RepositoryForbiddenLiteralFact>,
+    compliantEvidencePaths: List<String>,
     unresolvedQuestions: List<String>,
-): String? = facts.firstNotNullOfOrNull { fact ->
-    if (fact.count != 0) return@firstNotNullOfOrNull null
-    val basename = fact.path.substringAfterLast('/')
-    val unsupported = unresolvedQuestions.firstOrNull { question ->
-        (question.contains(fact.path, ignoreCase = true) || question.contains(basename, ignoreCase = true)) &&
-            question.contains(fact.literal, ignoreCase = true) &&
-            question.contains(Regex("\\bcontains?\\b", RegexOption.IGNORE_CASE))
-    } ?: return@firstNotNullOfOrNull null
-    "Architect escalation contradicts pinned evidence: ${fact.path} contains ${fact.literal} 0 times, but unresolvedQuestions claims: $unsupported"
+): String? {
+    facts.firstNotNullOfOrNull { fact ->
+        if (fact.count != 0) return@firstNotNullOfOrNull null
+        val basename = fact.path.substringAfterLast('/')
+        val unsupported = unresolvedQuestions.firstOrNull { question ->
+            (question.contains(fact.path, ignoreCase = true) || question.contains(basename, ignoreCase = true)) &&
+                question.contains(fact.literal, ignoreCase = true) &&
+                question.contains(Regex("\\bcontains?\\b", RegexOption.IGNORE_CASE))
+        } ?: return@firstNotNullOfOrNull null
+        "Architect escalation contradicts pinned evidence: ${fact.path} contains ${fact.literal} 0 times, but unresolvedQuestions claims: $unsupported"
+    }?.let { return it }
+    return compliantEvidencePaths.distinct().firstNotNullOfOrNull { path ->
+        val basename = path.substringAfterLast('/')
+        val unsupported = unresolvedQuestions.firstOrNull { question ->
+            (question.contains(path, ignoreCase = true) || question.contains(basename, ignoreCase = true)) &&
+                question.contains(Regex("\\b(?:modify|mutation)\\b", RegexOption.IGNORE_CASE)) &&
+                question.contains(Regex("\\b(?:require|required|requires|needed)\\b", RegexOption.IGNORE_CASE))
+        } ?: return@firstNotNullOfOrNull null
+        "Architect escalation contradicts compliant pinned evidence for $path: $unsupported"
+    }
 }
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {

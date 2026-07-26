@@ -735,11 +735,13 @@ class RepositoryExecutionPlanStoreTest {
             "Architect escalation contradicts pinned evidence: $binderPath contains FontFamily.Serif 0 times, but unresolvedQuestions claims: $claim",
             repositoryArchitectEscalationEvidenceDiagnostic(
                 listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0)),
+                emptyList(),
                 listOf(claim),
             ),
         )
         assertNull(repositoryArchitectEscalationEvidenceDiagnostic(
             listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 1)),
+            emptyList(),
             listOf(claim),
         ))
         assertEquals(
@@ -747,8 +749,14 @@ class RepositoryExecutionPlanStoreTest {
                 "OrchardCircuitBinder.kt still contains FontFamily.Serif literals.",
             repositoryArchitectEscalationEvidenceDiagnostic(
                 listOf(RepositoryForbiddenLiteralFact(binderPath, "FontFamily.Serif", 0)),
+                emptyList(),
                 listOf("OrchardCircuitBinder.kt still contains FontFamily.Serif literals."),
             ),
+        )
+        val absenceClaim = "Shared OrchardCircuitBinder.kt lacks FontFamily.Default; a MODIFY operation is required."
+        assertEquals(
+            "Architect escalation contradicts compliant pinned evidence for $binderPath: $absenceClaim",
+            repositoryArchitectEscalationEvidenceDiagnostic(emptyList(), listOf(binderPath), listOf(absenceClaim)),
         )
     }
 
