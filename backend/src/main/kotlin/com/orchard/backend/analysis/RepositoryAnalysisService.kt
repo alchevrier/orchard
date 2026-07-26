@@ -483,6 +483,13 @@ class RepositoryAnalysisService(
         repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
+        repositoryForbiddenLiteralComplianceDiagnostic(
+            run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+            complianceContext,
+            output,
+        )?.let {
+            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it, output)
+        }
         if (output.unresolvedQuestions.isNotEmpty() || output.disposition == DISPOSITION_CONFLICTING) {
             return blockAttempt(
                 run.runId,
