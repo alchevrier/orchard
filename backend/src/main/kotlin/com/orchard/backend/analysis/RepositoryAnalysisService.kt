@@ -1102,8 +1102,16 @@ internal fun repositoryRequiredTestEscalationDiagnostic(
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {
     val sourceOperations = output.operations.count { it.action != PLAN_OPERATION_VERIFY }
-    return if (sourceOperations > MAX_SOURCE_OPERATIONS_PER_PLAN) {
-        "Execution plan has $sourceOperations source operations; at most $MAX_SOURCE_OPERATIONS_PER_PLAN are allowed per bounded coding slice. " +
+    val requiredPaths = output.scopeCoverage.flatMapTo(hashSetOf()) { it.evidencePaths }
+    val requiredSourceOperations = output.scopeCoverage.asSequence()
+        .flatMap { output.operations.asSequence() }
+        .filter { it.action != PLAN_OPERATION_VERIFY && it.path in requiredPaths }
+        .map { it.path }
+        .distinct()
+        .count()
+    val effectiveLimit = maxOf(MAX_SOURCE_OPERATIONS_PER_PLAN, requiredSourceOperations)
+    return if (sourceOperations > effectiveLimit) {
+        "Execution plan has $sourceOperations source operations; at most $effectiveLimit are allowed for this bounded coding slice. " +
             "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan."
     } else null
 }
