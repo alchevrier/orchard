@@ -897,6 +897,16 @@ class CodingWorkerService(
                 val workspacePath = runs[failed.claim.runId]?.context?.workspaceReservation?.path ?: return@forEach
                 restoreLatestFailedCandidate(failed.claim.runId, workspacePath, executions)
             }
+        executions.groupBy { it.claim.runId }.forEach { (runId, runExecutions) ->
+            if (runExecutions.none { it.result?.revision != null } || runExecutions.any { it.result?.status == CODING_EXECUTION_COMPLETED }) {
+                return@forEach
+            }
+            val reservation = runs[runId]?.context?.workspaceReservation ?: return@forEach
+            val currentRevision = workspaceGateway.currentRevision(reservation.path) ?: return@forEach
+            runCatching {
+                workspaceGateway.restoreTree(reservation.path, currentRevision, reservation.baseRevision, runId)
+            }
+        }
     }
 
     private fun bootstrapLegacyAttemptBlocks() {

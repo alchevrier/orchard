@@ -686,6 +686,41 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `workspace gateway restores an all-failed candidate chain to its pinned base tree`() {
+        val repository = initializedRepository()
+        val gateway = LocalCodingWorkspaceGateway()
+        val base = run(repository, "git", "rev-parse", "HEAD")
+        val first = gateway.applyAndCommit(
+            repository.toString(),
+            CodingPatchProposal("First failed candidate.", listOf(
+                CodingFileOperation(CODING_FILE_REPLACE, "src/Main.kt", replacements = listOf(
+                    CodingTextReplacement("fun answer() = 1", "fun answer() = 2"),
+                )),
+            )),
+            executionId = 1,
+        )
+        val second = gateway.applyAndCommit(
+            repository.toString(),
+            CodingPatchProposal("Second failed candidate.", listOf(
+                CodingFileOperation(CODING_FILE_REPLACE, "src/Main.kt", replacements = listOf(
+                    CodingTextReplacement("fun answer() = 2", "fun answer() = 3"),
+                )),
+            )),
+            executionId = 2,
+        )
+
+        val restored = gateway.restoreTree(repository.toString(), second.revision, base, runId = 19)
+
+        assertEquals("", run(repository, "git", "diff", "--name-only", base, restored))
+        assertEquals(first.revision, run(repository, "git", "rev-parse", "${first.revision}^{commit}"))
+        assertEquals(second.revision, run(repository, "git", "rev-parse", "${second.revision}^{commit}"))
+        assertEquals("", run(repository, "git", "status", "--porcelain"))
+        assertFailsWith<IllegalArgumentException> {
+            gateway.restoreTree(repository.toString(), second.revision, base, runId = 19)
+        }
+    }
+
+    @Test
     fun `workspace gateway applies bounded exact replacements to a large file`() {
         val repository = initializedRepository()
         val source = repository.resolve("src/Main.kt")

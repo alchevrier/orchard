@@ -98,6 +98,7 @@ interface CodingWorkspaceGateway {
     fun currentRevision(workspacePath: String): String? = null
     fun applyAndCommit(workspacePath: String, proposal: CodingPatchProposal, executionId: Long): CodingCandidate
     fun revertCandidate(workspacePath: String, candidateRevision: String, executionId: Long): String? = null
+    fun restoreTree(workspacePath: String, expectedRevision: String, baseRevision: String, runId: Long): String? = null
     fun resolveToolchainPolicy(workspacePath: String): ResolvedToolchainPolicy?
     fun parseVerificationCommand(command: String): VerificationCommand
     fun executeVerification(
@@ -295,6 +296,36 @@ class LocalCodingWorkspaceGateway(
             "Coding workspace is not clean after reverting failed candidate for execution $executionId"
         }
         return requireNotNull(currentRevision(workspacePath)) { "Unable to resolve restored coding workspace revision" }
+    }
+
+    override fun restoreTree(workspacePath: String, expectedRevision: String, baseRevision: String, runId: Long): String {
+        val root = validatedRoot(workspacePath)
+        requireGitWorkspace(root)
+        require(expectedRevision.matches(GIT_HASH) && baseRevision.matches(GIT_HASH)) { "Workspace restoration revision is invalid" }
+        val status = run(root, listOf("git", "status", "--porcelain"), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(status.exitCode == 0 && status.output.isBlank()) { "Coding workspace must be clean before tree restoration" }
+        require(currentRevision(workspacePath) == expectedRevision) { "Coding workspace changed before tree restoration" }
+        val ancestor = run(root, listOf("git", "merge-base", "--is-ancestor", baseRevision, expectedRevision), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(ancestor.exitCode == 0) { "Pinned restoration base is not an ancestor of the coding workspace" }
+        val changed = run(root, listOf("git", "diff", "--quiet", baseRevision, expectedRevision, "--"), GIT_COMMAND_TIMEOUT_SECONDS)
+        if (changed.exitCode == 0) return expectedRevision
+        require(changed.exitCode == 1) { "Unable to compare coding workspace with its pinned base" }
+        val restore = run(root, listOf("git", "restore", "--source", baseRevision, "--staged", "--worktree", "--", "."), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(restore.exitCode == 0) { "Unable to restore coding workspace tree: ${restore.output.take(1_000)}" }
+        val commit = run(
+            root,
+            listOf(
+                "git", "-c", "user.name=Orchard Coding Worker",
+                "-c", "user.email=orchard-worker@localhost",
+                "commit", "-m", "Restore failed candidate chain for run $runId",
+            ),
+            GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+        require(commit.exitCode == 0) { "Unable to commit coding workspace restoration: ${commit.output.take(1_000)}" }
+        val restored = requireNotNull(currentRevision(workspacePath)) { "Unable to resolve restored coding workspace revision" }
+        val restoredTree = run(root, listOf("git", "diff", "--quiet", baseRevision, restored, "--"), GIT_COMMAND_TIMEOUT_SECONDS)
+        require(restoredTree.exitCode == 0) { "Coding workspace restoration does not match its pinned base tree" }
+        return restored
     }
 
     private fun collectContext(
