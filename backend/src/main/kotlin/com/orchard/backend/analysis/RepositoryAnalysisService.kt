@@ -436,10 +436,11 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
-        val requiredEvidencePaths = requiredRepositoryEvidencePaths(
+        val selectedEvidencePaths = requiredRepositoryEvidencePaths(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
             context,
         ).toSet()
+        val requiredEvidencePaths = selectedEvidencePaths + affineProductionOwnerPaths(context, selectedEvidencePaths)
         val queryTokens = repositoryAnalysisTokens(query)
         val boundedContext = compactRepositoryContextToBudget(
             context,
@@ -860,6 +861,20 @@ internal fun compileRepositoryImplementationOwners(
             coverage.copy(operationOrders = (coverage.operationOrders + ownerOrder).distinct().sorted())
         },
     )
+}
+
+internal fun affineProductionOwnerPaths(
+    context: CodingRepositoryContext,
+    requiredPaths: Set<String>,
+): Set<String> {
+    val requiredOwnerNames = requiredPaths.asSequence()
+        .filter(::isTestSourcePath)
+        .map { it.substringAfterLast('/').substringBeforeLast('.').removeSuffix("Test").lowercase() }
+        .toSet()
+    return context.files.asSequence()
+        .filterNot { isTestSourcePath(it.path) }
+        .filter { it.path.substringAfterLast('/').substringBeforeLast('.').lowercase() in requiredOwnerNames }
+        .mapTo(linkedSetOf()) { it.path }
 }
 
 internal fun repositoryAnalysisGenerationWithinBudget(
