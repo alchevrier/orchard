@@ -50,7 +50,8 @@ data class ExecutionPlanOperation(
 data class ExecutionPlanScopeCoverage(
     val scope: String,
     val evidencePaths: List<String>,
-    val operationOrders: List<Int>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val operationOrders: List<Int> = emptyList(),
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val compliantEvidencePaths: List<String> = emptyList(),
 )

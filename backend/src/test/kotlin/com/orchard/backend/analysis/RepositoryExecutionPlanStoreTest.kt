@@ -7,6 +7,7 @@ import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
 import com.orchard.backend.agent.CODING_ATTEMPT_RETRY_AUTHORIZED
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.RepositoryEvidenceSelector
+import kotlinx.serialization.json.Json
 import java.nio.file.Files
 import kotlin.io.path.writeText
 import kotlin.io.path.createTempDirectory
@@ -902,6 +903,15 @@ class RepositoryExecutionPlanStoreTest {
             operations = output.operations.map { it.copy(path = "src/Correlation.kt", instruction = "Implement correlation records.") },
             unresolvedQuestions = listOf(question),
         )).unresolvedQuestions)
+    }
+
+    @Test
+    fun `derived scope operation orders may be omitted from model json`() {
+        val decoded = Json.decodeFromString<ExecutionPlanScopeCoverage>(
+            """{"scope":"Inbox integration","evidencePaths":["frontend/src/test/InboxTest.kt"]}""",
+        )
+
+        assertEquals(emptyList(), decoded.operationOrders)
     }
 
     @Test
