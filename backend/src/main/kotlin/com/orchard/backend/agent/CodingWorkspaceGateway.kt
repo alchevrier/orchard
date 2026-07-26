@@ -489,7 +489,7 @@ class LocalCodingWorkspaceGateway(
                                     anchor
                             } else {
                                 "REPLACE ${operation.path} replacement ${index + 1} old text occurs $occurrenceCount times; expected exactly once; " +
-                                    anchor + ambiguousReplacementAnchorDiagnostic(candidate, replacement.old)
+                                    anchor + replacementAnchorDiagnostic(candidate, replacement.old)
                             }
                         }
                         candidate = candidate.replaceFirst(replacement.old, replacement.new)
@@ -1023,6 +1023,13 @@ internal fun ambiguousReplacementAnchorDiagnostic(content: String, old: String):
     return "; submit one separate replacement for each occurrence using these exact source-backed unique anchor suggestions: " +
         suggestions.joinToString(" | ") { Json.encodeToString(it) }
 }
+
+internal fun replacementAnchorDiagnostic(content: String, old: String): String =
+    if (exactOccurrenceCount(content, old) == 0) {
+        "; the old text is absent from pinned source. Do not invent placeholder anchors; copy old text verbatim from the supplied source"
+    } else {
+        ambiguousReplacementAnchorDiagnostic(content, old)
+    }
 
 internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>): List<String> {
     val matches = content.lineSequence().mapIndexedNotNull { index, line ->

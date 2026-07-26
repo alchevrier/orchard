@@ -1195,6 +1195,15 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `absent replacement diagnostics reject fabricated placeholder anchors`() {
+        val diagnostic = replacementAnchorDiagnostic("class ProjectInboxWorkspaceTest", "// Existing test imports and setup")
+
+        assertTrue(diagnostic.contains("old text is absent from pinned source"))
+        assertTrue(diagnostic.contains("Do not invent placeholder anchors"))
+        assertTrue(diagnostic.contains("copy old text verbatim"))
+    }
+
+    @Test
     fun `workspace gateway identifies replacement anchors invalidated by an earlier replacement`() {
         val repository = initializedRepository()
         val source = repository.resolve("src/Main.kt")
