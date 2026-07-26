@@ -39,6 +39,7 @@ Rules:
 - Use parallel-implementation-v1 for independent implementation branches.
 - Use integration-v1 when joining all prior outputs.
 - Use sequential-delivery-v1 when all prior work must finish without typed artifact fan-in.
+- For a Story with exactly one Task or Bug member, use one sequential-delivery-v1 stage. A single member has no fan-out or fan-in and must not use contract-design-v1, parallel-implementation-v1, or integration-v1.
 - Put uncertain interpretation in assumptions. Do not hide it in stage or node fields.
 - Do not accept the plan, start work, create work items, change hierarchy, or claim authoritative status.
 - Return JSON only. Do not use Markdown fences or explanatory prose.

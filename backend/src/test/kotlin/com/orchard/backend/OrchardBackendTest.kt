@@ -1706,6 +1706,18 @@ class DefinitionIntelligenceServiceTest {
 }
 
 class CircuitIntelligenceServiceTest {
+    @Test
+    fun defaultPromptRequiresSequentialDeliveryForSingleMemberStory() {
+        val prompt = requireNotNull(
+            CircuitIntelligenceService::class.java.getResourceAsStream(
+                "/default-system-prompts/circuit_synthesis_agent.md"
+            )
+        ).bufferedReader().use { it.readText() }
+
+        assertTrue(prompt.contains("For a Story with exactly one Task or Bug member, use one sequential-delivery-v1 stage."))
+        assertTrue(prompt.contains("A single member has no fan-out or fan-in"))
+    }
+
         @Test
         fun generationIsProposalOnlyAndHumanAcceptancePinsItsProvenance() = runTest {
                 val workspace = circuitWorkspace()
