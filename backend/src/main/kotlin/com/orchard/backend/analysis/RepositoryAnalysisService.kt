@@ -1311,6 +1311,7 @@ private const val MAX_SOURCE_OPERATIONS_PER_PLAN = 2
 private fun canonicalAuthorityText(value: String): String = value
     .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")
     .replace('\u00a0', ' ')
+    .replace(",", "")
     .trim()
     .replace(Regex("\\s+"), " ")
     .removeSuffix(".")

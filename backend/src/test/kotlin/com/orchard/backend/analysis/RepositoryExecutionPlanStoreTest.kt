@@ -428,6 +428,12 @@ class RepositoryExecutionPlanStoreTest {
                 }),
             ),
         )
+        val commaDrift = content.copy(
+            scopeCoverage = content.scopeCoverage.map {
+                if (it.scope == scope[1]) it.copy(scope = "Add, regression coverage.") else it
+            },
+        )
+        assertNull(repositoryScopeIdentityDiagnostic(scope, commaDrift))
         val hyphenatedScope = listOf("Review machine-readable output.")
         assertNull(
             repositoryScopeCoverageDiagnostic(
