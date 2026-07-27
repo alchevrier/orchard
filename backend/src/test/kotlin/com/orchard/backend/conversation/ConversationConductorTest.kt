@@ -6,6 +6,15 @@ import com.orchard.backend.company.CompanyAcceptance
 import com.orchard.backend.company.CompanyProjectView
 import com.orchard.backend.company.LocalPromotion
 import com.orchard.backend.company.ROLE_ARCHITECTURE_AUDITOR
+import com.orchard.backend.agent.CandidatePullRequest
+import com.orchard.backend.agent.CandidatePullRequestCorrection
+import com.orchard.backend.agent.CandidatePullRequestEvidence
+import com.orchard.backend.agent.CandidatePullRequestReviewFinding
+import com.orchard.backend.agent.CANDIDATE_REVIEW_INTENT
+import com.orchard.backend.agent.REVIEW_CORRECTION_CANDIDATE_REPAIR
+import com.orchard.backend.agent.candidatePullRequestHash
+import com.orchard.backend.agent.newCandidatePullRequestCorrection
+import com.orchard.backend.agent.newCandidatePullRequestReview
 import com.orchard.backend.resource.MachineCapacityMonitor
 import com.orchard.backend.resource.MachineCapacitySnapshot
 import com.orchard.backend.resource.MachineResourceController
@@ -711,6 +720,50 @@ class ConversationConductorTest {
         assertEquals(OBJECTIVE_COMPLETED, projection.objectives.single().state)
         assertEquals(listOf("COMPANY_AUDIT", "COMPANY_ACCEPTANCE", "LOCAL_PROMOTION"), projection.activities.map { it.authorityType })
         assertEquals(0, service.projectCompanyActivity(listOf(project)))
+    }
+
+    @Test
+    fun `candidate review and correction activities project once into their correlated conversation`() {
+        val store = TransientConversationStore()
+        val conversation = newConversation(Conversation(1, "Candidate review", "HUMAN", NOW, ""))
+        val message = newConversationMessage(ConversationMessage(
+            1, 1, 1, "client-candidate-0001", MESSAGE_ROLE_USER, "Deliver the change.", actor = "HUMAN", createdAt = NOW, hash = "",
+        ))
+        val objective = newConversationObjective(ConversationObjectiveRevision(
+            1, 1, 1, 1, "Delivery", "Review one candidate.", state = OBJECTIVE_ACTIVE,
+            sourceMessageId = message.messageId, sourceMessageHash = message.hash, actor = "HUMAN", createdAt = NOW, hash = "",
+        ))
+        val command = newConversationCommand(ConversationCommandProposal(
+            1, 1, objective.objectiveId, message.messageId, message.hash, "START_WORKFLOW", "{\"workItemId\":4}", true, NOW, "",
+        ))
+        store.appendConversation(conversation)
+        store.appendMessage(message)
+        store.appendObjective(objective)
+        store.appendCommand(command)
+        store.appendAdmission(newConversationAdmission(ConversationCommandAdmission(1, 1, command.hash, "HUMAN", NOW, "")))
+        store.appendExecution(newConversationExecution(ConversationCommandExecution(
+            1, 1, command.hash, COMMAND_CORRELATED, "WORKFLOW_RUN", "42", HASH, recordedAt = NOW, hash = "",
+        )))
+        val pullRequestDraft = CandidatePullRequest(
+            1, runId = 42, workPackageId = 3, workPackageHash = "a".repeat(64), baseRevision = "b".repeat(40),
+            candidateRevision = "c".repeat(40), changedPaths = listOf("src/Main.kt"), implementationClaims = listOf("The change works."),
+            checks = listOf("./gradlew test"), evidence = listOf(CandidatePullRequestEvidence("TEST", "./gradlew test", true, HASH, "Passed.")),
+            deviations = emptyList(), createdAt = NOW, hash = "",
+        )
+        val pullRequest = pullRequestDraft.copy(hash = candidatePullRequestHash(pullRequestDraft))
+        val finding = CandidatePullRequestReviewFinding(
+            "Accepted behavior", "The candidate needs a repair.", "BLOCKER", REVIEW_CORRECTION_CANDIDATE_REPAIR, listOf(HASH),
+        )
+        val review = newCandidatePullRequestReview(1, pullRequest, CANDIDATE_REVIEW_INTENT, "intent-reviewer", listOf(finding))
+        val correction = newCandidatePullRequestCorrection(1, review, pullRequest, REVIEW_CORRECTION_CANDIDATE_REPAIR, listOf(finding))
+        val service = service(store, QueueInterpreter())
+
+        assertEquals(2, service.projectCandidatePullRequestActivity(listOf(pullRequest), listOf(review), listOf(correction)))
+        val activities = requireNotNull(service.projection(conversation.conversationId)).activities
+        assertEquals(listOf("CANDIDATE_PR_REVIEW", "CANDIDATE_PR_CORRECTION"), activities.map { it.authorityType })
+        assertEquals(listOf(review.hash, correction.hash), activities.map { it.authorityHash })
+        assertEquals(0, service.projectCandidatePullRequestActivity(listOf(pullRequest), listOf(review), listOf(correction)))
+        assertEquals(2, requireNotNull(service.projection(conversation.conversationId)).activities.size)
     }
 
     private fun service(

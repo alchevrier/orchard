@@ -40,6 +40,7 @@ Most workflow authorities use checksummed JSONL, including:
 - design governance and product genesis;
 - staged plans, proposals, and dispatches;
 - repository analysis and coding execution;
+- executable work packages, candidate PRs, candidate PR dispositions, candidate PR reviews, corrections, correction dispatches, design invalidations, and derived candidate outcome learning episodes;
 - company control;
 - engineering standards, scoped standards policy, remediation campaigns, and campaign resolutions.
 
@@ -88,6 +89,10 @@ Serialized authority is a compatibility surface.
 - Keep historical records immutable; represent new meaning with successor records or revisions.
 
 Milestone 10.1 preserves old standards and campaign hashes by appending optional effective-policy, applied-exception, and policy-authority fields with `EncodeDefault.Mode.NEVER`. Do not make those defaults eagerly encoded: historical checksum replay depends on their absence.
+
+Milestone 10.2.2 uses the same rule for an optional candidate PR `parentPullRequestId` and optional authority-graph fields on executable work packages. Existing records omit the default fields, preserving their historical payload and hash; newly compiled packages persist distinct evidence, ownership, and operation authority when present.
+
+Candidate outcome learning is a separate append-only, checksummed ledger. It is derived from terminal candidate dispositions and pins the candidate PR, its package, reviews, corrections, and disposition by hash. It is not an authority for policy, design, acceptance, dispatch, or promotion.
 
 A store change is incomplete without a test that loads records written by the prior schema when compatibility is required.
 

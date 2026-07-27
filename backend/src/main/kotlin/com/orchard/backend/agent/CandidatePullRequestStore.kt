@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package com.orchard.backend.agent
 
 import com.orchard.backend.analysis.ExecutableWorkPackage
@@ -10,6 +12,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.time.Instant
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -26,6 +29,8 @@ data class CandidatePullRequestEvidence(
 @Serializable
 data class CandidatePullRequest(
     val pullRequestId: Long,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val parentPullRequestId: Long? = null,
     val runId: Long,
     val workPackageId: Long,
     val workPackageHash: String,
@@ -112,9 +117,11 @@ fun newCandidatePullRequest(
     candidate: CodingCandidate,
     evidence: List<EvidenceRecord>,
     deviations: List<String> = emptyList(),
+    parentPullRequestId: Long? = null,
 ): CandidatePullRequest {
     val draft = CandidatePullRequest(
         pullRequestId = pullRequestId,
+        parentPullRequestId = parentPullRequestId,
         runId = packageAuthority.runId,
         workPackageId = packageAuthority.packageId,
         workPackageHash = packageAuthority.hash,
@@ -153,6 +160,11 @@ private fun validateCandidatePullRequest(pullRequest: CandidatePullRequest, prev
     }
     require(previous.none { it.runId == pullRequest.runId && it.candidateRevision == pullRequest.candidateRevision }) {
         "Candidate PR already exists for this revision"
+    }
+    pullRequest.parentPullRequestId?.let { parentPullRequestId ->
+        require(parentPullRequestId < pullRequest.pullRequestId && previous.any {
+            it.pullRequestId == parentPullRequestId && it.runId == pullRequest.runId
+        }) { "Candidate PR parent is invalid" }
     }
     require(pullRequest.hash == candidatePullRequestHash(pullRequest)) { "Candidate PR hash is invalid" }
 }

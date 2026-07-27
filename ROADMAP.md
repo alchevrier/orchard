@@ -5,11 +5,11 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `6` |
+| Version | `7` |
 | Status | `ACTIVE` |
-| Updated | `2026-07-26` |
+| Updated | `2026-07-27` |
 | Delivered baseline | Milestone 10.1 |
-| Next milestone | `10.2.1` Executable Work Packages and Persistent Coding |
+| Next milestone | `10.2.2` PR-Centered Multi-Actor Corrective Delivery |
 | Canonical path | `ROADMAP.md` |
 
 ## How To Use This Roadmap
@@ -133,8 +133,8 @@ Non-goals:
 ### Milestone 10.2: Durable Multi-Objective Conversational Conductor
 
 - State: `IN_PROGRESS`
-- Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`, `10.2.1`
-- Governing ADRs: ADR 010, ADR 011, ADR 038 through ADR 045; ADR 044 and ADR 045 must be accepted before completion.
+- Depends on: `9.4`, `9.5`, `9.6`, `9.7`, `10.1`, `10.2.1`, `10.2.3`
+- Governing ADRs: ADR 010, ADR 011, ADR 038 through ADR 047; ADR 044, ADR 045, and ADR 047 must be accepted before completion.
 
 Goal: deliver the first complete Orchard operating experience: repository-first entry into a project, an inbox-style interface for following and driving ticket work, and a Jira-like project overview, all backed by the durable multi-objective conductor from discussion through local promotion.
 
@@ -337,12 +337,58 @@ Non-goals:
 - Unrestricted shell access or mutation outside admitted worktrees and ownership boundaries.
 - Remote Git hosting integration; the first PR artifact and promotion remain local and revision-pinned.
 
-### Milestone 10.2.2: Orchard-Executed Governed Delivery
+### Milestone 10.2.2: PR-Centered Multi-Actor Corrective Delivery
 
 - State: `NEXT`
 - Depends on: `10.2.1`
+- Unblocks: `10.2.3`
+- Governing ADRs: ADR 004, ADR 036, ADR 046, and ADR 047.
+
+Goal: make the local candidate PR the durable unit of implementation, independent review, correction, and downstream design reconciliation. Separate evidence, ownership, and operation authority before coding; preserve rejected candidates as immutable evidence; and compile focused successors from typed findings rather than repeatedly discarding useful work.
+
+Deliverables:
+
+1. **Compiled implementation authority**
+  - Persist distinct revision-pinned evidence, ownership, and operation artifacts for every executable work package.
+  - Compile package authority deterministically from admitted design, acceptance contract, repository evidence, ownership, and allowed actions.
+  - Represent read-only compliant evidence explicitly so a cited source is never mistaken for a required code change or silently omitted from scope coverage.
+2. **Candidate PR correction lineage**
+  - Extend candidate PR records with parent lineage, terminal disposition, unresolved findings, and exact correction authority.
+  - Keep rejected candidates immutable and inspectable; generate a bounded successor package for ordinary compile, test, verification, and review repairs.
+  - Route stale authority, missing scope, and design contradiction to their owning authority instead of retrying coding under invalid premises.
+3. **Separated review and design reconciliation**
+  - Produce independent typed code-review, intent-review, design-review, and integration-review findings with evidence, requirement/invariant links, severity, and correction targets.
+  - Build a revision-pinned dependency graph from design through package, candidate, finding, acceptance, and promotion.
+  - Reconcile downstream candidates and packages after an admitted design successor without rewriting historical evidence or permitting obsolete promotion.
+4. **Self-contained integration and actor conversation**
+  - Start an isolated Orchard integration runtime with temporary storage, disposable repositories, ephemeral ports, deterministic time/model boundaries, real public APIs, restart exercise, and clean shutdown.
+  - Project bounded specialist findings into the canonical conversation associated with the design, package, or candidate PR; conversation remains a projection over referenced authority.
+  - Persist outcome-backed episodic learning and model/profile measurements without allowing conversation or model output to revise policy or acceptance rules.
+5. **Resource-aware pipeline admission**
+  - Schedule deterministic collection, compilation, and validation without model admission where possible.
+  - Let independent work items pipeline on capable machines while constrained profiles serialize model stages and resume from the first invalid durable artifact.
+
+Exit evidence:
+
+- A candidate with an injected compile, test, code-review, and intent-review defect remains one inspectable lineage and receives bounded successors without broad repository reanalysis.
+- A cited production source is deterministically classified as compliant read-only evidence or a required implementation owner before package admission.
+- A design successor invalidates only dependent packages and candidates; unaffected candidates retain their promotion eligibility.
+- A self-contained integration scenario starts a fresh Orchard runtime, uses public APIs and typed clients, survives a required restart, and shuts down with no user-specific external service prerequisite.
+- Code, intent, design, and integration review findings remain distinguishable, evidence-linked, replay-safe, and cannot self-approve or promote a candidate.
+- Full backend/frontend build, compatibility/replay coverage, ADR acceptance, developer and user documentation, and a committed milestone.
+
+Non-goals:
+
+- Replacing existing immutable evidence, audit, acceptance, or controlled promotion authority.
+- Treating group conversation as a mutable authority graph or autonomous policy update mechanism.
+- Requiring a live local model service for every integration test.
+
+### Milestone 10.2.3: Orchard-Executed Governed Delivery
+
+- State: `PLANNED`
+- Depends on: `10.2.2`
 - Unblocks: `10.2`
-- Governing ADRs: ADR 036 and ADR 046
+- Governing ADRs: ADR 036, ADR 046, and ADR 047.
 
 Goal: execute one meaningful inbox-originated product change entirely through production Orchard, from admitted intent and design through package-backed coding, persistent repair, candidate PR review, independent audit, acceptance, and controlled local promotion.
 
@@ -360,6 +406,45 @@ Exit evidence:
 - No supervising developer or external coding assistant authors, applies, repairs, approves, or promotes source during the proof run.
 
 The small/large by minimal/full benchmark matrix continues as non-blocking measurement work. It informs supported hardware and model recommendations but does not block this MVP production proof.
+
+### Milestone 10.2.4: Governed Autopilot and Outcome Experience Feedback
+
+- State: `PLANNED`
+- Depends on: `10.2.3`
+- Governing ADRs: ADR 036, ADR 046, and ADR 047; a dedicated autopilot decision is required before admission.
+
+Goal: let an operator explicitly delegate bounded delivery progression to Orchard while retaining evidence gates, stop conditions, and an auditable post-outcome feedback loop for work that was reported complete but proves incomplete in use.
+
+Deliverables:
+
+1. **Explicit autopilot policy**
+  - Versioned project-scoped policy defining eligible work types, repository/module scope, risk ceiling, model/resource budgets, retry limits, required review/audit gates, notification level, and whether local promotion is delegated.
+  - Default-deny policy: no remote push, exception grant, policy mutation, design admission, escalation resolution, or promotion outside the policy's exact delegated scope.
+  - Deterministic stop conditions for design revision, clarification, escalation, audit violation, failed integration evidence, policy exception, stale authority, model/resource anomaly, or budget exhaustion.
+2. **Evidence-gated autonomous progression**
+  - Autopilot may advance only already-governed transitions whose exact evidence gates conform; it does not make model output authoritative.
+  - Ticket reports and canonical conversations project the active policy, current stage, consumed budget, evidence, stop reason, and any automatic local promotion.
+3. **Outcome experience reports**
+  - Users can report `UNMET_CLAIM`, `REGRESSION`, `PARTIAL_OUTCOME`, `USABILITY_GAP`, `FALSE_POSITIVE_EVIDENCE`, or `NEW_REQUEST` against an accepted or promoted outcome.
+  - Each report pins the candidate, work-package, design, review, audit, acceptance, and promotion authority available at submission, plus reproduction steps and optional evidence references.
+  - Experience reports never rewrite historical acceptance; deterministic triage creates a corrective work item, review/integration attention, report-projection defect, or new outcome as appropriate.
+4. **Retrieval-only learning and process measurement**
+  - Derive recurring blind spots, verification gaps, reviewer/model-profile performance, and repository conventions from accepted outcomes and later experience evidence.
+  - Inject bounded advisory learning into future design, package, review, and integration envelopes without allowing it to modify policy, design, acceptance, routing, or promotion.
+
+Exit evidence:
+
+- A policy outside its declared scope, risk ceiling, budget, or delegated transition fails closed and projects an actionable stop reason.
+- An eligible low-risk ticket advances from admitted work through all required independent gates and local promotion without per-step user interaction.
+- Clarification, escalation, design revision, failed audit, stale evidence, and resource/budget denial stop autopilot before the affected authority advances.
+- A user experience report survives restart, preserves original decision history, creates the correct governed follow-up classification, and contributes only retrieval-only learning.
+- The canonical ticket report explains both autonomous completion and any later unmet claim without presenting a revised narrative as historical truth.
+
+Non-goals:
+
+- Silent delegation inferred from conversational language.
+- Automatic remote push, policy amendment, exception grant, escalation resolution, or broad model-budget increase.
+- Treating user feedback or learned patterns as direct acceptance, design, or promotion authority.
 
 ### Milestone 10.3: Identity, Delegation, Quorum, and Signed Decisions
 

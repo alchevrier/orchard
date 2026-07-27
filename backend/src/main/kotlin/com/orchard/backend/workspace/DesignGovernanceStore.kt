@@ -62,6 +62,16 @@ data class DesignAuthorityReference(
 )
 
 @Serializable
+data class DesignCorrectionAuthorization(
+    val requestId: Long,
+    val correctionId: Long,
+    val correctionHash: String,
+    val runId: Long,
+    val design: DesignAuthorityReference,
+)
+
+@Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class DesignRevision(
     val designId: Long,
     val revision: Int,
@@ -71,6 +81,8 @@ data class DesignRevision(
     val content: DesignSubmission,
     val actor: String,
     val createdAt: String = Instant.now().toString(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val correctionRequestId: Long? = null,
     val hash: String,
 )
 

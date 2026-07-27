@@ -105,6 +105,8 @@ class CodingWorkerService(
     private val attemptStore: CodingWorkerAttemptStore = TransientCodingWorkerAttemptStore(),
     private val workPackageStore: ExecutableWorkPackageStore = TransientExecutableWorkPackageStore(),
     private val pullRequestStore: CandidatePullRequestStore = TransientCandidatePullRequestStore(),
+    private val dispositionService: CandidatePullRequestDispositionService? = null,
+    private val designInvalidationStore: WorkPackageDesignInvalidationStore = TransientWorkPackageDesignInvalidationStore(),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -303,6 +305,14 @@ class CodingWorkerService(
                     diagnostic = "Executable work-package admission failed: ${error.message.orEmpty()}",
                 )
             }
+        }
+        if (workPackage != null && designInvalidationStore.load().any {
+                it.packageId == workPackage.packageId && it.packageHash == workPackage.hash
+            }) {
+            return CodingWorkerTickResult(
+                CodingWorkerTickStatus.PLAN_BLOCKED,
+                diagnostic = "The executable work package is invalidated by a newer admitted design revision.",
+            )
         }
         val claim = try {
             requireNotNull(workerStore.appendNext { eventId, preceding ->
@@ -687,11 +697,31 @@ class CodingWorkerService(
         return if (evidenceResult == null) {
             if (workPackage != null) {
                 val pullRequest = runCatching {
-                    pullRequestStore.load().lastOrNull {
+                    val priorPullRequests = pullRequestStore.load()
+                    priorPullRequests.lastOrNull {
                         it.runId == run.runId && it.candidateRevision == candidate.revision
                     } ?: pullRequestStore.appendNext { pullRequestId ->
                         val evidence = workspace.snapshot(MESSAGE_READY).workflowRuns.single { it.runId == run.runId }.evidence
-                        newCandidatePullRequest(pullRequestId, workPackage, candidate, evidence)
+                        newCandidatePullRequest(
+                            pullRequestId,
+                            workPackage,
+                            candidate,
+                            evidence,
+                            parentPullRequestId = priorPullRequests.lastOrNull { it.runId == run.runId }?.pullRequestId,
+                        )
+                    }.also { created ->
+                        dispositionService?.record(
+                            created.pullRequestId,
+                            CANDIDATE_DISPOSITION_REVIEW_REQUIRED,
+                            "Candidate was frozen and awaits independent review.",
+                        )
+                        created.parentPullRequestId?.let { parentPullRequestId ->
+                            dispositionService?.record(
+                                parentPullRequestId,
+                                CANDIDATE_DISPOSITION_SUPERSEDED,
+                                "Corrective candidate ${created.pullRequestId} was frozen.",
+                            )
+                        }
                     }
                 }
                 if (pullRequest.isFailure) return finish(

@@ -30,11 +30,15 @@ import com.orchard.backend.agent.CodingPatchProposal
 import com.orchard.backend.agent.CodingTextReplacement
 import com.orchard.backend.agent.CodingWorkerService
 import com.orchard.backend.agent.CodingWorkerTickStatus
+import com.orchard.backend.agent.CandidatePullRequestDispositionService
+import com.orchard.backend.agent.CANDIDATE_DISPOSITION_REVIEW_REQUIRED
+import com.orchard.backend.agent.CANDIDATE_DISPOSITION_SUPERSEDED
 import com.orchard.backend.agent.CodingWorkerAttempt
 import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.agent.TransientCodingWorkerAttemptStore
 import com.orchard.backend.agent.TransientCodingWorkerStore
+import com.orchard.backend.agent.TransientCandidatePullRequestStore
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
@@ -454,6 +458,8 @@ class CompanyCircuitTest {
             companyControl = company,
         )
         val workPackages = TransientExecutableWorkPackageStore()
+        val pullRequests = TransientCandidatePullRequestStore()
+        val candidateDispositions = CandidatePullRequestDispositionService(pullRequests)
         val worker = CodingWorkerService(
             workspace = workspace,
             modelProviders = listOf(staff),
@@ -463,6 +469,8 @@ class CompanyCircuitTest {
             repositoryAnalysis = analysis,
             retryBudget = 5,
             workPackageStore = workPackages,
+            pullRequestStore = pullRequests,
+            dispositionService = candidateDispositions,
         )
 
         assertEquals(CodingWorkerTickStatus.ANALYSIS_REQUIRED, worker.tick().status)
@@ -493,6 +501,10 @@ class CompanyCircuitTest {
         assertEquals(secondAttempt.execution?.result?.revision, firstPullRequest.candidateRevision)
         assertEquals(workPackages.load().single().hash, firstPullRequest.workPackageHash)
         assertTrue(firstPullRequest.evidence.all { it.passed })
+        assertEquals(
+            listOf(CANDIDATE_DISPOSITION_REVIEW_REQUIRED),
+            candidateDispositions.dispositions(firstPullRequest.pullRequestId).map { it.status },
+        )
         val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
         assertTrue(company.projectView(1).escalations.any { it.runId == runId && it.requiredRole == ROLE_IMPLEMENTER })
 
@@ -551,7 +563,17 @@ class CompanyCircuitTest {
         )
         assertEquals("EVIDENCE_BLOCKED", workspace.snapshot(MESSAGE_READY).workflowRuns.single().state)
         assertEquals(CodingWorkerTickStatus.CANDIDATE_COMPLETED, worker.tick().status)
-        assertEquals(2, worker.pullRequests().size)
+        val repairedPullRequests = worker.pullRequests()
+        assertEquals(2, repairedPullRequests.size)
+        assertEquals(firstPullRequest.pullRequestId, repairedPullRequests.last().parentPullRequestId)
+        assertEquals(
+            listOf(CANDIDATE_DISPOSITION_REVIEW_REQUIRED, CANDIDATE_DISPOSITION_SUPERSEDED),
+            candidateDispositions.dispositions(firstPullRequest.pullRequestId).map { it.status },
+        )
+        assertEquals(
+            listOf(CANDIDATE_DISPOSITION_REVIEW_REQUIRED),
+            candidateDispositions.dispositions(repairedPullRequests.last().pullRequestId).map { it.status },
+        )
         assertTrue(analysis.plans().drop(1).all { it.content.disposition == DISPOSITION_PARTIALLY_IMPLEMENTED })
         assertTrue(analysis.plans().all { "build.gradle.kts" in it.content.reuse })
         assertTrue(worker.executions().all { it.claim.executionPlanId != null && it.claim.executionPlanHash != null })

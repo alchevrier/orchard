@@ -3,6 +3,8 @@ package com.orchard.backend.company
 import com.orchard.backend.agent.CODING_EXECUTION_COMPLETED
 import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CodingWorkerService
+import com.orchard.backend.agent.CandidatePullRequestDispositionService
+import com.orchard.backend.agent.CANDIDATE_DISPOSITION_BLOCKED
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.resource.MachineResourceController
@@ -88,6 +90,8 @@ class CompanyAuditService(
     private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
     private val attemptStore: CompanyAuditAttemptStore = TransientCompanyAuditAttemptStore(),
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
+    private val candidateReviewGate: (runId: Long, candidateRevision: String) -> Boolean = { _, _ -> true },
+    private val candidateDispositionService: CandidatePullRequestDispositionService? = null,
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
@@ -178,6 +182,13 @@ class CompanyAuditService(
         }.mapTo(hashSetOf()) { it.role }
         val role = listOf(ROLE_ARCHITECTURE_AUDITOR, ROLE_QUALITY_AUDITOR).firstOrNull { it !in completedRoles }
         if (role == null) {
+            if (!candidateReviewGate(run.runId, revision)) {
+                return CompanyAuditTickResult(
+                    CompanyAuditTickStatus.IDLE,
+                    run.runId,
+                    diagnostic = "Candidate PR independent review authority is incomplete or nonconforming.",
+                )
+            }
             val acceptance = company.accept(run.runId, revision, sourceDiff.outputHash, "ORCHARD_COMPANY_CIRCUIT")
             return CompanyAuditTickResult(
                 if (acceptance.status == CompanyMutationStatus.RECORDED) CompanyAuditTickStatus.ACCEPTED
@@ -358,6 +369,15 @@ class CompanyAuditService(
             return CompanyAuditTickResult(CompanyAuditTickStatus.INVALID_JUDGMENT, run.runId, role, recorded.status, diagnostic)
         }
         if (recorded.status == CompanyMutationStatus.AUDIT_VIOLATION) {
+            codingWorker.pullRequests().singleOrNull {
+                it.runId == run.runId && it.candidateRevision == revision
+            }?.let { pullRequest ->
+                candidateDispositionService?.record(
+                    pullRequest.pullRequestId,
+                    CANDIDATE_DISPOSITION_BLOCKED,
+                    "Independent $role audit found a revision-pinned violation.",
+                )
+            }
             val reopened = workspace.requireAuditRepair(
                 run.runId,
                 "Independent $role audit found a revision-pinned architectural violation: ${proposal.rationale}",

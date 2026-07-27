@@ -2,6 +2,15 @@ package com.orchard.backend.analysis
 
 import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
+import com.orchard.backend.agent.CandidatePullRequestCorrection
+import com.orchard.backend.agent.CandidatePullRequestReviewFinding
+import com.orchard.backend.agent.CandidatePullRequestWorkPackageRecompileService
+import com.orchard.backend.agent.CandidatePullRequestCorrectionDispatchService
+import com.orchard.backend.agent.PackageStoreWorkPackageCorrectionRecompileGateway
+import com.orchard.backend.agent.REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE
+import com.orchard.backend.agent.TransientCandidatePullRequestCorrectionDispatchStore
+import com.orchard.backend.agent.TransientCandidatePullRequestCorrectionStore
+import com.orchard.backend.agent.candidatePullRequestCorrectionHash
 import com.orchard.backend.workspace.AcceptanceCriterion
 import com.orchard.backend.workspace.DEFINITION_READY
 import com.orchard.backend.workspace.DefinitionAssessment
@@ -30,10 +39,15 @@ class ExecutableWorkPackageTest {
         assertEquals(listOf("src/Main.kt"), packageAuthority.ownership.paths)
         assertEquals(listOf("src/Main.kt"), packageAuthority.ownership.likelyImplementationPaths)
         assertEquals(emptyList(), packageAuthority.ownership.createPaths)
+        assertEquals(listOf("src/Main.kt"), packageAuthority.ownership.requiredImplementationPaths)
+        assertEquals(emptyList(), packageAuthority.ownership.compliantEvidencePaths)
         assertEquals(
             listOf(WORK_PACKAGE_ACTION_READ_SOURCE, WORK_PACKAGE_ACTION_REWRITE_FILE, WORK_PACKAGE_ACTION_RUN_CHECK),
             packageAuthority.ownership.allowedActions,
         )
+        assertEquals(listOf("src/Main.kt"), packageAuthority.evidence.citations.map { it.path })
+        assertFalse(packageAuthority.evidence.citations.single().compliantReadOnly)
+        assertEquals(listOf("src/Main.kt"), packageAuthority.operations.operations.map { it.path })
         assertEquals(source, packageAuthority.sources.single().content)
         assertEquals(listOf("./gradlew test"), packageAuthority.checks.map { it.command })
         assertEquals(executableWorkPackageHash(packageAuthority), packageAuthority.hash)
@@ -75,6 +89,116 @@ class ExecutableWorkPackageTest {
     }
 
     @Test
+    fun `adequacy keeps evidence ownership and operation authority distinct`() {
+        val valid = workPackage("fun answer() = 1\n")
+        val invalid = valid.copy(
+            ownership = valid.ownership.copy(requiredImplementationPaths = emptyList()),
+            hash = "",
+        ).let { it.copy(hash = executableWorkPackageHash(it)) }
+
+        assertEquals(
+            "Required implementation ownership does not match operation authority.",
+            verifyExecutableWorkPackage(invalid).diagnostics.single(),
+        )
+    }
+
+    @Test
+    fun `compiler preserves compliant read only evidence without requiring a source operation`() {
+        val packageAuthority = workPackage("fun answer() = 1\n", withCompliantEvidence = true)
+
+        assertEquals(listOf("docs/Contract.md"), packageAuthority.ownership.compliantEvidencePaths)
+        assertEquals(listOf("src/Main.kt"), packageAuthority.ownership.requiredImplementationPaths)
+        assertEquals(
+            listOf("docs/Contract.md"),
+            packageAuthority.evidence.citations.filter { it.compliantReadOnly }.map { it.path },
+        )
+        assertEquals(listOf("src/Main.kt"), packageAuthority.operations.operations.map { it.path })
+        assertTrue(verifyExecutableWorkPackage(packageAuthority).adequate)
+    }
+
+    @Test
+    fun `recompiler pins review correction without widening package authority`() {
+        val prior = workPackage("fun answer() = 1\n")
+        val correctionDraft = CandidatePullRequestCorrection(
+            correctionId = 8,
+            reviewId = 9,
+            reviewHash = "b".repeat(64),
+            pullRequestId = 4,
+            pullRequestHash = "c".repeat(64),
+            runId = prior.runId,
+            workPackageId = prior.packageId,
+            workPackageHash = prior.hash,
+            correctionTarget = REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE,
+            findings = listOf(
+                CandidatePullRequestReviewFinding(
+                    criterion = "The answer is forty two.",
+                    observation = "Preserve the existing API while returning forty two.",
+                    severity = "BLOCKER",
+                    correctionTarget = REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE,
+                    evidenceHashes = listOf("d".repeat(64)),
+                ),
+            ),
+            hash = "",
+        )
+        val correction = correctionDraft.copy(hash = candidatePullRequestCorrectionHash(correctionDraft))
+
+        val successor = recompileExecutableWorkPackage(2, 2, prior, correction)
+
+        assertEquals(prior.ownership, successor.ownership)
+        assertEquals(prior.operations, successor.operations)
+        assertEquals(listOf(correction.correctionId), successor.corrections.map { it.correctionId })
+        assertTrue(successor.expectedBehavior.contains(correction.findings.single().observation))
+        assertTrue(verifyExecutableWorkPackage(successor).adequate)
+    }
+
+    @Test
+    fun `work package correction dispatch creates one successor from pinned authority`() {
+        val packages = TransientExecutableWorkPackageStore()
+        val prior = packages.appendNext(7) { packageId, revision -> workPackage("fun answer() = 1\n", packageId, revision) }
+        val correctionDraft = CandidatePullRequestCorrection(
+            correctionId = 1,
+            reviewId = 9,
+            reviewHash = "b".repeat(64),
+            pullRequestId = 4,
+            pullRequestHash = "c".repeat(64),
+            runId = prior.runId,
+            workPackageId = prior.packageId,
+            workPackageHash = prior.hash,
+            correctionTarget = REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE,
+            findings = listOf(
+                CandidatePullRequestReviewFinding(
+                    criterion = "The answer is forty two.",
+                    observation = "Keep the public API while correcting the implementation.",
+                    severity = "BLOCKER",
+                    correctionTarget = REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE,
+                    evidenceHashes = listOf("d".repeat(64)),
+                ),
+            ),
+            hash = "",
+        )
+        val correction = correctionDraft.copy(hash = candidatePullRequestCorrectionHash(correctionDraft))
+        val corrections = TransientCandidatePullRequestCorrectionStore().also { store ->
+            store.appendNext { correction }
+        }
+        val dispatches = TransientCandidatePullRequestCorrectionDispatchStore()
+        val dispatcher = CandidatePullRequestWorkPackageRecompileService(
+            corrections,
+            dispatches,
+            PackageStoreWorkPackageCorrectionRecompileGateway(packages),
+        )
+
+        val dispatch = dispatcher.tick()
+
+        assertEquals(1, dispatch?.correctionId)
+        assertEquals(2, packages.load().size)
+        val successor = packages.load().last()
+        assertEquals(prior.ownership, successor.ownership)
+        assertEquals(prior.operations, successor.operations)
+        assertEquals(listOf(correction.correctionId), successor.corrections.map { it.correctionId })
+        assertEquals(1, dispatches.load().size)
+    }
+
+    @Test
     fun `file store replays adequate monotonic package revisions and rejects invalid successors`() {
         val directory = createTempDirectory("orchard-work-packages-")
         val store = FileExecutableWorkPackageStore(directory)
@@ -98,12 +222,17 @@ class ExecutableWorkPackageTest {
         assertEquals(2, store.load().size)
     }
 
-    private fun workPackage(source: String, packageId: Long = 1, revision: Int = 1) = compileExecutableWorkPackage(
+    private fun workPackage(
+        source: String,
+        packageId: Long = 1,
+        revision: Int = 1,
+        withCompliantEvidence: Boolean = false,
+    ) = compileExecutableWorkPackage(
         packageId = packageId,
         revision = revision,
         definition = definition(),
-        plan = plan(),
-        repositoryContext = context(source),
+        plan = plan(withCompliantEvidence),
+        repositoryContext = context(source, withCompliantEvidence),
     )
 
     private fun ExecutableWorkPackage.rehash() = copy(hash = "").let { it.copy(hash = executableWorkPackageHash(it)) }
@@ -127,7 +256,7 @@ class ExecutableWorkPackageTest {
         hash = "b".repeat(64),
     )
 
-    private fun plan() = newRepositoryExecutionPlan(
+    private fun plan(withCompliantEvidence: Boolean = false) = newRepositoryExecutionPlan(
         planId = 3,
         runId = 7,
         revision = 1,
@@ -136,12 +265,20 @@ class ExecutableWorkPackageTest {
         content = RepositoryAnalysisPlanContent(
             disposition = DISPOSITION_PARTIALLY_IMPLEMENTED,
             summary = "Modify the existing function in place.",
-            evidence = listOf(RepositoryEvidenceCitation("src/Main.kt", "answer", "The function owns the behavior.", stagedPlanHash("fun answer() = 1\n"))),
+            evidence = if (withCompliantEvidence) {
+                listOf(RepositoryEvidenceCitation("docs/Contract.md", null, "The contract already specifies the outcome.", stagedPlanHash("The answer must be forty two.\n")))
+            } else {
+                listOf(RepositoryEvidenceCitation("src/Main.kt", "answer", "The function owns the behavior.", stagedPlanHash("fun answer() = 1\n")))
+            },
             reuse = listOf("answer"),
             preservedInvariants = listOf("Preserve the function signature."),
             nonGoals = emptyList(),
             coveredScope = listOf("src/Main.kt"),
-            scopeCoverage = listOf(ExecutionPlanScopeCoverage("src/Main.kt", listOf("src/Main.kt"), listOf(1))),
+            scopeCoverage = if (withCompliantEvidence) {
+                listOf(ExecutionPlanScopeCoverage("src/Main.kt", listOf("docs/Contract.md"), emptyList(), listOf("docs/Contract.md")))
+            } else {
+                listOf(ExecutionPlanScopeCoverage("src/Main.kt", listOf("src/Main.kt"), listOf(1)))
+            },
             operations = listOf(ExecutionPlanOperation(1, PLAN_OPERATION_MODIFY, "src/Main.kt", "answer", "Return forty two.", listOf("The answer is forty two."))),
             verificationCommands = listOf("./gradlew test"),
         ),
@@ -155,8 +292,13 @@ class ExecutableWorkPackageTest {
         ),
     )
 
-    private fun context(source: String) = CodingRepositoryContext(
-        files = listOf(CodingContextFile("src/Main.kt", source, stagedPlanHash(source), listOf("fun answer()"))),
+    private fun context(source: String, withCompliantEvidence: Boolean = false) = CodingRepositoryContext(
+        files = buildList {
+            add(CodingContextFile("src/Main.kt", source, stagedPlanHash(source), listOf("fun answer()")))
+            if (withCompliantEvidence) {
+                add(CodingContextFile("docs/Contract.md", "The answer must be forty two.\n", stagedPlanHash("The answer must be forty two.\n")))
+            }
+        },
         omittedFileCount = 0,
     )
 }

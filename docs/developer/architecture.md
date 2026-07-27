@@ -58,6 +58,10 @@ flowchart TD
 
 Each arrow is a boundary with its own record and failure state. Avoid helper methods that collapse proposal, admission, execution, and acceptance into one mutation.
 
+Candidate PRs pin the actual candidate revision, compiled work package, changed paths, claims, checks, and evidence. Corrective candidates link to their immutable parent PR. Typed candidate reviews are separate append-only records for `CODE`, `INTENT`, `DESIGN`, and `INTEGRATION` authority; each finding identifies evidence and a correction target. Bounded automated reviewer actors receive distinct role envelopes and resource leases, then can only submit those typed reviews. Orchard compiles findings into immutable target-specific correction authority: repair, work-package recompilation, design revision, clarification, and escalation each dispatch independently; no target silently becomes a coding retry.
+
+Candidate lifecycle is also append-only. A candidate begins `REVIEW_REQUIRED`; four conforming independent reviews record `ACCEPTED`; a nonconforming review records `REPAIR_REQUIRED`; an independent audit violation can record `BLOCKED`; and a corrective child marks its immutable parent `SUPERSEDED`. Derived candidate-learning episodes retain terminal outcomes and pinned authority hashes for retrieval, but cannot alter any operational authority.
+
 Standards have a second deterministic flow:
 
 ```mermaid

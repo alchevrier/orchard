@@ -11,21 +11,30 @@ class CandidatePullRequestStoreTest {
         val directory = createTempDirectory("orchard-candidate-pr-")
         val store = FileCandidatePullRequestStore(directory)
         val pullRequest = store.appendNext { pullRequestId -> pullRequest(pullRequestId) }
+        val successor = store.appendNext { pullRequestId ->
+            pullRequest(pullRequestId, candidateRevision = "e".repeat(40), parentPullRequestId = pullRequest.pullRequestId)
+        }
 
-        assertEquals(listOf(pullRequest), FileCandidatePullRequestStore(directory).load())
+        assertEquals(listOf(pullRequest, successor), FileCandidatePullRequestStore(directory).load())
+        assertEquals(pullRequest.pullRequestId, successor.parentPullRequestId)
         assertFailsWith<IllegalArgumentException> {
             store.appendNext { pullRequestId -> pullRequest(pullRequestId) }
         }
     }
 
-    private fun pullRequest(pullRequestId: Long): CandidatePullRequest {
+    private fun pullRequest(
+        pullRequestId: Long,
+        candidateRevision: String = "c".repeat(40),
+        parentPullRequestId: Long? = null,
+    ): CandidatePullRequest {
         val draft = CandidatePullRequest(
             pullRequestId = pullRequestId,
+            parentPullRequestId = parentPullRequestId,
             runId = 7,
             workPackageId = 3,
             workPackageHash = "a".repeat(64),
             baseRevision = "b".repeat(40),
-            candidateRevision = "c".repeat(40),
+            candidateRevision = candidateRevision,
             changedPaths = listOf("src/Main.kt"),
             implementationClaims = listOf("The answer is forty two."),
             checks = listOf("./gradlew test"),

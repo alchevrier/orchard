@@ -4,7 +4,11 @@ package com.orchard.backend.analysis
 
 import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingRepositoryContext
+import com.orchard.backend.agent.CandidatePullRequestCorrection
+import com.orchard.backend.agent.CandidatePullRequestReviewFinding
+import com.orchard.backend.agent.REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE
 import com.orchard.backend.workspace.WorkDefinitionManifest
+import com.orchard.backend.workspace.DesignAuthorityReference
 import com.orchard.backend.workspace.stagedPlanHash
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
@@ -44,6 +48,8 @@ data class WorkPackageDesignAuthority(
     val summary: String,
     val preservedInvariants: List<String>,
     val nonGoals: List<String>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val admittedDesign: DesignAuthorityReference? = null,
 )
 
 @Serializable
@@ -52,6 +58,47 @@ data class WorkPackageOwnershipBoundary(
     val likelyImplementationPaths: List<String>,
     val createPaths: List<String>,
     val allowedActions: List<String>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val requiredImplementationPaths: List<String> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val compliantEvidencePaths: List<String> = emptyList(),
+)
+
+@Serializable
+data class WorkPackageEvidenceCitation(
+    val path: String,
+    val symbol: String? = null,
+    val observation: String,
+    val contentHash: String,
+    val compliantReadOnly: Boolean,
+)
+
+@Serializable
+data class WorkPackageEvidenceAuthority(
+    val citations: List<WorkPackageEvidenceCitation> = emptyList(),
+)
+
+@Serializable
+data class WorkPackageOperation(
+    val order: Int,
+    val action: String,
+    val path: String,
+    val symbol: String? = null,
+    val instruction: String,
+    val acceptanceCriteria: List<String>,
+)
+
+@Serializable
+data class WorkPackageOperationAuthority(
+    val operations: List<WorkPackageOperation> = emptyList(),
+)
+
+@Serializable
+data class WorkPackageCorrectionAuthority(
+    val correctionId: Long,
+    val correctionHash: String,
+    val reviewHash: String,
+    val findings: List<CandidatePullRequestReviewFinding>,
 )
 
 @Serializable
@@ -79,6 +126,12 @@ data class ExecutableWorkPackage(
     val intent: WorkPackageIntentAuthority,
     val design: WorkPackageDesignAuthority,
     val ownership: WorkPackageOwnershipBoundary,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val evidence: WorkPackageEvidenceAuthority = WorkPackageEvidenceAuthority(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val operations: WorkPackageOperationAuthority = WorkPackageOperationAuthority(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val corrections: List<WorkPackageCorrectionAuthority> = emptyList(),
     val expectedBehavior: List<String>,
     val unresolvedAuthorityQuestions: List<String>,
     val sources: List<WorkPackageSource>,
@@ -101,9 +154,11 @@ fun compileExecutableWorkPackage(
     plan: RepositoryExecutionPlan,
     repositoryContext: CodingRepositoryContext,
 ): ExecutableWorkPackage {
-    val likelyPaths = plan.content.operations
+    val sourceOperations = plan.content.operations
         .filter { it.action != PLAN_OPERATION_VERIFY }
-        .map { it.path }
+    val likelyPaths = sourceOperations.map { it.path }.distinct().sorted()
+    val compliantEvidencePaths = plan.content.scopeCoverage
+        .flatMap { it.compliantEvidencePaths }
         .distinct()
         .sorted()
     val ownershipPaths = (plan.content.scopeCoverage.flatMap { it.evidencePaths } +
@@ -140,12 +195,38 @@ fun compileExecutableWorkPackage(
             summary = plan.content.summary,
             preservedInvariants = plan.content.preservedInvariants,
             nonGoals = (definition.definition.nonGoals + plan.content.nonGoals).distinct(),
+            admittedDesign = plan.admittedDesign,
         ),
         ownership = WorkPackageOwnershipBoundary(
             paths = ownershipPaths,
             likelyImplementationPaths = likelyPaths,
-            createPaths = plan.content.operations.filter { it.action == PLAN_OPERATION_CREATE }.map { it.path }.distinct().sorted(),
+            createPaths = sourceOperations.filter { it.action == PLAN_OPERATION_CREATE }.map { it.path }.distinct().sorted(),
             allowedActions = allowedWorkPackageActions(plan),
+            requiredImplementationPaths = likelyPaths,
+            compliantEvidencePaths = compliantEvidencePaths,
+        ),
+        evidence = WorkPackageEvidenceAuthority(
+            plan.content.evidence.map { citation ->
+                WorkPackageEvidenceCitation(
+                    path = citation.path,
+                    symbol = citation.symbol,
+                    observation = citation.observation,
+                    contentHash = citation.contentHash,
+                    compliantReadOnly = citation.path in compliantEvidencePaths,
+                )
+            },
+        ),
+        operations = WorkPackageOperationAuthority(
+            sourceOperations.map { operation ->
+                WorkPackageOperation(
+                    order = operation.order,
+                    action = operation.action,
+                    path = operation.path,
+                    symbol = operation.symbol,
+                    instruction = operation.instruction,
+                    acceptanceCriteria = operation.acceptanceCriteria,
+                )
+            },
         ),
         expectedBehavior = (listOf(definition.definition.requiredBehavior) +
             definition.definition.acceptanceCriteria.map { it.description } +
@@ -159,6 +240,34 @@ fun compileExecutableWorkPackage(
             WORK_PACKAGE_ESCALATE_MISSING_AUTHORITY,
             WORK_PACKAGE_ESCALATE_DESIGN_CONTRADICTION,
         ),
+    )
+    return draft.copy(hash = executableWorkPackageHash(draft))
+}
+
+fun recompileExecutableWorkPackage(
+    packageId: Long,
+    revision: Int,
+    prior: ExecutableWorkPackage,
+    correction: CandidatePullRequestCorrection,
+): ExecutableWorkPackage {
+    require(correction.correctionTarget == REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE) {
+        "Only work-package recompilation correction authority can produce a successor package."
+    }
+    require(correction.runId == prior.runId && correction.workPackageId == prior.packageId &&
+        correction.workPackageHash == prior.hash
+    ) { "Correction authority does not match the pinned executable work package." }
+    val attachment = WorkPackageCorrectionAuthority(
+        correction.correctionId,
+        correction.hash,
+        correction.reviewHash,
+        correction.findings,
+    )
+    val draft = prior.copy(
+        packageId = packageId,
+        revision = revision,
+        corrections = prior.corrections + attachment,
+        expectedBehavior = (prior.expectedBehavior + correction.findings.map { it.observation }).distinct(),
+        hash = "",
     )
     return draft.copy(hash = executableWorkPackageHash(draft))
 }
@@ -179,12 +288,59 @@ fun verifyExecutableWorkPackage(packageAuthority: ExecutableWorkPackage): WorkPa
         }
         if (packageAuthority.design.summary.isBlank()) add("Admitted design has no implementation summary.")
         if (packageAuthority.expectedBehavior.none(String::isNotBlank)) add("Expected behavior is empty.")
+        if (packageAuthority.corrections.any { correction ->
+                correction.correctionId <= 0 || !correction.correctionHash.matches(SHA256_HASH) ||
+                    !correction.reviewHash.matches(SHA256_HASH) || correction.findings.isEmpty() ||
+                    correction.findings.any { it.correctionTarget != REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE }
+            } || packageAuthority.corrections.map { it.correctionId }.distinct().size != packageAuthority.corrections.size
+        ) {
+            add("Work-package correction authority is invalid.")
+        }
+        if (packageAuthority.corrections.any { correction ->
+                !packageAuthority.expectedBehavior.containsAll(correction.findings.map { it.observation })
+            }
+        ) add("Work-package correction behavior is not represented in the package envelope.")
         if (packageAuthority.ownership.paths.isEmpty()) add("Ownership boundary is empty.")
         if (!packageAuthority.ownership.paths.containsAll(packageAuthority.ownership.likelyImplementationPaths)) {
             add("Likely implementation paths exceed the ownership boundary.")
         }
         if (!packageAuthority.ownership.paths.containsAll(packageAuthority.ownership.createPaths)) {
             add("Create paths exceed the ownership boundary.")
+        }
+        val hasAuthorityGraph = packageAuthority.evidence.citations.isNotEmpty() || packageAuthority.operations.operations.isNotEmpty()
+        if (hasAuthorityGraph) {
+            if (packageAuthority.evidence.citations.isEmpty() || packageAuthority.operations.operations.isEmpty()) {
+                add("Package authority graph is incomplete.")
+            }
+            val evidencePaths = packageAuthority.evidence.citations.mapTo(hashSetOf()) { it.path }
+            if (packageAuthority.evidence.citations.any {
+                    it.path.isBlank() || it.observation.isBlank() || !it.contentHash.matches(SHA256_HASH)
+                }) {
+                add("Package evidence authority is invalid.")
+            }
+            if (!evidencePaths.containsAll(packageAuthority.ownership.compliantEvidencePaths)) {
+                add("Compliant evidence paths lack evidence authority.")
+            }
+            if (packageAuthority.evidence.citations.any { citation ->
+                    citation.compliantReadOnly != (citation.path in packageAuthority.ownership.compliantEvidencePaths)
+                }) {
+                add("Evidence compliance does not match ownership authority.")
+            }
+            val operationPaths = packageAuthority.operations.operations.map { it.path }
+            if (packageAuthority.operations.operations.map { it.order } != packageAuthority.operations.operations.map { it.order }.sorted() ||
+                packageAuthority.operations.operations.any { operation ->
+                    operation.action !in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY, PLAN_OPERATION_DELETE) ||
+                        operation.path.isBlank() || operation.instruction.isBlank() || operation.acceptanceCriteria.isEmpty()
+                }
+            ) {
+                add("Package operation authority is invalid.")
+            }
+            if (operationPaths.distinct().sorted() != packageAuthority.ownership.requiredImplementationPaths.distinct().sorted()) {
+                add("Required implementation ownership does not match operation authority.")
+            }
+            if (!packageAuthority.ownership.paths.containsAll(packageAuthority.ownership.requiredImplementationPaths)) {
+                add("Required implementation paths exceed the ownership boundary.")
+            }
         }
         if (packageAuthority.ownership.createPaths.isNotEmpty() && WORK_PACKAGE_ACTION_CREATE_FILE !in packageAuthority.ownership.allowedActions) {
             add("Create paths lack CREATE_FILE authority.")

@@ -1,5 +1,20 @@
 package com.orchard.backend
 
+import com.orchard.backend.agent.CANDIDATE_CORRECTION_DISPATCHED
+import com.orchard.backend.agent.CANDIDATE_REVIEW_CODE
+import com.orchard.backend.agent.CandidatePullRequest
+import com.orchard.backend.agent.CandidatePullRequestCorrectionDispatchService
+import com.orchard.backend.agent.CandidatePullRequestEvidence
+import com.orchard.backend.agent.CandidatePullRequestReviewFinding
+import com.orchard.backend.agent.CandidatePullRequestReviewService
+import com.orchard.backend.agent.CandidatePullRequestReviewSubmission
+import com.orchard.backend.agent.TransientCandidatePullRequestCorrectionDispatchStore
+import com.orchard.backend.agent.TransientCandidatePullRequestCorrectionStore
+import com.orchard.backend.agent.TransientCandidatePullRequestReviewStore
+import com.orchard.backend.agent.TransientCandidatePullRequestStore
+import com.orchard.backend.agent.WorkspaceCandidateCorrectionRepairGateway
+import com.orchard.backend.agent.candidatePullRequestHash
+import com.orchard.backend.agent.REVIEW_CORRECTION_CANDIDATE_REPAIR
 import com.orchard.backend.workspace.CriterionJudgmentSubmission
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.workspace.ACTION_CREATE
@@ -11,6 +26,7 @@ import com.orchard.backend.workspace.DefaultDeliveryWorkflow
 import com.orchard.backend.workspace.DESIGN_STATUS_ADMITTED
 import com.orchard.backend.workspace.DESIGN_STATUS_REJECTED
 import com.orchard.backend.workspace.DesignCriterionSubmission
+import com.orchard.backend.workspace.DesignCorrectionAuthorization
 import com.orchard.backend.workspace.DesignGovernanceStatus
 import com.orchard.backend.workspace.DesignGovernanceStore
 import com.orchard.backend.workspace.DesignGovernanceEvent
@@ -155,6 +171,107 @@ class DesignGovernanceTest {
 
         assertEquals(WorkflowMutationStatus.RECORDED, accepted.status)
         assertEquals(RUN_STATE_DONE, accepted.snapshot.workflowRuns.single().state)
+    }
+
+    @Test
+    fun reviewDerivedCandidateRepairReopensCompletedRun() {
+        val workspace = governedWorkspace()
+        admitHierarchy(workspace, listOf(4))
+        val runId = workspace.startWorkflow(4).snapshot.workflowRuns.single().runId
+        val revision = "b".repeat(40)
+        listOf(
+            evidence("SOURCE_DIFF", revision, ""),
+            evidence("BUILD", revision, "./gradlew build"),
+            evidence("TEST", revision, "./gradlew test"),
+            evidence("ACCEPTANCE", revision, "./gradlew acceptance"),
+            evidence("CRITERION:IMP-ORDER-4:C1", revision, "Run the requirement-specific verification."),
+        ).forEach { submission ->
+            assertEquals(WorkflowMutationStatus.RECORDED, workspace.submitEvidence(runId, submission).status)
+        }
+        assertEquals(RUN_STATE_DONE, workspace.snapshot(0).workflowRuns.single().state)
+
+        val pullRequests = TransientCandidatePullRequestStore()
+        val pullRequest = pullRequests.appendNext { pullRequestId ->
+            val draft = CandidatePullRequest(
+                pullRequestId = pullRequestId,
+                runId = runId,
+                workPackageId = 3,
+                workPackageHash = "a".repeat(64),
+                baseRevision = "c".repeat(40),
+                candidateRevision = revision,
+                changedPaths = listOf("src/Main.kt"),
+                implementationClaims = listOf("The accepted behavior is implemented."),
+                checks = listOf("./gradlew test"),
+                evidence = listOf(CandidatePullRequestEvidence("TEST", "./gradlew test", true, "d".repeat(64), "Tests passed.")),
+                deviations = emptyList(),
+                createdAt = "2026-07-27T00:00:00Z",
+                hash = "",
+            )
+            draft.copy(hash = candidatePullRequestHash(draft))
+        }
+        val corrections = TransientCandidatePullRequestCorrectionStore()
+        val reviews = CandidatePullRequestReviewService(
+            pullRequests,
+            TransientCandidatePullRequestReviewStore(),
+            corrections,
+        )
+        reviews.submit(
+            CandidatePullRequestReviewSubmission(
+                pullRequest.pullRequestId,
+                CANDIDATE_REVIEW_CODE,
+                "code-reviewer",
+                listOf(
+                    CandidatePullRequestReviewFinding(
+                        criterion = "The required behavior remains correct.",
+                        observation = "The candidate needs a corrective implementation pass.",
+                        severity = "BLOCKER",
+                        correctionTarget = REVIEW_CORRECTION_CANDIDATE_REPAIR,
+                        evidenceHashes = listOf("e".repeat(64)),
+                    ),
+                ),
+            ),
+        )
+        val dispatcher = CandidatePullRequestCorrectionDispatchService(
+            corrections,
+            TransientCandidatePullRequestCorrectionDispatchStore(),
+            WorkspaceCandidateCorrectionRepairGateway(workspace),
+        )
+
+        val dispatch = requireNotNull(dispatcher.tick())
+
+        assertEquals(CANDIDATE_CORRECTION_DISPATCHED, dispatch.status)
+        assertEquals(RUN_STATE_EVIDENCE_BLOCKED, workspace.snapshot(0).workflowRuns.single().state)
+        assertEquals(listOf(dispatch), dispatcher.dispatches())
+    }
+
+    @Test
+    fun correctiveDesignSuccessorIsAllowedOnlyForPinnedWorkflowAuthority() {
+        val workspace = governedWorkspace()
+        admitHierarchy(workspace, listOf(4))
+        val run = workspace.startWorkflow(4).snapshot.workflowRuns.single()
+        val currentDesign = requireNotNull(
+            workspace.snapshot(0).designRevisions.single { it.design.workItemId == 4 && it.status == DESIGN_STATUS_ADMITTED }.design,
+        )
+        val successor = design(4, "IMP-ORDER-4", listOf("SUB-ORDER")).copy(
+            baseRevision = currentDesign.revision,
+            baseHash = currentDesign.hash,
+        )
+
+        assertEquals(DesignGovernanceStatus.WORKFLOW_ALREADY_STARTED, workspace.recordDesignCandidate(successor).status)
+        val recorded = workspace.recordCorrectiveDesignCandidate(
+            successor,
+            DesignCorrectionAuthorization(
+                requestId = 17,
+                correctionId = 13,
+                correctionHash = "a".repeat(64),
+                runId = run.runId,
+                design = requireNotNull(run.context.acceptanceContract).design,
+            ),
+        )
+
+        assertEquals(DesignGovernanceStatus.RECORDED, recorded.status)
+        assertEquals(17, recorded.design?.correctionRequestId)
+        assertEquals(DesignGovernanceStatus.ADMITTED, workspace.admitDesign(requireNotNull(recorded.design).designId).status)
     }
 
     @Test

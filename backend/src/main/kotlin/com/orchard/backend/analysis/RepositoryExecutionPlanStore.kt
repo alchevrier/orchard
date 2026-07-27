@@ -4,6 +4,7 @@ package com.orchard.backend.analysis
 
 import com.orchard.backend.workspace.loadRecoverableJsonl
 import com.orchard.backend.workspace.stagedPlanHash
+import com.orchard.backend.workspace.DesignAuthorityReference
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -92,6 +93,8 @@ data class RepositoryExecutionPlan(
     val content: RepositoryAnalysisPlanContent,
     val provenance: AnalysisExecutionProvenance,
     val acceptedAt: String = Instant.now().toString(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val admittedDesign: DesignAuthorityReference? = null,
     val hash: String,
 )
 
@@ -214,8 +217,19 @@ fun newRepositoryExecutionPlan(
     baseRevision: String,
     content: RepositoryAnalysisPlanContent,
     provenance: AnalysisExecutionProvenance,
+    admittedDesign: DesignAuthorityReference? = null,
 ): RepositoryExecutionPlan {
-    val unsigned = RepositoryExecutionPlan(planId, runId, revision, projectId, baseRevision, content, provenance, hash = "")
+    val unsigned = RepositoryExecutionPlan(
+        planId = planId,
+        runId = runId,
+        revision = revision,
+        projectId = projectId,
+        baseRevision = baseRevision,
+        content = content,
+        provenance = provenance,
+        admittedDesign = admittedDesign,
+        hash = "",
+    )
     return unsigned.copy(hash = repositoryExecutionPlanHash(unsigned))
 }
 

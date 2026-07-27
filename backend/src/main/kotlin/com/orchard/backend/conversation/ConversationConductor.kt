@@ -1,5 +1,8 @@
 package com.orchard.backend.conversation
 
+import com.orchard.backend.agent.CandidatePullRequest
+import com.orchard.backend.agent.CandidatePullRequestCorrection
+import com.orchard.backend.agent.CandidatePullRequestReview
 import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
@@ -717,6 +720,56 @@ class ConversationConductorService(
                         createdAt = now(),
                         previousHash = objective.hash,
                         hash = "",
+                    )))
+                    events = store.events()
+                    projected++
+                }
+            }
+        }
+        projected
+    }
+
+    fun projectCandidatePullRequestActivity(
+        pullRequests: List<CandidatePullRequest>,
+        reviews: List<CandidatePullRequestReview>,
+        corrections: List<CandidatePullRequestCorrection>,
+    ): Int = synchronized(authorityLock) {
+        var events = store.events()
+        val commands = events.mapNotNull { it.command }.associateBy { it.commandId }
+        val correlatedConversations = events.mapNotNull { it.execution }
+            .filter { it.state == COMMAND_CORRELATED && it.downstreamType == "WORKFLOW_RUN" }
+            .mapNotNull { execution ->
+                val command = commands[execution.commandId] ?: return@mapNotNull null
+                val runId = execution.downstreamId?.toLongOrNull() ?: return@mapNotNull null
+                runId to command
+            }.toMap()
+        var projected = 0
+        pullRequests.forEach { pullRequest ->
+            val command = correlatedConversations[pullRequest.runId] ?: return@forEach
+            reviews.filter { it.pullRequestId == pullRequest.pullRequestId }.forEach { review ->
+                if (events.none { it.activity?.let { activity ->
+                        activity.authorityType == "CANDIDATE_PR_REVIEW" && activity.authorityId == review.reviewId.toString() &&
+                            activity.authorityHash == review.hash
+                    } == true }) {
+                    store.appendActivity(newConversationActivity(ConversationActivity(
+                        nextActivityId(events), command.conversationId, command.objectiveId,
+                        if (review.findings.isEmpty()) ACTIVITY_INFO else ACTIVITY_ATTENTION,
+                        "${review.kind} review ${review.reviewId} recorded ${review.status} for candidate PR ${pullRequest.pullRequestId}.",
+                        "CANDIDATE_PR_REVIEW", review.reviewId.toString(), review.hash, now(), "",
+                    )))
+                    events = store.events()
+                    projected++
+                }
+            }
+            corrections.filter { it.pullRequestId == pullRequest.pullRequestId }.forEach { correction ->
+                if (events.none { it.activity?.let { activity ->
+                        activity.authorityType == "CANDIDATE_PR_CORRECTION" && activity.authorityId == correction.correctionId.toString() &&
+                            activity.authorityHash == correction.hash
+                    } == true }) {
+                    store.appendActivity(newConversationActivity(ConversationActivity(
+                        nextActivityId(events), command.conversationId, command.objectiveId, ACTIVITY_ATTENTION,
+                        "Correction ${correction.correctionId} targets ${correction.correctionTarget} for candidate PR ${pullRequest.pullRequestId}.",
+                        "CANDIDATE_PR_CORRECTION", correction.correctionId.toString(), correction.hash, now(), "",
                     )))
                     events = store.events()
                     projected++

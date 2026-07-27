@@ -516,7 +516,19 @@ class WorkspaceStore(
     }
 
     @Synchronized
-    fun recordDesignCandidate(submission: DesignSubmission): DesignGovernanceResult {
+    fun recordDesignCandidate(submission: DesignSubmission): DesignGovernanceResult =
+        recordDesignCandidate(submission, null)
+
+    @Synchronized
+    fun recordCorrectiveDesignCandidate(
+        submission: DesignSubmission,
+        authorization: DesignCorrectionAuthorization,
+    ): DesignGovernanceResult = recordDesignCandidate(submission, authorization)
+
+    private fun recordDesignCandidate(
+        submission: DesignSubmission,
+        authorization: DesignCorrectionAuthorization?,
+    ): DesignGovernanceResult {
         val workItem = committedEntity(submission.workItemId)
             ?: return designGovernanceFailure(DesignGovernanceStatus.WORK_ITEM_NOT_FOUND)
         if (workItem.type !in setOf(ENTITY_EPIC, ENTITY_STORY, ENTITY_TASK, ENTITY_BUG)) {
@@ -527,11 +539,17 @@ class WorkspaceStore(
         if (governanceActivation(project.id) == null) {
             return designGovernanceFailure(DesignGovernanceStatus.INVALID_SCOPE)
         }
-        if (
-            workItem.type in setOf(ENTITY_TASK, ENTITY_BUG) &&
-            workflowRuns.any { it.context.workItemId == workItem.id }
-        ) {
-            return designGovernanceFailure(DesignGovernanceStatus.WORKFLOW_ALREADY_STARTED)
+        if (workItem.type in setOf(ENTITY_TASK, ENTITY_BUG) && workflowRuns.any { it.context.workItemId == workItem.id }) {
+            val authorized = authorization?.takeIf {
+                it.requestId > 0 && it.correctionId > 0 && it.correctionHash.matches(SHA256) &&
+                    it.design.designId > 0 && it.design.hash.matches(SHA256)
+            }?.let { correction ->
+                workflowRuns.any { run ->
+                    run.runId == correction.runId && run.context.workItemId == workItem.id &&
+                        run.context.acceptanceContract?.design == correction.design
+                } && designRevisions().none { it.correctionRequestId == correction.requestId }
+            } == true
+            if (!authorized) return designGovernanceFailure(DesignGovernanceStatus.WORKFLOW_ALREADY_STARTED)
         }
         val normalized = normalizeDesignSubmission(submission)
             ?: return designGovernanceFailure(DesignGovernanceStatus.INVALID_DESIGN)
@@ -550,6 +568,7 @@ class WorkspaceStore(
             normalized,
             COLLABORATOR_HUMAN,
             createdAt,
+            authorization?.requestId,
         )
         val design = DesignRevision(
             designId = nextDesignId,
@@ -560,6 +579,7 @@ class WorkspaceStore(
             content = normalized,
             actor = COLLABORATOR_HUMAN,
             createdAt = createdAt,
+            correctionRequestId = authorization?.requestId,
             hash = hash,
         )
         val event = DesignGovernanceEvent(nextDesignGovernanceEventId, design = design)
@@ -2141,6 +2161,7 @@ class WorkspaceStore(
                         design.content,
                         design.actor,
                         design.createdAt,
+                        design.correctionRequestId,
                     )
                 )
                 nextDesignId++
@@ -2596,8 +2617,10 @@ class WorkspaceStore(
         content: DesignSubmission,
         actor: String,
         createdAt: String,
+        correctionRequestId: Long? = null,
     ): String = stagedPlanHash(
-        "$designId:$revision:${workItem.id}:${workItem.type}:$level:$actor:$createdAt:${Json.encodeToString(content)}"
+        "$designId:$revision:${workItem.id}:${workItem.type}:$level:$actor:$createdAt:${Json.encodeToString(content)}" +
+            correctionRequestId?.let { ":correction-request:$it" }.orEmpty()
     )
 
     private fun acceptanceContractHash(contract: AcceptanceContract): String = stagedPlanHash(

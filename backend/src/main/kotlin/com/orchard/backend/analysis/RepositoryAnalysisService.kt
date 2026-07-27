@@ -293,6 +293,19 @@ class RepositoryAnalysisService(
         }
     }
 
+    suspend fun reconcileDesign(
+        runId: Long,
+        admittedDesign: com.orchard.backend.workspace.DesignAuthorityReference,
+    ): RepositoryAnalysisTickResult {
+        val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
+        if (!mutex.tryLock()) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.BUSY, runId)
+        return try {
+            analyze(runId, admittedDesign)
+        } finally {
+            mutex.unlock()
+        }
+    }
+
     fun authorizeRetry(runId: Long): RepositoryAnalysisTickResult {
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
@@ -341,7 +354,10 @@ class RepositoryAnalysisService(
         )
     }
 
-    private suspend fun analyze(runId: Long): RepositoryAnalysisTickResult {
+    private suspend fun analyze(
+        runId: Long,
+        admittedDesignOverride: com.orchard.backend.workspace.DesignAuthorityReference? = null,
+    ): RepositoryAnalysisTickResult {
         val plans = planStore.load()
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
@@ -387,7 +403,10 @@ class RepositoryAnalysisService(
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = diagnostic)
         }
         val currentPlan = plans.asSequence()
-            .filter { it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) }
+            .filter {
+                it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) &&
+                    (admittedDesignOverride == null || it.admittedDesign?.hash == admittedDesignOverride.hash)
+            }
             .maxByOrNull { it.revision }
         val codingWorkerEvents = codingWorkerStore?.loadEvents().orEmpty()
         val rejectedCodingPlanDiagnostic = listOfNotNull(
@@ -617,6 +636,7 @@ class RepositoryAnalysisService(
                         outputHash = sha256(generation.text),
                         modelExecutionId = execution.executionId,
                     ),
+                    admittedDesign = admittedDesignOverride ?: run.context.acceptanceContract?.design,
                 )
             }
         }.fold(

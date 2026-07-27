@@ -4,11 +4,11 @@
 
 Orchard is a cloneable, runnable work-in-progress prototype for turning natural-language intent into governed, evidence-producing software workflows. Its local-first stack combines a durable conversational conductor, a Compose Desktop control surface, a Ktor backend, deterministic workflow validation, repository execution, and configurable local or explicitly permitted remote inference.
 
-> **Project status:** Milestone 10.2.1 is complete as a controlled architecture proof: `qwen3-coder:30b` changed exactly two admitted files, repaired an injected compile failure on the same candidate lineage, and passed the full build. Milestone 10.2.2 now targets one inbox-originated product change executed, reviewed, accepted, and promoted entirely by production Orchard. The broader model matrix continues as non-blocking measurement work.
+> **Project status:** Milestone 10.2.1 is complete as a controlled architecture proof: `qwen3-coder:30b` changed exactly two admitted files, repaired an injected compile failure on the same candidate lineage, and passed the full build. Milestone 10.2.2 now targets PR-centered multi-actor correction, separated review authority, design reconciliation, and self-contained integration evidence before the production Inbox proof resumes as Milestone 10.2.3. The broader model matrix continues as non-blocking measurement work.
 
-> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The next milestone is 10.2.1: Executable Work Packages and Persistent Coding.
+> **Roadmap:** See [ROADMAP.md](ROADMAP.md) for the canonical dependency-ordered plan, milestone states, exit evidence, and update protocol. The next milestone is 10.2.2: PR-Centered Multi-Actor Corrective Delivery.
 
-> **Architecture:** [ADR 046](docs/adrs/046-executable-work-packages-and-persistent-coding.md) defines the proposed replacement coding architecture and the authority boundaries preserved from ADR 036.
+> **Architecture:** [ADR 046](docs/adrs/046-executable-work-packages-and-persistent-coding.md) defines executable work packages and persistent coding. [ADR 047](docs/adrs/047-pr-centered-multi-actor-delivery.md) proposes the successor PR-centered correction and multi-actor review architecture.
 
 ## Documentation
 

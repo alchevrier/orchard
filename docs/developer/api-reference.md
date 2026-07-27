@@ -63,11 +63,30 @@ Ticket-scoped project report revisions include typed evidence for candidate PRs,
 | `POST` | `/api/repository-analysis/runs/{runId}/retry` | Authorize one successor attempt for a blocked analysis run |
 | `GET` | `/api/coding-worker/executions` | List coding execution records |
 | `GET` | `/api/coding-worker/pull-requests` | List immutable candidate PR review artifacts |
+| `GET` | `/api/coding-worker/pull-request-reviews` | List immutable candidate PR reviews; optionally filter with `pullRequestId` |
+| `POST` | `/api/coding-worker/pull-request-reviews` | Record one typed code, intent, design, or integration review for an existing candidate PR |
+| `GET` | `/api/coding-worker/pull-request-corrections` | List deterministic correction authority compiled from review findings; optionally filter with `pullRequestId` |
+| `GET` | `/api/coding-worker/pull-request-dispositions` | List immutable candidate PR lifecycle dispositions; optionally filter with `pullRequestId` |
+| `GET` | `/api/coding-worker/pull-request-learning` | List derived terminal candidate outcome episodes; optionally retrieve matching episodes with `query` |
+| `POST` | `/api/coding-worker/pull-request-learning/tick` | Derive any unrecorded terminal candidate learning episodes |
+| `GET` | `/api/coding-worker/pull-request-correction-dispatches` | List terminal candidate-repair dispatch records |
+| `POST` | `/api/coding-worker/pull-request-corrections/tick` | Reconcile one eligible candidate-repair correction into the existing repair workflow |
+| `POST` | `/api/coding-worker/pull-request-work-package-recompilations/tick` | Recompile one pinned package correction successor |
+| `POST` | `/api/coding-worker/pull-request-design-revisions/tick` | Create one pinned design-revision request |
+| `POST` | `/api/coding-worker/pull-request-clarifications/tick` | Dispatch one clarification correction and block its candidate pending response |
+| `POST` | `/api/coding-worker/pull-request-escalations/tick` | Dispatch one escalation correction and block its candidate pending governance response |
+| `POST` | `/api/coding-worker/pull-request-reviews/automated/tick` | Run one bounded independent automated review actor |
 | `POST` | `/api/coding-worker/tick` | Run one coding reconciliation tick |
 
 Deterministic analysis rejection and model failure append a blocked attempt tied to the run and pinned repository revision. Blocked runs are excluded from automatic reconciliation until the retry endpoint appends explicit successor authority; each unsuccessful successor blocks again without deleting prior attempts.
 
 A terminal coding block tied to the exact current plan ID and hash makes repository analysis eligible to produce a successor plan on the same pinned repository revision. The coding rejection diagnostic is included in the authoritative analysis envelope. Retry authorization on the blocked plan suppresses reanalysis until that authorized coding attempt reaches a terminal outcome.
+
+Candidate PR successors carry an optional immutable `parentPullRequestId`, creating a repair lineage without changing prior candidate records. A review submission pins the exact candidate PR hash and has one of `CODE`, `INTENT`, `DESIGN`, or `INTEGRATION` kinds. Findings identify their criterion, observation, severity, evidence hashes, and correction target.
+
+Orchard deterministically compiles each review into one immutable correction artifact per target and reconciles interrupted compilation on restart. Candidate repair, work-package recompilation, design revision, clarification, and escalation each have target-specific dispatchers. Clarification and escalation append a terminal dispatch while blocking the candidate pending an explicit response; neither becomes a coding retry. Automated reviewers use distinct bounded envelopes for code, intent, design, and integration review, submit only through the typed review service, and cannot admit, accept, or promote.
+
+Candidate lifecycle disposition is separately append-only: a frozen candidate begins `REVIEW_REQUIRED`; a nonconforming review records `REPAIR_REQUIRED`; all four conforming independent reviews record `ACCEPTED`; and freezing a parent-linked successor records the parent as `SUPERSEDED`. An independent audit violation may subsequently record `BLOCKED`, preventing stale review acceptance from reaching promotion. Derived outcome-learning episodes pin the candidate, review, correction, and disposition hashes and remain retrieval-only.
 
 ## Standards, Campaigns, and Resolution
 

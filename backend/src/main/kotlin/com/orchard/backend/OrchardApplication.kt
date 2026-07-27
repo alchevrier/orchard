@@ -13,6 +13,30 @@ import com.orchard.backend.agent.CodingWorkerTickStatus
 import com.orchard.backend.agent.FileCodingWorkerAttemptStore
 import com.orchard.backend.agent.FileCodingWorkerStore
 import com.orchard.backend.agent.FileCandidatePullRequestStore
+import com.orchard.backend.agent.FileCandidatePullRequestDispositionStore
+import com.orchard.backend.agent.FileCandidatePullRequestReviewStore
+import com.orchard.backend.agent.FileCandidatePullRequestCorrectionStore
+import com.orchard.backend.agent.FileCandidatePullRequestCorrectionDispatchStore
+import com.orchard.backend.agent.FileCandidatePullRequestLearningStore
+import com.orchard.backend.agent.CandidatePullRequestReviewService
+import com.orchard.backend.agent.CandidatePullRequestLearningService
+import com.orchard.backend.agent.CandidatePullRequestDispositionService
+import com.orchard.backend.agent.CandidatePullRequestReviewSubmission
+import com.orchard.backend.agent.CandidatePullRequestReviewMutationStatus
+import com.orchard.backend.agent.CandidatePullRequestCorrectionDispatchService
+import com.orchard.backend.agent.CandidatePullRequestAttentionService
+import com.orchard.backend.agent.CandidatePullRequestAutomatedReviewService
+import com.orchard.backend.agent.CandidateAutomatedReviewTickStatus
+import com.orchard.backend.agent.WorkspaceCandidateCorrectionRepairGateway
+import com.orchard.backend.agent.CandidatePullRequestWorkPackageRecompileService
+import com.orchard.backend.agent.PackageStoreWorkPackageCorrectionRecompileGateway
+import com.orchard.backend.agent.CandidatePullRequestDesignRevisionService
+import com.orchard.backend.agent.FileCandidatePullRequestDesignRevisionRequestStore
+import com.orchard.backend.agent.CandidatePullRequestDesignRevisionRequestStore
+import com.orchard.backend.agent.WorkspaceDesignRevisionCorrectionGateway
+import com.orchard.backend.agent.FileWorkPackageDesignInvalidationStore
+import com.orchard.backend.agent.WorkPackageDesignInvalidationService
+import com.orchard.backend.agent.WorkPackageDesignInvalidationStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
@@ -220,6 +244,70 @@ fun main() {
     val companyCircuit = CompanyCircuitService(workspace, companyControl, OrchardPaths.LOCAL_REPOSITORIES_DIR)
     val codingWorkerAttemptStore = FileCodingWorkerAttemptStore(OrchardPaths.WORKSPACE_DIR)
     val codingWorkerStore = FileCodingWorkerStore(OrchardPaths.WORKSPACE_DIR)
+    val candidatePullRequestStore = FileCandidatePullRequestStore(OrchardPaths.WORKSPACE_DIR)
+    val candidatePullRequestDispositions = CandidatePullRequestDispositionService(
+        candidatePullRequestStore,
+        FileCandidatePullRequestDispositionStore(OrchardPaths.WORKSPACE_DIR),
+    )
+    val candidatePullRequestReviewStore = FileCandidatePullRequestReviewStore(OrchardPaths.WORKSPACE_DIR)
+    val candidatePullRequestCorrectionStore = FileCandidatePullRequestCorrectionStore(OrchardPaths.WORKSPACE_DIR)
+    val candidatePullRequestReviews = CandidatePullRequestReviewService(
+        candidatePullRequestStore,
+        candidatePullRequestReviewStore,
+        candidatePullRequestCorrectionStore,
+        candidatePullRequestDispositions,
+    )
+    val candidatePullRequestAutomatedReviews = CandidatePullRequestAutomatedReviewService(
+        candidatePullRequestStore,
+        candidatePullRequestReviews,
+        modelProviders,
+        resourceController,
+    )
+    val candidatePullRequestLearning = CandidatePullRequestLearningService(
+        candidatePullRequestStore,
+        candidatePullRequestReviewStore,
+        candidatePullRequestCorrectionStore,
+        FileCandidatePullRequestDispositionStore(OrchardPaths.WORKSPACE_DIR),
+        FileCandidatePullRequestLearningStore(OrchardPaths.WORKSPACE_DIR),
+    )
+    val candidatePullRequestCorrectionDispatchStore = FileCandidatePullRequestCorrectionDispatchStore(OrchardPaths.WORKSPACE_DIR)
+    val candidatePullRequestCorrectionDispatcher = CandidatePullRequestCorrectionDispatchService(
+        candidatePullRequestCorrectionStore,
+        candidatePullRequestCorrectionDispatchStore,
+        WorkspaceCandidateCorrectionRepairGateway(workspace),
+    )
+    val candidatePullRequestClarification = CandidatePullRequestAttentionService(
+        com.orchard.backend.agent.REVIEW_CORRECTION_CLARIFICATION,
+        candidatePullRequestCorrectionStore,
+        candidatePullRequestCorrectionDispatchStore,
+        candidatePullRequestDispositions,
+    )
+    val candidatePullRequestEscalation = CandidatePullRequestAttentionService(
+        com.orchard.backend.agent.REVIEW_CORRECTION_ESCALATION,
+        candidatePullRequestCorrectionStore,
+        candidatePullRequestCorrectionDispatchStore,
+        candidatePullRequestDispositions,
+    )
+    val candidatePullRequestWorkPackageRecompile = CandidatePullRequestWorkPackageRecompileService(
+        candidatePullRequestCorrectionStore,
+        candidatePullRequestCorrectionDispatchStore,
+        PackageStoreWorkPackageCorrectionRecompileGateway(FileExecutableWorkPackageStore(OrchardPaths.WORKSPACE_DIR)),
+    )
+    val candidatePullRequestDesignRevisionRequests = FileCandidatePullRequestDesignRevisionRequestStore(OrchardPaths.WORKSPACE_DIR)
+    val candidatePullRequestDesignRevision = CandidatePullRequestDesignRevisionService(
+        candidatePullRequestCorrectionStore,
+        candidatePullRequestCorrectionDispatchStore,
+        WorkspaceDesignRevisionCorrectionGateway(workspace, candidatePullRequestDesignRevisionRequests),
+        candidatePullRequestDispositions,
+    )
+    val workPackageDesignInvalidations = FileWorkPackageDesignInvalidationStore(OrchardPaths.WORKSPACE_DIR)
+    val workPackageDesignInvalidation = WorkPackageDesignInvalidationService(
+        workspace,
+        FileExecutableWorkPackageStore(OrchardPaths.WORKSPACE_DIR),
+        workPackageDesignInvalidations,
+        candidatePullRequestStore,
+        candidatePullRequestDispositions,
+    )
     val repositoryAnalysis = RepositoryAnalysisService(
         workspace,
         modelProviders,
@@ -278,7 +366,9 @@ fun main() {
         profileSettingsStore = modelProfileSettingsStore,
         attemptStore = codingWorkerAttemptStore,
         workPackageStore = FileExecutableWorkPackageStore(OrchardPaths.WORKSPACE_DIR),
-        pullRequestStore = FileCandidatePullRequestStore(OrchardPaths.WORKSPACE_DIR),
+        pullRequestStore = candidatePullRequestStore,
+        dispositionService = candidatePullRequestDispositions,
+        designInvalidationStore = workPackageDesignInvalidations,
     )
     val companyAudit = CompanyAuditService(
         workspace,
@@ -288,6 +378,14 @@ fun main() {
         resourceController,
         modelProfileSettingsStore,
         FileCompanyAuditAttemptStore(OrchardPaths.WORKSPACE_DIR),
+        candidateReviewGate = { runId, candidateRevision ->
+            val pullRequest = candidatePullRequestStore.load().lastOrNull {
+                it.runId == runId && it.candidateRevision == candidateRevision
+            }
+            pullRequest != null && candidatePullRequestDispositions.dispositions(pullRequest.pullRequestId)
+                .lastOrNull()?.status == com.orchard.backend.agent.CANDIDATE_DISPOSITION_ACCEPTED
+        },
+            candidateDispositionService = candidatePullRequestDispositions,
     )
     val repositoryOnboarding = RepositoryOnboardingService(workspace, OrchardPaths.LOCAL_REPOSITORIES_DIR)
     val conversationConductor = ConversationConductorService(
@@ -361,11 +459,51 @@ fun main() {
             runCatching { conversationConductor.reconcilePending() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation command reconciliation failed", error)
             }
+            runCatching { candidatePullRequestReviews.reconcileCorrections() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR correction compilation failed", error)
+            }
+            runCatching { candidatePullRequestCorrectionDispatcher.tick() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR correction dispatch failed", error)
+            }
+            runCatching { candidatePullRequestWorkPackageRecompile.tick() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR work-package recompilation dispatch failed", error)
+            }
+            runCatching { candidatePullRequestDesignRevision.tick() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR design revision dispatch failed", error)
+            }
+            runCatching { candidatePullRequestClarification.tick() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR clarification dispatch failed", error)
+            }
+            runCatching { candidatePullRequestEscalation.tick() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR escalation dispatch failed", error)
+            }
+            runCatching {
+                workPackageDesignInvalidation.tick()?.let { invalidation ->
+                    repositoryAnalysis.reconcileDesign(invalidation.runId, invalidation.admittedSuccessorDesign)
+                }
+            }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Work-package design invalidation reconciliation failed", error)
+            }
+            runCatching { candidatePullRequestLearning.reconcile() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate outcome learning reconciliation failed", error)
+            }
+            runCatching { candidatePullRequestAutomatedReviews.tick() }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Automated candidate review reconciliation failed", error)
+            }
             runCatching { conversationConductor.projectWorkspaceActivity(workspace) }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation activity projection failed", error)
             }
             runCatching { conversationConductor.projectCompanyActivity(companyControl.projectViews()) }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable company activity projection failed", error)
+            }
+            runCatching {
+                conversationConductor.projectCandidatePullRequestActivity(
+                    candidatePullRequestStore.load(),
+                    candidatePullRequestReviews.reviews(),
+                    candidatePullRequestReviews.corrections(),
+                )
+            }.onFailure { error ->
+                DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR conversation projection failed", error)
             }
             runCatching { projectReports.synchronizeTicketReports() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable ticket report projection failed", error)
@@ -464,6 +602,17 @@ fun main() {
             projectReports,
             repositoryIntelligenceImporter,
             companyAudit,
+            candidatePullRequestReviews,
+            candidatePullRequestCorrectionDispatcher,
+            candidatePullRequestWorkPackageRecompile,
+            candidatePullRequestDesignRevision,
+            candidatePullRequestDesignRevisionRequests,
+            workPackageDesignInvalidations,
+            candidatePullRequestDispositions,
+            candidatePullRequestLearning,
+            candidatePullRequestClarification,
+            candidatePullRequestEscalation,
+            candidatePullRequestAutomatedReviews,
         )
     }
     Runtime.getRuntime().addShutdownHook(Thread {
@@ -509,6 +658,17 @@ fun Application.workspaceApi(
     projectReports: ProjectReportService? = null,
     repositoryIntelligenceImporter: RepositoryIntelligenceImporter? = null,
     companyAudit: CompanyAuditService? = null,
+    candidatePullRequestReviews: CandidatePullRequestReviewService? = null,
+    candidatePullRequestCorrectionDispatcher: CandidatePullRequestCorrectionDispatchService? = null,
+    candidatePullRequestWorkPackageRecompile: CandidatePullRequestWorkPackageRecompileService? = null,
+    candidatePullRequestDesignRevision: CandidatePullRequestDesignRevisionService? = null,
+    candidatePullRequestDesignRevisionRequests: CandidatePullRequestDesignRevisionRequestStore? = null,
+    workPackageDesignInvalidations: WorkPackageDesignInvalidationStore? = null,
+    candidatePullRequestDispositions: CandidatePullRequestDispositionService? = null,
+    candidatePullRequestLearning: CandidatePullRequestLearningService? = null,
+    candidatePullRequestClarification: CandidatePullRequestAttentionService? = null,
+    candidatePullRequestEscalation: CandidatePullRequestAttentionService? = null,
+    candidatePullRequestAutomatedReviews: CandidatePullRequestAutomatedReviewService? = null,
 ) {
     configureJson()
     routing {
@@ -1406,6 +1566,169 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(pullRequests)
+        }
+        get("/api/coding-worker/pull-request-reviews") {
+            if (candidatePullRequestReviews == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val pullRequestId = call.request.queryParameters["pullRequestId"]?.toLongOrNull()
+            if (call.request.queryParameters.contains("pullRequestId") && (pullRequestId == null || pullRequestId <= 0)) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@get
+            }
+            call.respond(candidatePullRequestReviews.reviews(pullRequestId))
+        }
+        get("/api/coding-worker/pull-request-corrections") {
+            if (candidatePullRequestReviews == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val pullRequestId = call.request.queryParameters["pullRequestId"]?.toLongOrNull()
+            if (call.request.queryParameters.contains("pullRequestId") && (pullRequestId == null || pullRequestId <= 0)) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@get
+            }
+            call.respond(candidatePullRequestReviews.corrections(pullRequestId))
+        }
+        get("/api/coding-worker/pull-request-dispositions") {
+            if (candidatePullRequestDispositions == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val pullRequestId = call.request.queryParameters["pullRequestId"]?.toLongOrNull()
+            if (call.request.queryParameters.contains("pullRequestId") && (pullRequestId == null || pullRequestId <= 0)) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@get
+            }
+            call.respond(candidatePullRequestDispositions.dispositions(pullRequestId))
+        }
+        get("/api/coding-worker/pull-request-learning") {
+            if (candidatePullRequestLearning == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val query = call.request.queryParameters["query"]
+            call.respond(if (query.isNullOrBlank()) candidatePullRequestLearning.episodes() else candidatePullRequestLearning.recall(query))
+        }
+        get("/api/coding-worker/pull-request-correction-dispatches") {
+            if (candidatePullRequestCorrectionDispatcher == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(candidatePullRequestCorrectionDispatcher.dispatches())
+        }
+        get("/api/coding-worker/pull-request-design-revision-requests") {
+            if (candidatePullRequestDesignRevisionRequests == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(candidatePullRequestDesignRevisionRequests.load())
+        }
+        get("/api/coding-worker/work-package-design-invalidations") {
+            if (workPackageDesignInvalidations == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(workPackageDesignInvalidations.load())
+        }
+        post("/api/coding-worker/pull-request-corrections/tick") {
+            if (candidatePullRequestCorrectionDispatcher == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val dispatch = candidatePullRequestCorrectionDispatcher.tick()
+            if (dispatch == null) call.respond(HttpStatusCode.OK)
+            else call.respond(HttpStatusCode.Created, dispatch)
+        }
+        post("/api/coding-worker/pull-request-learning/tick") {
+            if (candidatePullRequestLearning == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val episodes = candidatePullRequestLearning.reconcile()
+            if (episodes.isEmpty()) call.respond(HttpStatusCode.OK) else call.respond(HttpStatusCode.Created, episodes)
+        }
+        post("/api/coding-worker/pull-request-clarifications/tick") {
+            val dispatch = candidatePullRequestClarification?.tick()
+            if (candidatePullRequestClarification == null) call.respond(HttpStatusCode.ServiceUnavailable)
+            else if (dispatch == null) call.respond(HttpStatusCode.OK) else call.respond(HttpStatusCode.Created, dispatch)
+        }
+        post("/api/coding-worker/pull-request-escalations/tick") {
+            val dispatch = candidatePullRequestEscalation?.tick()
+            if (candidatePullRequestEscalation == null) call.respond(HttpStatusCode.ServiceUnavailable)
+            else if (dispatch == null) call.respond(HttpStatusCode.OK) else call.respond(HttpStatusCode.Created, dispatch)
+        }
+        post("/api/coding-worker/pull-request-work-package-recompilations/tick") {
+            if (candidatePullRequestWorkPackageRecompile == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val dispatch = candidatePullRequestWorkPackageRecompile.tick()
+            if (dispatch == null) call.respond(HttpStatusCode.OK)
+            else call.respond(HttpStatusCode.Created, dispatch)
+        }
+        post("/api/coding-worker/pull-request-design-revisions/tick") {
+            if (candidatePullRequestDesignRevision == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val dispatch = candidatePullRequestDesignRevision.tick()
+            if (dispatch == null) call.respond(HttpStatusCode.OK)
+            else call.respond(HttpStatusCode.Created, dispatch)
+        }
+        post("/api/coding-worker/pull-request-design-revision-requests/{requestId}/successor") {
+            val requestId = call.parameters["requestId"]?.toLongOrNull()
+            val submission = runCatching { call.receive<com.orchard.backend.workspace.DesignSubmission>() }.getOrNull()
+            if (requestId == null || requestId <= 0 || submission == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            if (candidatePullRequestDesignRevision == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = candidatePullRequestDesignRevision.submitSuccessor(requestId, submission)
+            if (result == null) {
+                call.respond(HttpStatusCode.NotFound)
+                return@post
+            }
+            call.respond(designGovernanceStatus(result.status), result.snapshot)
+        }
+        post("/api/coding-worker/pull-request-reviews") {
+            if (candidatePullRequestReviews == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val submission = runCatching { call.receive<CandidatePullRequestReviewSubmission>() }.getOrNull()
+            if (submission == null || submission.pullRequestId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = candidatePullRequestReviews.submit(submission)
+            val status = when (result.status) {
+                CandidatePullRequestReviewMutationStatus.RECORDED -> HttpStatusCode.Created
+                CandidatePullRequestReviewMutationStatus.PULL_REQUEST_NOT_FOUND -> HttpStatusCode.NotFound
+                CandidatePullRequestReviewMutationStatus.REVIEW_ALREADY_RECORDED -> HttpStatusCode.Conflict
+                CandidatePullRequestReviewMutationStatus.INVALID_REVIEW -> HttpStatusCode.UnprocessableEntity
+                CandidatePullRequestReviewMutationStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
+        post("/api/coding-worker/pull-request-reviews/automated/tick") {
+            if (candidatePullRequestAutomatedReviews == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = candidatePullRequestAutomatedReviews.tick()
+            val status = when (result.status) {
+                CandidateAutomatedReviewTickStatus.RECORDED -> HttpStatusCode.Created
+                CandidateAutomatedReviewTickStatus.IDLE -> HttpStatusCode.OK
+                CandidateAutomatedReviewTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
+                CandidateAutomatedReviewTickStatus.MODEL_FAILED -> HttpStatusCode.ServiceUnavailable
+                CandidateAutomatedReviewTickStatus.INVALID_OUTPUT -> HttpStatusCode.UnprocessableEntity
+            }
+            call.respond(status, result)
         }
         post("/api/coding-worker/runs/{runId}/retry") {
             val runId = call.parameters["runId"]?.toLongOrNull()
