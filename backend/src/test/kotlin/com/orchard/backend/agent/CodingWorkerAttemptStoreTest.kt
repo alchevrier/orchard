@@ -29,7 +29,7 @@ class CodingWorkerAttemptStoreTest {
         assertTrue(codingTerminalPlanBlockRequired(base.copy(revision = "b".repeat(40))))
         assertTrue(codingTerminalPlanBlockRequired(base.copy(status = CODING_EXECUTION_BLOCKED)))
         assertTrue(codingTerminalPlanBlockRequired(base.copy(status = CODING_EXECUTION_INTERRUPTED)))
-        assertTrue(codingTerminalPlanBlockRequired(base.copy(diagnostic = "The coding model returned invalid or oversized proposal JSON.")))
+        assertTrue(codingTerminalPlanBlockRequired(base.copy(diagnostic = "Coding model output rejected for bounded-coding-tool-batch-v1: strict JSON decoding failed: unexpected token.")))
     }
 
     @Test

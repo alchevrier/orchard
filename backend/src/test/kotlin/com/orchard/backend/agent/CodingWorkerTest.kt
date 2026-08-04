@@ -52,6 +52,268 @@ import kotlinx.serialization.json.Json
 
 class CodingWorkerTest {
     @Test
+    fun `test proposal rejects nullable assert true condition`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val old = "assertEquals(\"Calm\", proposal.submission.experience?.emotionalQualities?.single())"
+        val proposal = CodingPatchProposal(
+            "Add experience quality coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(
+                    old,
+                    "$old\nassertTrue(proposal.submission.experience?.emotionalQualities?.contains(\"calm\"))",
+                )),
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, old)), omittedFileCount = 0),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("assertTrue with a nullable condition"))
+    }
+
+    @Test
+    fun `test proposal rejects assert not null without import`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val old = "assertEquals(\"Calm\", proposal.submission.experience?.emotionalQualities?.single())"
+        val proposal = CodingPatchProposal(
+            "Add experience quality coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(
+                    old,
+                    "$old\nassertNotNull(proposal.submission.conversation)",
+                )),
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, old)), omittedFileCount = 0),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("assertNotNull without importing"))
+    }
+
+    @Test
+    fun `test write proposal rejects assert not null without import`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val old = "import kotlin.test.assertEquals\n\nfun test() = assertEquals(1, 1)"
+        val proposal = CodingPatchProposal(
+            "Add assertion coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_WRITE,
+                path = path,
+                content = "$old\nassertNotNull(result)",
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, old)), omittedFileCount = 0),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("assertNotNull without importing"))
+    }
+
+    @Test
+    fun `test proposal rejects local inserted before existing local`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val old = """
+            assertTrue(result.overlays.isEmpty())
+        """.trimIndent()
+        val original = """
+            fun `returns standards policy`() = runBlocking {
+                $old
+
+                client.close()
+                val conversation = client.getConversation(1, 42)
+                assertNotNull(conversation)
+            }
+        """.trimIndent()
+        val proposal = CodingPatchProposal(
+            "Add correlation authority coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(
+                    old,
+                    """
+                        $old
+                        val conversation = client.getConversation(42L)
+                        assertNotNull(conversation)
+                    """.trimIndent(),
+                )),
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, original)), omittedFileCount = 0),
+        )
+
+        assertTrue(
+            requireNotNull(diagnostic).contains("introduces local declaration conversation before an existing declaration"),
+            diagnostic,
+        )
+    }
+
+    @Test
+    fun `test proposal rejects duplicate local in expression-bodied test`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val original = """
+            fun `returns standards policy`() = runBlocking {
+                val result = client.getStandardsPolicy(1, "backend/standards", 42)
+                assertTrue(result.overlays.isEmpty())
+                val conversation = client.getConversation(42L)
+                assertNotNull(conversation)
+            }
+        """.trimIndent()
+        val proposal = CodingPatchProposal(
+            "Add correlation authority coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(
+                    "assertTrue(result.overlays.isEmpty())",
+                    """
+                        assertTrue(result.overlays.isEmpty())
+                        val conversation = client.getConversation(42, "conversation/42")
+                    """.trimIndent(),
+                )),
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, original)), omittedFileCount = 0),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("introduces duplicate local declaration conversation"))
+    }
+
+    @Test
+    fun `test proposal rejects endpoint insertion into another endpoint test`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val original = """
+            fun `returns standards policy`() {
+                val result = client.getStandardsPolicy(1, "backend/standards", 42)
+                assertTrue(result.overlays.isEmpty())
+            }
+
+            fun `returns conversation`() {
+                val conversation = client.getConversation(1, "conversation/1")
+                assertNotNull(conversation)
+            }
+        """.trimIndent()
+        val replaced = """
+            val result = client.getStandardsPolicy(1, "backend/standards", 42)
+            assertTrue(result.overlays.isEmpty())
+        """.trimIndent()
+        val proposal = CodingPatchProposal(
+            "Add correlation authority coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(
+                    replaced,
+                    """
+                        $replaced
+                        val conversation = client.getConversation(42, "conversation/42")
+                        assertNotNull(conversation)
+                    """.trimIndent(),
+                )),
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, original)), omittedFileCount = 0),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("adds unrelated client endpoint call getConversation to an existing endpoint test"))
+    }
+
+    @Test
+    fun `test proposal rejects duplicate local declaration before candidate commit`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val original = """
+            fun `returns standards policy`() {
+                val conversation = client.getConversation(1, "conversation/1")
+                assertNotNull(conversation)
+            }
+        """.trimIndent()
+        val proposal = CodingPatchProposal(
+            "Add correlation authority coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(
+                    "assertNotNull(conversation)",
+                    """
+                        val correlation = DomainCorrelation(42, 31)
+                        assertTrue(correlation.projectId == 42)
+                        val conversation = ConversationResponse(31, "Delivery", "HUMAN", "2026-07-22T00:00:00Z", "a")
+                        assertNotNull(conversation)
+                    """.trimIndent(),
+                )),
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, original)), omittedFileCount = 0),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("introduces duplicate local declaration conversation"))
+    }
+
+    @Test
+    fun `test proposal rejects unrelated endpoint assertion before candidate commit`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val original = """
+            val result = client.getStandardsPolicy(1, \"backend/standards\", 42)
+            assertTrue(result.overlays.isEmpty())
+        """.trimIndent()
+        val proposal = CodingPatchProposal(
+            "Add correlation authority coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = path,
+                replacements = listOf(CodingTextReplacement(
+                    original,
+                    """
+                        $original
+
+                        // Admit backend correlation authority behavior
+                        val conversation = client.getConversation(42, \"conversation/42\")
+                        assertEquals(\"conversation/42\", conversation.id)
+                    """.trimIndent(),
+                )),
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(listOf(CodingContextFile(path, original)), omittedFileCount = 0),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("adds unrelated client endpoint call getConversation"))
+    }
+
+    @Test
     fun `candidate semantic verification rejects residual forbidden literals`() {
         val criterion = "None of the bounded production files contains FontFamily.Serif or another decorative family."
 
@@ -202,6 +464,8 @@ class CodingWorkerTest {
         assertTrue(model.prompt?.contains("Never fabricate cosmetic coverage") == true)
         assertTrue(model.prompt?.contains("pairwise non-overlapping old values and order replacements from the bottom") == true)
         assertTrue(model.prompt?.contains("excerpt headers are context metadata, not repository source") == true)
+        assertTrue(model.prompt?.contains("The operations array must contain only operation objects") == true)
+        assertTrue(model.prompt?.contains("every operation matches one of the allowed payload shapes") == true)
         assertEquals(RUN_STATE_EVIDENCE_PENDING, run.state)
         assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST"), run.evidence.mapTo(hashSetOf()) { it.kind })
         assertTrue(run.evidence.all { it.passed })

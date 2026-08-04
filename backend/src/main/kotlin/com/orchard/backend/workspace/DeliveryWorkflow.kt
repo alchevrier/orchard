@@ -178,8 +178,9 @@ object DefaultDeliveryWorkflow {
 internal fun admittedAcceptanceVerification(verifications: List<String>): String? = verifications
     .mapNotNull { verification ->
         val trimmed = verification.trim()
-        val candidate = if (trimmed.startsWith("Run ")) trimmed.removePrefix("Run ") else trimmed
-        candidate.removeSuffix(".").takeIf { it.startsWith("./") }
+        GRADLE_VERIFICATION.find(trimmed)?.value
     }
     .distinct()
     .singleOrNull()
+
+private val GRADLE_VERIFICATION = Regex("""\./gradlew(?:\s+[^,.\n]+)*""")

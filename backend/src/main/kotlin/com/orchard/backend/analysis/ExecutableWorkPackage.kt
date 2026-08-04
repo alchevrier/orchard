@@ -153,18 +153,24 @@ fun compileExecutableWorkPackage(
     definition: WorkDefinitionManifest,
     plan: RepositoryExecutionPlan,
     repositoryContext: CodingRepositoryContext,
+    repositoryRevision: String = plan.baseRevision,
+    restrictedPaths: Set<String> = emptySet(),
 ): ExecutableWorkPackage {
     val sourceOperations = plan.content.operations
         .filter { it.action != PLAN_OPERATION_VERIFY }
+        .filter { restrictedPaths.isEmpty() || it.path in restrictedPaths }
+        .take(MAX_SOURCE_OPERATIONS_PER_WORK_PACKAGE)
     val likelyPaths = sourceOperations.map { it.path }.distinct().sorted()
+    val evidencePaths = plan.content.evidence
+        .filter { restrictedPaths.isEmpty() || it.path in likelyPaths }
+        .map { it.path }
+        .toSet()
     val compliantEvidencePaths = plan.content.scopeCoverage
         .flatMap { it.compliantEvidencePaths }
+        .filter { it in evidencePaths }
         .distinct()
         .sorted()
-    val ownershipPaths = (plan.content.scopeCoverage.flatMap { it.evidencePaths } +
-        plan.content.evidence.map { it.path } + likelyPaths)
-        .distinct()
-        .sorted()
+    val ownershipPaths = likelyPaths
     val sourceByPath = repositoryContext.files.associateBy(CodingContextFile::path)
     val sources = ownershipPaths.mapNotNull(sourceByPath::get).map { source ->
         WorkPackageSource(source.path, source.content, source.contentHash, source.matchedDeclarations)
@@ -177,7 +183,7 @@ fun compileExecutableWorkPackage(
         revision = revision,
         projectId = plan.projectId,
         runId = plan.runId,
-        repositoryRevision = plan.baseRevision,
+        repositoryRevision = repositoryRevision,
         intent = WorkPackageIntentAuthority(
             definitionId = definition.definitionId,
             definitionRevision = definition.revision,
@@ -201,12 +207,12 @@ fun compileExecutableWorkPackage(
             paths = ownershipPaths,
             likelyImplementationPaths = likelyPaths,
             createPaths = sourceOperations.filter { it.action == PLAN_OPERATION_CREATE }.map { it.path }.distinct().sorted(),
-            allowedActions = allowedWorkPackageActions(plan),
+            allowedActions = allowedWorkPackageActions(sourceOperations),
             requiredImplementationPaths = likelyPaths,
             compliantEvidencePaths = compliantEvidencePaths,
         ),
         evidence = WorkPackageEvidenceAuthority(
-            plan.content.evidence.map { citation ->
+            plan.content.evidence.filter { restrictedPaths.isEmpty() || it.path in likelyPaths }.map { citation ->
                 WorkPackageEvidenceCitation(
                     path = citation.path,
                     symbol = citation.symbol,
@@ -230,7 +236,7 @@ fun compileExecutableWorkPackage(
         ),
         expectedBehavior = (listOf(definition.definition.requiredBehavior) +
             definition.definition.acceptanceCriteria.map { it.description } +
-            plan.content.operations.flatMap { it.acceptanceCriteria }).distinct(),
+            sourceOperations.flatMap { it.acceptanceCriteria }).distinct(),
         unresolvedAuthorityQuestions = (definition.definition.unresolvedQuestions + plan.content.unresolvedQuestions).distinct(),
         sources = sources,
         checks = checks,
@@ -262,14 +268,47 @@ fun recompileExecutableWorkPackage(
         correction.reviewHash,
         correction.findings,
     )
+    val compileFailurePaths = compileFailureCorrectionPaths(prior, correction)
+    val narrowedOwnership = compileFailurePaths.takeIf(List<String>::isNotEmpty)?.let { paths ->
+        prior.ownership.copy(
+            paths = paths,
+            likelyImplementationPaths = prior.ownership.likelyImplementationPaths.filter { it in paths },
+            createPaths = prior.ownership.createPaths.filter { it in paths },
+            requiredImplementationPaths = prior.ownership.requiredImplementationPaths.filter { it in paths },
+            compliantEvidencePaths = prior.ownership.compliantEvidencePaths.filter { it in paths },
+        )
+    } ?: prior.ownership
     val draft = prior.copy(
         packageId = packageId,
         revision = revision,
+        ownership = narrowedOwnership,
+        evidence = if (compileFailurePaths.isEmpty()) prior.evidence else {
+            prior.evidence.copy(citations = prior.evidence.citations.filter { it.path in compileFailurePaths })
+        },
+        operations = if (compileFailurePaths.isEmpty()) prior.operations else {
+            prior.operations.copy(operations = prior.operations.operations.filter { it.path in compileFailurePaths })
+        },
+        sources = if (compileFailurePaths.isEmpty()) prior.sources else {
+            prior.sources.filter { it.path in compileFailurePaths }
+        },
         corrections = prior.corrections + attachment,
         expectedBehavior = (prior.expectedBehavior + correction.findings.map { it.observation }).distinct(),
         hash = "",
     )
     return draft.copy(hash = executableWorkPackageHash(draft))
+}
+
+internal fun compileFailureCorrectionPaths(
+    prior: ExecutableWorkPackage,
+    correction: CandidatePullRequestCorrection,
+): List<String> {
+    val diagnostic = correction.findings.joinToString("\n") { "${it.observation}\n${it.criterion}" }
+    if (!diagnostic.contains("compil", ignoreCase = true) || !diagnostic.contains("Unresolved reference")) {
+        return emptyList()
+    }
+    return prior.ownership.paths.filter { path ->
+        path.endsWith("Test.kt") && diagnostic.contains(path)
+    }
 }
 
 fun verifyExecutableWorkPackage(packageAuthority: ExecutableWorkPackage): WorkPackageAdequacyReport {
@@ -381,10 +420,10 @@ fun executableWorkPackageHash(packageAuthority: ExecutableWorkPackage): String =
     workPackageJson.encodeToString(packageAuthority.copy(hash = ""))
 )
 
-private fun allowedWorkPackageActions(plan: RepositoryExecutionPlan): List<String> = buildSet {
+private fun allowedWorkPackageActions(sourceOperations: List<ExecutionPlanOperation>): List<String> = buildSet {
     add(WORK_PACKAGE_ACTION_READ_SOURCE)
     add(WORK_PACKAGE_ACTION_RUN_CHECK)
-    plan.content.operations.forEach { operation ->
+    sourceOperations.forEach { operation ->
         when (operation.action) {
             PLAN_OPERATION_CREATE -> add(WORK_PACKAGE_ACTION_CREATE_FILE)
             PLAN_OPERATION_MODIFY -> add(WORK_PACKAGE_ACTION_REWRITE_FILE)
@@ -392,6 +431,8 @@ private fun allowedWorkPackageActions(plan: RepositoryExecutionPlan): List<Strin
         }
     }
 }.sorted()
+
+private const val MAX_SOURCE_OPERATIONS_PER_WORK_PACKAGE = 1
 
 private val REQUIRED_ESCALATION_CONDITIONS = setOf(
     WORK_PACKAGE_ESCALATE_STALE_REVISION,

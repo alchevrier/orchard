@@ -1165,6 +1165,12 @@ class WorkspaceRepositoryTest {
             )),
         )
         assertEquals(
+            "./gradlew :frontend:desktopTest :frontend:compileKotlinDesktop",
+            admittedAcceptanceVerification(listOf(
+                "Run ./gradlew :frontend:desktopTest :frontend:compileKotlinDesktop, then perform desktop visual checks.",
+            )),
+        )
+        assertEquals(
             null,
             admittedAcceptanceVerification(listOf("Inspect the returned value", "Review the source diff")),
         )

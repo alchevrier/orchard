@@ -7,8 +7,11 @@ import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelProfileResolver
+import com.orchard.backend.vector.ModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.vector.estimateModelTokens
+import com.orchard.backend.vector.effectiveModelExecutionProfile
 import com.orchard.backend.workspace.ModelExecutionObservationDraft
 import com.orchard.backend.workspace.WorkspaceStore
 import java.security.MessageDigest
@@ -88,6 +91,7 @@ class RepositoryBaselineAnalysisService(
     private val workspaceGateway: CodingWorkspaceGateway = LocalCodingWorkspaceGateway(),
     private val resourceController: MachineResourceController = MachineResourceController.unrestricted(),
     private val intelligenceImporter: RepositoryIntelligenceImporter = RepositoryIntelligenceImporter(workspace),
+    private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
     private val systemPrompt: String = loadPrompt(),
 ) {
@@ -169,7 +173,16 @@ class RepositoryBaselineAnalysisService(
                 diagnostic = it.message.orEmpty(),
             )
         }
-        val profile = DefaultModelExecutionProfiles.broadRepositoryAnalysis
+        val defaultProfile = DefaultModelExecutionProfiles.broadRepositoryAnalysis
+        val profileOverride = runCatching { profileSettingsStore.load() }.getOrElse {
+            return RepositoryBaselineTickResult(
+                RepositoryBaselineTickStatus.STORAGE_UNAVAILABLE,
+                projectId,
+                stage,
+                diagnostic = "Cannot load model profile settings.",
+            )
+        }.singleOrNull { it.profileId == defaultProfile.id }
+        val profile = effectiveModelExecutionProfile(defaultProfile, profileOverride)
         val provider = runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return RepositoryBaselineTickResult(RepositoryBaselineTickStatus.NO_COMPATIBLE_MODEL, projectId, stage)
         fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryBaselineEnvelope(
@@ -187,7 +200,7 @@ class RepositoryBaselineAnalysisService(
             repositoryContext = candidate,
             requiredOutputSchema = OUTPUT_SCHEMA,
         )
-        val boundedContext = if (context.files.isEmpty()) context else compactRepositoryContextToBudget(
+        val boundedContext = compactRepositoryContextToBudget(
             context,
             profile.inputBudgetTokens,
         ) { candidate ->
@@ -200,7 +213,7 @@ class RepositoryBaselineAnalysisService(
         )
         val envelopeJson = json.encodeToString(envelopeFor(boundedContext))
         val prompt = prompt(envelopeJson)
-        val promptTokens = estimateModelTokens(prompt)
+        val promptTokens = estimateRepositoryAnalysisTokens(prompt)
         val admission = resourceController.acquire(
             provider.resourceDemand(profile, promptTokens),
             ModelWorkPriority.MAINTENANCE,

@@ -8,6 +8,7 @@ import com.orchard.backend.agent.CodingWorkerEvent
 import com.orchard.backend.agent.CodingWorkerStore
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
+import com.orchard.backend.agent.CODING_EXECUTION_COMPLETED
 import com.orchard.backend.agent.CODING_EXECUTION_FAILED
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.agent.codingWorkerExecutions
@@ -42,6 +43,7 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -123,6 +125,18 @@ private data class RepositoryAnalysisEnvelope(
     val priorRejectedCodingPlanDiagnostic: String?,
     val requiredAcceptanceCriteria: List<String>,
     val requiredVerificationCommands: List<String>,
+)
+
+@Serializable
+internal data class RepositoryAnalysisCandidate(
+    val disposition: String,
+    val summary: String,
+    val evidence: List<RepositoryEvidenceCitation>,
+    val reuse: List<String>,
+    val preservedInvariants: List<String>,
+    val nonGoals: List<String>,
+    val sourcePaths: List<String>,
+    val unresolvedQuestions: List<String> = emptyList(),
 )
 
 class RepositoryAnalysisService(
@@ -227,13 +241,28 @@ class RepositoryAnalysisService(
         val staticCandidates = planStore.load().filter { it.runId == runId && it.coversAcceptedScope(run) }
         if (staticCandidates.isEmpty()) return null
         val workspacePath = run.context.workspaceReservation?.path ?: return null
+        val currentRevision = workspaceGateway.currentRevision(workspacePath) ?: return null
+        val latestCandidate = staticCandidates.maxByOrNull { it.revision } ?: return null
+        if (latestCandidate.baseRevision == currentRevision) return latestCandidate
         val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
         val context = runCatching { workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run), selectors) }.getOrNull() ?: return null
         val complianceContext = runCatching { collectComplianceContext(workspacePath, run, selectors, context) }.getOrNull() ?: return null
-        return staticCandidates
-            .filter { it.coversAcceptedScope(run, context, complianceContext) }
-            .maxByOrNull { it.revision }
+        return latestCandidate.takeIf {
+            it.coversAcceptedScope(run, context, complianceContext) &&
+                (it.baseRevision == currentRevision || planRevisionCompatible(workspacePath, it, currentRevision))
+        }
     }
+
+    private fun planRevisionCompatible(
+        workspacePath: String,
+        plan: RepositoryExecutionPlan,
+        currentRevision: String,
+    ): Boolean = workspaceGateway.revisionCompatible(
+        workspacePath,
+        plan.baseRevision,
+        currentRevision,
+        (plan.content.operations.map { it.path } + plan.content.evidence.map { it.path }).distinct(),
+    )
 
     suspend fun tick(): RepositoryAnalysisTickResult {
         val runId = eligibleRunIds().firstOrNull() ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE)
@@ -244,12 +273,27 @@ class RepositoryAnalysisService(
         val plans = planStore.load()
         val analysisAttempts = attemptStore.load()
         val codingAttempts = codingAttemptStore?.load().orEmpty()
+        val codingWorkerEvents = codingWorkerStore?.loadEvents().orEmpty()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
-            .filter { it.state in ACTIONABLE_STATES && it.context.workspaceReservation != null }
+            .filter {
+                it.state in ACTIONABLE_STATES &&
+                    it.context.workspaceReservation != null
+            }
             .sortedBy { it.runId }
             .filter { candidate ->
                 val workspacePath = requireNotNull(candidate.context.workspaceReservation).path
                 val currentRevision = workspaceGateway.currentRevision(workspacePath)
+                val staticCandidates = plans.filter {
+                    it.runId == candidate.runId && it.coversAcceptedScope(candidate)
+                }
+                val latestCandidate = staticCandidates.maxByOrNull { it.revision }
+                if (latestCandidate != null && (
+                        failedCandidatePlanRequiresRevision(latestCandidate, codingWorkerEvents) ||
+                            (currentRevision != null && failedCandidateVerificationDiagnostic(currentRevision, codingWorkerEvents) != null)
+                    )
+                ) {
+                    return@filter true
+                }
                 if (currentRevision != null && attemptStore.isBlocked(candidate.runId, currentRevision)) {
                     return@filter false
                 }
@@ -259,8 +303,10 @@ class RepositoryAnalysisService(
                 ) {
                     return@filter true
                 }
-                val staticCandidates = plans.filter {
-                    it.runId == candidate.runId && it.baseRevision == currentRevision && it.coversAcceptedScope(candidate)
+                val compatibleCandidate = currentRevision?.let { revision ->
+                    latestCandidate?.takeIf {
+                        it.baseRevision == revision || planRevisionCompatible(workspacePath, it, revision)
+                    }
                 }
                 if (staticCandidates.isEmpty()) return@filter true
                 val context = runCatching {
@@ -274,9 +320,9 @@ class RepositoryAnalysisService(
                 val complianceContext = runCatching {
                     collectComplianceContext(workspacePath, candidate, selectors, context)
                 }.getOrNull() ?: return@filter true
-                val currentPlan = staticCandidates.filter {
+                val currentPlan = compatibleCandidate?.takeIf {
                     it.coversAcceptedScope(candidate, context, complianceContext)
-                }.maxByOrNull { it.revision }
+                }
                 currentPlan == null || repositoryPlanRequiresRevision(currentPlan, codingAttempts)
             }
             .map { it.runId }
@@ -287,7 +333,7 @@ class RepositoryAnalysisService(
         val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
         if (!mutex.tryLock()) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.BUSY, runId)
         return try {
-            analyze(runId)
+            withTimeout(ANALYSIS_TICK_TIMEOUT_MILLIS) { analyze(runId) }
         } finally {
             mutex.unlock()
         }
@@ -300,7 +346,7 @@ class RepositoryAnalysisService(
         val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
         if (!mutex.tryLock()) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.BUSY, runId)
         return try {
-            analyze(runId, admittedDesign)
+            withTimeout(ANALYSIS_TICK_TIMEOUT_MILLIS) { analyze(runId, admittedDesign) }
         } finally {
             mutex.unlock()
         }
@@ -370,7 +416,10 @@ class RepositoryAnalysisService(
                 run.runId,
                 diagnostic = "The reserved repository revision is unavailable.",
             )
-        attemptStore.blockedAttempt(run.runId, baseRevision)?.let { blocked ->
+        val retryAuthorized = attemptStore.load().lastOrNull {
+            it.runId == run.runId && it.baseRevision == baseRevision
+        }?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
+        attemptStore.blockedAttempt(run.runId, baseRevision)?.takeUnless { retryAuthorized }?.let { blocked ->
             return RepositoryAnalysisTickResult(
                 RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED,
                 run.runId,
@@ -404,7 +453,9 @@ class RepositoryAnalysisService(
         }
         val currentPlan = plans.asSequence()
             .filter {
-                it.runId == run.runId && it.baseRevision == baseRevision && it.coversAcceptedScope(run, context) &&
+                it.runId == run.runId &&
+                    (it.baseRevision == baseRevision || planRevisionCompatible(workspacePath, it, baseRevision)) &&
+                    it.coversAcceptedScope(run, context) &&
                     (admittedDesignOverride == null || it.admittedDesign?.hash == admittedDesignOverride.hash)
             }
             .maxByOrNull { it.revision }
@@ -412,6 +463,8 @@ class RepositoryAnalysisService(
         val rejectedCodingPlanDiagnostic = listOfNotNull(
             currentPlan?.let { repositoryPlanRevisionDiagnostic(it, codingAttemptStore?.load().orEmpty()) },
             failedCandidateVerificationDiagnostic(baseRevision, codingWorkerEvents),
+            currentPlan?.takeIf { completedCandidateRequiresSuccessor(it, baseRevision, codingWorkerEvents) }
+                ?.let { "The preceding one-operation candidate was committed at this revision. Analyze the remaining accepted scope and emit only its next independently verifiable source operation." },
         ).distinct().joinToString("\n").ifBlank { null }
         if (currentPlan != null && rejectedCodingPlanDiagnostic == null) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, run.runId)
@@ -429,9 +482,15 @@ class RepositoryAnalysisService(
             )
             company.assignment(run.runId, ROLE_ANALYST_DESIGNER)
         }
-        val provider = assignment?.let { companyControl?.provider(it) }
+        val preferredProvider = profileOverride?.preferredBindingId?.let { preferredBindingId ->
+            modelProviders.singleOrNull { it.bindingProfile().bindingId == preferredBindingId }
+        }
+        val provider = preferredProvider
+            ?: assignment?.let { companyControl?.provider(it) }
             ?: runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL, run.runId)
+        val acceptedScope = run.workDefinition?.definition?.scope.orEmpty()
+        val analysisPaths = boundedRepositoryAnalysisPaths(acceptedScope, selectors, context)
         fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryAnalysisEnvelope(
             profile.id,
             baseRevision,
@@ -441,7 +500,7 @@ class RepositoryAnalysisService(
             OUTPUT_SCHEMA,
             candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.scope.orEmpty(),
-            requiredRepositoryEvidencePathGroups(run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(), candidate),
+            requiredRepositoryEvidencePathGroups(selectors, candidate),
             requiredRepositoryScopeEvidencePathGroupIds(
                 run.workDefinition?.definition?.scope.orEmpty(),
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
@@ -455,17 +514,11 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
-        val selectedEvidencePaths = requiredRepositoryEvidencePaths(
-            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
-            context,
-        ).toSet()
-        val affineTestPaths = context.files.asSequence().map { it.path }.filter(::isTestSourcePath).toSet()
-        val requiredEvidencePaths = selectedEvidencePaths + affineProductionOwnerPaths(context, selectedEvidencePaths + affineTestPaths)
         val queryTokens = repositoryAnalysisTokens(query)
         val boundedContext = compactRepositoryContextToBudget(
             context,
-            profile.inputBudgetTokens,
-            requiredEvidencePaths,
+            profile.inputBudgetTokens * 70 / 100,
+            analysisPaths,
             contentCompactor = { content, maxBytes -> focusedContextExcerpt(content, queryTokens, maxBytes) },
         ) { candidate ->
             "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
@@ -479,7 +532,7 @@ class RepositoryAnalysisService(
         val prompt = "$systemPrompt\n\nAuthoritative repository analysis envelope:\n$envelopeJson"
         val binding = provider.bindingProfile()
         val admission = resourceController.acquire(
-            provider.resourceDemand(profile, estimateModelTokens(prompt)),
+            provider.resourceDemand(profile, estimateRepositoryAnalysisTokens(prompt)),
             ModelWorkPriority.DELIVERY,
         )
         val lease = admission.lease ?: return RepositoryAnalysisTickResult(
@@ -489,7 +542,13 @@ class RepositoryAnalysisService(
         )
         val startedAt = System.nanoTime()
         val generation = try {
-            lease.use { provider.executeRepositoryAnalysis(prompt, profile.outputBudgetTokens, profile.inputBudgetTokens + profile.outputBudgetTokens) }
+            lease.use {
+                provider.executeRepositoryAnalysis(
+                    prompt,
+                    minOf(profile.outputBudgetTokens, REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS),
+                    profile.inputBudgetTokens + profile.outputBudgetTokens,
+                )
+            }
         } catch (exception: CancellationException) {
             recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence)
             blockAttempt(
@@ -515,9 +574,18 @@ class RepositoryAnalysisService(
             repositoryAnalysisGenerationWithinBudget(it, profile.inputBudgetTokens, profile.outputBudgetTokens)
         }
         val decodedOutput = boundedGeneration?.let {
-            runCatching { json.decodeFromString<RepositoryAnalysisPlanContent>(it.text) }
+            runCatching { json.decodeFromString<RepositoryAnalysisCandidate>(it.text) }
         }
-        val output = decodedOutput?.getOrNull()
+        val output = decodedOutput?.getOrNull()?.let {
+            compileRepositoryAnalysisCandidate(
+                it,
+                context,
+                run.workDefinition?.definition?.scope.orEmpty(),
+                selectors,
+                run.workDefinition?.definition?.acceptanceCriteria?.map { criterion -> criterion.description }.orEmpty(),
+                run.workDefinition?.definition?.acceptanceCriteria?.map { criterion -> criterion.verification }.orEmpty(),
+            )
+        }
         val execution = recordExecution(
             profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence
         ) ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
@@ -528,7 +596,7 @@ class RepositoryAnalysisService(
             RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
             repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
         )
-        repositoryAnalysisIdentityDiagnostic(boundedContext, output)?.let {
+        repositoryAnalysisIdentityDiagnostic(context, output)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
         val createResolvedOutput = compileResolvedCreateQuestions(output)
@@ -576,7 +644,6 @@ class RepositoryAnalysisService(
                 resolvedOutput,
             )
         }
-        val acceptedScope = run.workDefinition?.definition?.scope.orEmpty()
         val ownerResolvedOutput = compileRepositoryImplementationOwners(boundedContext, resolvedOutput)
         val scopedOutput = compileRepositoryScopeAuthority(acceptedScope, selectors, boundedContext, ownerResolvedOutput)
         val reconciledOutput = attemptStore.compileRetainedExactPathOperations(
@@ -699,7 +766,7 @@ class RepositoryAnalysisService(
             envelopeHash = sha256(envelopeJson),
             promptHash = sha256(prompt),
             outputHash = generation?.text?.let(::sha256),
-            inputTokens = generation?.promptTokens ?: estimateModelTokens(prompt),
+            inputTokens = generation?.promptTokens ?: estimateRepositoryAnalysisTokens(prompt),
             outputTokens = generation?.completionTokens ?: 0,
             latencyMillis = (System.nanoTime() - startedAt) / 1_000_000,
             schemaValid = schemaValid,
@@ -790,6 +857,7 @@ class RepositoryAnalysisService(
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
 
     private companion object {
+        const val REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS = 2_000
         val ACTIONABLE_STATES = setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED)
         val DISPOSITIONS = listOf(
             DISPOSITION_ABSENT,
@@ -903,6 +971,128 @@ internal fun affineProductionOwnerPaths(
         .mapTo(linkedSetOf()) { it.path }
 }
 
+internal fun repositoryAnalysisRequiredPaths(
+    acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
+    context: CodingRepositoryContext,
+): Set<String> {
+    val pathsBySelector = requiredRepositoryPathsBySelector(selectors, context)
+    val scopeGroups = requiredRepositoryScopeEvidencePathGroupIds(acceptedScope, selectors)
+    val implementationPaths = acceptedScope.indices.asSequence()
+        .filter { requiresSourceOperation(acceptedScope[it]) }
+        .flatMap { scopeIndex ->
+            scopeGroups[scopeIndex].asSequence()
+                .flatMap { selectorId -> pathsBySelector[selectorId].orEmpty().asSequence() }
+        }
+        .toSet()
+    return implementationPaths + affineProductionOwnerPaths(context, implementationPaths)
+}
+
+internal fun boundedRepositoryAnalysisPaths(
+    acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
+    context: CodingRepositoryContext,
+): Set<String> {
+    val pathsBySelector = requiredRepositoryPathsBySelector(selectors, context)
+    val scopeGroups = requiredRepositoryScopeEvidencePathGroupIds(acceptedScope, selectors)
+    val scopedPaths = acceptedScope.indices.flatMap { index ->
+        scopeGroups[index].flatMap { pathsBySelector[it].orEmpty() }
+    }.distinct()
+    val relatedTestPaths = acceptedScope.asSequence()
+        .filter { requiresTestSource(it) &&
+            (it.contains("implement", ignoreCase = true) || it.contains("update", ignoreCase = true)) }
+        .flatMap { scope ->
+            val backendScope = scope.contains("backend", ignoreCase = true)
+            context.files.asSequence()
+                .map { it.path }
+                .filter(::isTestSourcePath)
+                .filter { it.startsWith("backend/") == backendScope }
+        }
+        .distinct()
+        .toList()
+    val frontendTests = relatedTestPaths.filterNot { it.startsWith("backend/") }.take(3)
+    val backendTests = relatedTestPaths.filter { it.startsWith("backend/") }.take(3)
+    return (frontendTests + backendTests + scopedPaths.filterNot(::isTestSourcePath) + scopedPaths.filter(::isTestSourcePath))
+        .take(MAX_ANALYSIS_CONTEXT_PATHS)
+        .toSet()
+}
+
+internal fun compileRepositoryAnalysisCandidate(
+    candidate: RepositoryAnalysisCandidate,
+    context: CodingRepositoryContext,
+    acceptedScope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
+    acceptanceCriteria: List<String>,
+    verificationCommands: List<String>,
+): RepositoryAnalysisPlanContent {
+    val observedPaths = context.files.mapTo(hashSetOf()) { it.path }
+    val authorizedPaths = requiredRepositoryEvidencePaths(selectors, context).toSet()
+    val candidateSourcePaths = candidate.sourcePaths
+        .filter { it in authorizedPaths }
+        .distinct()
+    val productionPaths = candidateSourcePaths.filterNot(::isTestSourcePath)
+    val candidateTestPaths = candidateSourcePaths.filter(::isTestSourcePath)
+    val requiredTestPath = candidateTestPaths.firstOrNull()
+    val requiredTestOwner = requiredTestPath?.let { repositoryTestOwnerPath(it, context) }
+    val sourcePaths = when {
+        requiredTestPath != null && requiredTestOwner != null &&
+            requiredTestOwner in authorizedPaths -> listOf(requiredTestOwner, requiredTestPath)
+        productionPaths.isNotEmpty() && candidateTestPaths.isEmpty() -> productionPaths.take(1)
+        else -> candidateSourcePaths.filterNot(::isTestSourcePath).take(1)
+    }.take(MAX_SOURCE_OPERATIONS_PER_PLAN)
+    val operations = sourcePaths.mapIndexed { index, path ->
+        val file = context.files.firstOrNull { it.path == path }
+        val action = if (path in observedPaths) PLAN_OPERATION_MODIFY else PLAN_OPERATION_CREATE
+        ExecutionPlanOperation(
+            order = index + 1,
+            action = action,
+            path = path,
+            symbol = file?.matchedDeclarations?.firstOrNull() ?: path.substringAfterLast('/').substringBeforeLast('.'),
+            instruction = if (action == PLAN_OPERATION_CREATE) {
+                "Create the admitted implementation in the owning package."
+            } else {
+                "Extend the existing owning implementation with the admitted behavior."
+            },
+            acceptanceCriteria = acceptanceCriteria,
+            dependsOnOrders = if (isTestSourcePath(path)) {
+                listOfNotNull(sourcePaths.indexOf(requiredTestOwner).takeIf { it >= 0 }?.plus(1))
+            } else emptyList(),
+        )
+    }.toMutableList()
+    val verificationStart = operations.size + 1
+    verificationCommands.forEachIndexed { index, command ->
+        operations += ExecutionPlanOperation(
+            order = verificationStart + index,
+            action = PLAN_OPERATION_VERIFY,
+            path = ".",
+            symbol = ".",
+            instruction = "Run the admitted verification command: $command",
+            acceptanceCriteria = acceptanceCriteria,
+        )
+    }
+    return RepositoryAnalysisPlanContent(
+        disposition = candidate.disposition,
+        summary = candidate.summary,
+        evidence = candidate.evidence,
+        reuse = candidate.reuse,
+        preservedInvariants = candidate.preservedInvariants,
+        nonGoals = candidate.nonGoals,
+        scopeCoverage = acceptedScope.map { scope -> ExecutionPlanScopeCoverage(scope, emptyList()) },
+        operations = operations,
+        verificationCommands = verificationCommands,
+        unresolvedQuestions = candidate.unresolvedQuestions,
+    )
+}
+
+private fun repositoryTestOwnerPath(testPath: String, context: CodingRepositoryContext): String? {
+    val testName = testPath.substringAfterLast('/').substringBeforeLast('.')
+        .removeSuffix("Test").lowercase()
+    return context.files.firstOrNull { file ->
+        !isTestSourcePath(file.path) &&
+            file.path.substringAfterLast('/').substringBeforeLast('.').lowercase() == testName
+    }?.path
+}
+
 internal fun repositoryAnalysisGenerationWithinBudget(
     generation: ModelGeneration,
     inputBudgetTokens: Int,
@@ -934,6 +1124,18 @@ internal fun repositoryPlanRequiresRevision(
     codingAttempts: List<CodingWorkerAttempt>,
 ): Boolean = repositoryPlanRevisionDiagnostic(currentPlan, codingAttempts) != null
 
+internal fun completedCandidateRequiresSuccessor(
+    currentPlan: RepositoryExecutionPlan,
+    currentRevision: String,
+    codingWorkerEvents: List<CodingWorkerEvent>,
+): Boolean = codingWorkerExecutions(codingWorkerEvents).any { execution ->
+    execution.claim.executionPlanId == currentPlan.planId &&
+        execution.claim.executionPlanHash == currentPlan.hash &&
+        execution.claim.workPackageId != null &&
+        execution.result?.status == CODING_EXECUTION_COMPLETED &&
+        execution.result.revision == currentRevision
+}
+
 internal fun failedCandidateCorrectionPaths(
     baseRevision: String,
     codingWorkerEvents: List<CodingWorkerEvent>,
@@ -943,6 +1145,16 @@ internal fun failedCandidateVerificationDiagnostic(
     baseRevision: String,
     codingWorkerEvents: List<CodingWorkerEvent>,
 ): String? = failedCandidateExecution(baseRevision, codingWorkerEvents)?.result?.diagnostic
+
+internal fun failedCandidatePlanRequiresRevision(
+    currentPlan: RepositoryExecutionPlan,
+    codingWorkerEvents: List<CodingWorkerEvent>,
+): Boolean = codingWorkerExecutions(codingWorkerEvents).any { execution ->
+    execution.claim.executionPlanId == currentPlan.planId &&
+        execution.claim.executionPlanHash == currentPlan.hash &&
+        execution.result?.status == CODING_EXECUTION_FAILED &&
+        execution.result.revision != null
+}
 
 private fun failedCandidateExecution(
     baseRevision: String,
@@ -1221,24 +1433,8 @@ internal fun repositoryRequiredTestEscalationDiagnostic(
 
 internal fun repositorySourceOperationBudgetDiagnostic(output: RepositoryAnalysisPlanContent): String? {
     val sourceOperations = output.operations.count { it.action != PLAN_OPERATION_VERIFY }
-    val requiredPaths = output.scopeCoverage.flatMapTo(hashSetOf()) { it.evidencePaths }
-    val operationsByOrder = output.operations.associateBy { it.order }
-    val pinnedSourceOperations = output.operations.asSequence()
-        .filter { it.action != PLAN_OPERATION_VERIFY && it.path in requiredPaths }
-        .map { it.path }
-        .distinct()
-        .count()
-    val linkedSourceOperations = output.scopeCoverage.asSequence()
-        .flatMap { it.operationOrders.asSequence() }
-        .mapNotNull(operationsByOrder::get)
-        .filter { it.action != PLAN_OPERATION_VERIFY }
-        .map { it.order }
-        .distinct()
-        .count()
-    val requiredSourceOperations = maxOf(pinnedSourceOperations, linkedSourceOperations)
-    val effectiveLimit = maxOf(MAX_SOURCE_OPERATIONS_PER_PLAN, requiredSourceOperations)
-    return if (sourceOperations > effectiveLimit) {
-        "Execution plan has $sourceOperations source operations; at most $effectiveLimit are allowed for this bounded coding slice. " +
+    return if (sourceOperations > MAX_SOURCE_OPERATIONS_PER_PLAN) {
+        "Execution plan has $sourceOperations source operations; at most $MAX_SOURCE_OPERATIONS_PER_PLAN are allowed for this bounded coding slice. " +
             "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan."
     } else null
 }
@@ -1376,8 +1572,9 @@ private fun requiredRepositoryPathsBySelector(
     selectors: List<RepositoryEvidenceSelector>,
     context: CodingRepositoryContext,
 ): Map<String, List<String>> {
+    val files = context.files.map { file -> file.path to file.matchedEvidenceSelectorIds.toSet() }
     val direct = selectors.associate { selector ->
-        selector.selectorId to context.files.filter { selector.selectorId in it.matchedEvidenceSelectorIds }.map { it.path }
+        selector.selectorId to files.filter { (_, selectorIds) -> selector.selectorId in selectorIds }.map { (path, _) -> path }
     }
     return selectors.associate { selector ->
         val paths = if (selector.selection == REPOSITORY_EVIDENCE_AFFINE_TEST) {
@@ -1431,52 +1628,117 @@ internal fun compileRepositoryScopeAuthority(
     context: CodingRepositoryContext,
     output: RepositoryAnalysisPlanContent,
 ): RepositoryAnalysisPlanContent {
-    if (selectors.isEmpty() || repositoryScopeIdentityDiagnostic(acceptedScope, output) != null) return output
+    if (selectors.isEmpty() || acceptedScope.isEmpty()) return output
     val pathsBySelector = requiredRepositoryPathsBySelector(selectors, context)
     val selectorIdsByScope = requiredRepositoryScopeEvidencePathGroupIds(acceptedScope, selectors)
     val coverageByScope = output.scopeCoverage.associateBy { canonicalAuthorityText(it.scope) }
-    val compiledOperations = (
-        output.operations.filter { it.action != PLAN_OPERATION_VERIFY } +
+    val requiredPaths = requiredRepositoryEvidencePaths(selectors, context).toSet()
+    fun scopeSelectedPaths(index: Int, scope: String): List<String> {
+        val selected = selectorIdsByScope[index]
+            .flatMap { pathsBySelector[it].orEmpty() }
+            .distinct()
+        val backendScope = scope.contains("backend", ignoreCase = true)
+        val domainSelected = selected.filter { path -> path.startsWith("backend/") == backendScope }
+        if (domainSelected.any(::isTestSourcePath) || !requiresTestSource(scope) ||
+            (!scope.contains("implement", ignoreCase = true) && !scope.contains("update", ignoreCase = true))) {
+            return selected
+        }
+        val authoritative = requiredPaths.filter { path ->
+            isTestSourcePath(path) &&
+                (path.startsWith("backend/") == backendScope)
+        }
+        val available = context.files.map { it.path }.filter { path ->
+            isTestSourcePath(path) && (path.startsWith("backend/") == backendScope)
+        }
+        val scopeTerms = scope.lowercase().split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 5 }
+        val recoveredTests = (authoritative.ifEmpty { available }).sortedWith(compareByDescending<String> { path ->
+            scopeTerms.count { term -> path.lowercase().contains(term) }
+        }.thenBy { it }).take(3)
+        return (selected + recoveredTests).distinct()
+    }
+    val selectedTestPaths = acceptedScope.indices.asSequence()
+        .filter { requiresTestSource(acceptedScope[it]) }
+        .flatMap { scopeSelectedPaths(it, acceptedScope[it]).asSequence() }
+        .filter(::isTestSourcePath)
+        .toSet()
+    val sourceOperations = output.operations.filter {
+        it.action != PLAN_OPERATION_VERIFY && it.path in requiredPaths
+    }
+    val operationTemplate = sourceOperations.firstOrNull()
+    val synthesizedTestOperations = selectedTestPaths
+        .filter { path -> sourceOperations.none { it.path == path && it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) } }
+        .sorted()
+        .take((MAX_SOURCE_OPERATIONS_PER_PLAN - sourceOperations.size).coerceAtLeast(0))
+        .mapNotNull { path ->
+            operationTemplate?.copy(
+                order = 0,
+                action = PLAN_OPERATION_MODIFY,
+                path = path,
+                symbol = path.substringAfterLast('/').substringBeforeLast('.'),
+                instruction = "Update the existing regression test to cover the admitted behavior.",
+            )
+        }
+    val evidenceByPath = output.evidence.associateBy { it.path }.toMutableMap()
+    context.files
+        .filter { it.path in requiredPaths && it.path !in evidenceByPath }
+        .forEach { file ->
+            evidenceByPath[file.path] = RepositoryEvidenceCitation(
+                path = file.path,
+                symbol = file.matchedDeclarations.firstOrNull(),
+                observation = "Pinned repository context contains the selected source bytes.",
+                contentHash = file.contentHash,
+            )
+        }
+    val operationsToCompile = (
+            sourceOperations +
+            synthesizedTestOperations +
             output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
-        ).mapIndexed { index, operation -> operation.copy(order = index + 1) }
+        )
+    val orderMap = operationsToCompile.mapIndexed { index, operation -> operation.order to index + 1 }.toMap()
+    val compiledOperations = operationsToCompile.mapIndexed { index, operation ->
+        operation.copy(
+            order = index + 1,
+            dependsOnOrders = operation.dependsOnOrders.mapNotNull(orderMap::get).distinct().filter { it < index + 1 },
+        )
+    }
     val verificationOrderMap = output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
         .zip(compiledOperations.filter { it.action == PLAN_OPERATION_VERIFY })
         .associate { (original, compiled) -> original.order to compiled.order }
     return output.copy(
+        evidence = evidenceByPath.values.toList(),
         operations = compiledOperations,
         scopeCoverage = acceptedScope.mapIndexed { index, scope ->
-            val coverage = coverageByScope.getValue(canonicalAuthorityText(scope))
-            val selectedEvidencePaths = selectorIdsByScope[index]
-                .flatMap { pathsBySelector[it].orEmpty() }
-                .distinct()
-                .sorted()
-            val retainedCreateOperations = coverage.operationOrders.asSequence()
-                .mapNotNull { order -> output.operations.firstOrNull { it.order == order } }
-                .filter { it.action == PLAN_OPERATION_CREATE }
-                .toMutableList()
-            if (canonicalAuthorityText(scope).lowercase().startsWith("backend ")) {
-                retainedCreateOperations += output.operations.filter {
-                    it.action == PLAN_OPERATION_CREATE && it.path.lowercase().startsWith("backend/src/main/")
-                }
-            }
-            val distinctCreateOperations = retainedCreateOperations.distinctBy { it.path }
-            val evidencePaths = (selectedEvidencePaths + distinctCreateOperations.map { it.path }).distinct().sorted()
+            val coverage = coverageByScope[canonicalAuthorityText(scope)]
+                ?: ExecutionPlanScopeCoverage(scope = scope, evidencePaths = emptyList())
+            val selectedEvidencePaths = scopeSelectedPaths(index, scope).sorted()
+            val evidencePaths = selectedEvidencePaths
             val sourceOperationOrders = compiledOperations.asSequence()
                 .filter { operation ->
                     operation.action != PLAN_OPERATION_VERIFY &&
-                        (operation.path in selectedEvidencePaths || distinctCreateOperations.any { it.path == operation.path })
+                        operation.path in selectedEvidencePaths
                 }
                 .map { it.order }
             val sourceOperationPaths = compiledOperations.asSequence()
                 .filter { it.action != PLAN_OPERATION_VERIFY }
                 .mapTo(hashSetOf()) { it.path }
-            val verificationOperationOrders = coverage.operationOrders.asSequence()
-                .mapNotNull(verificationOrderMap::get)
+            val verificationOperationOrders = if (canonicalAuthorityText(scope) !in coverageByScope) {
+                compiledOperations.asSequence()
+                    .filter { it.action == PLAN_OPERATION_VERIFY }
+                    .map { it.order }
+            } else {
+                coverage.operationOrders.asSequence()
+                    .mapNotNull(verificationOrderMap::get)
+            }
             coverage.copy(
                 scope = scope,
                 evidencePaths = evidencePaths,
                 operationOrders = (sourceOperationOrders + verificationOperationOrders).distinct().sorted().toList(),
-                compliantEvidencePaths = evidencePaths.filter { it !in sourceOperationPaths },
+                compliantEvidencePaths = if (requiresSourceOperation(scope)) {
+                    evidencePaths.filter { it !in sourceOperationPaths }
+                } else {
+                    emptyList()
+                },
             )
         },
     )
@@ -1494,7 +1756,9 @@ private val FORBIDDEN_CONTAINS_LITERAL = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-private const val MAX_SOURCE_OPERATIONS_PER_PLAN = 2
+internal const val MAX_SOURCE_OPERATIONS_PER_PLAN = 12
+private const val MAX_ANALYSIS_CONTEXT_PATHS = 24
+private const val ANALYSIS_TICK_TIMEOUT_MILLIS = 900_000L
 
 private fun canonicalAuthorityText(value: String): String = value
     .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")
@@ -1597,7 +1861,7 @@ internal fun compactRepositoryContextToBudget(
             optionalFiles = emptyList(),
             declarationLimit = 0,
         )
-        if (estimateModelTokens(promptFor(requiredWithNoDeclarations)) > inputBudgetTokens) {
+        if (estimateRepositoryAnalysisTokens(promptFor(requiredWithNoDeclarations)) > inputBudgetTokens) {
             val compactContent = contentCompactor ?: return null
             var lowerContentBytes = 1
             var upperContentBytes = context.files.filter { it.path in requiredPaths }
@@ -1613,7 +1877,7 @@ internal fun compactRepositoryContextToBudget(
                     contentByteLimit = candidateBytes,
                     contentCompactor = compactContent,
                 )
-                if (candidate.files.all { it.content.isNotEmpty() } && estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
+                if (candidate.files.all { it.content.isNotEmpty() } && estimateRepositoryAnalysisTokens(promptFor(candidate)) <= inputBudgetTokens) {
                     fittedContentBytes = candidateBytes
                     lowerContentBytes = candidateBytes + 1
                 } else {
@@ -1635,7 +1899,7 @@ internal fun compactRepositoryContextToBudget(
                 contentByteLimit = contentByteLimit,
                 contentCompactor = contentCompactor,
             )
-            if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
+            if (estimateRepositoryAnalysisTokens(promptFor(candidate)) <= inputBudgetTokens) {
                 fittedDeclarationLimit = candidateLimit
                 lowerDeclarations = candidateLimit + 1
             } else {
@@ -1657,7 +1921,7 @@ internal fun compactRepositoryContextToBudget(
             contentByteLimit,
             contentCompactor,
         )
-        if (estimateModelTokens(promptFor(candidate)) <= inputBudgetTokens) {
+        if (estimateRepositoryAnalysisTokens(promptFor(candidate)) <= inputBudgetTokens) {
             best = candidate
             lower = retainedOptional + 1
         } else {
@@ -1691,3 +1955,6 @@ private fun repositoryAnalysisTokens(value: String): Set<String> = value.lowerca
     .split(Regex("[^a-z0-9_]+"))
     .filter { it.length >= 3 }
     .toSet()
+
+internal fun estimateRepositoryAnalysisTokens(value: String): Int =
+    (estimateModelTokens(value) / 4).coerceAtLeast(1)

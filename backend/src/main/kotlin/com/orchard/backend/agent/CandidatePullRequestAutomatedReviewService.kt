@@ -4,11 +4,15 @@ import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.ModelProfileSettingsStore
+import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.vector.estimateModelTokens
+import com.orchard.backend.vector.effectiveModelExecutionProfile
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+@Serializable
 enum class CandidateAutomatedReviewTickStatus {
     IDLE,
     RECORDED,
@@ -17,6 +21,7 @@ enum class CandidateAutomatedReviewTickStatus {
     INVALID_OUTPUT,
 }
 
+@Serializable
 data class CandidateAutomatedReviewTickResult(
     val status: CandidateAutomatedReviewTickStatus,
     val pullRequestId: Long? = null,
@@ -41,6 +46,7 @@ class CandidatePullRequestAutomatedReviewService(
     private val reviewService: CandidatePullRequestReviewService,
     private val modelProviders: List<ModelProvider>,
     private val resourceController: MachineResourceController,
+    private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
 ) {
     suspend fun tick(): CandidateAutomatedReviewTickResult {
@@ -53,7 +59,16 @@ class CandidatePullRequestAutomatedReviewService(
         val provider = modelProviders.firstOrNull() ?: return CandidateAutomatedReviewTickResult(
             CandidateAutomatedReviewTickStatus.MODEL_FAILED, pullRequest.pullRequestId, kind, "No reviewer model is configured.",
         )
-        val profile = DefaultModelExecutionProfiles.boundedIndependentAudit
+        val defaultProfile = DefaultModelExecutionProfiles.boundedIndependentAudit
+        val profileOverride = runCatching { profileSettingsStore.load() }.getOrElse {
+            return CandidateAutomatedReviewTickResult(
+                CandidateAutomatedReviewTickStatus.MODEL_FAILED,
+                pullRequest.pullRequestId,
+                kind,
+                "Cannot load model profile settings.",
+            )
+        }.singleOrNull { it.profileId == defaultProfile.id }
+        val profile = effectiveModelExecutionProfile(defaultProfile, profileOverride)
         val envelope = CandidateAutomatedReviewEnvelope(kind, requireNotNull(REVIEW_FOCUS[kind]), pullRequest)
         val prompt = "$SYSTEM_PROMPT\n\nAuthoritative candidate review envelope:\n${json.encodeToString(envelope)}"
         val promptTokens = estimateModelTokens(prompt)

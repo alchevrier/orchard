@@ -6,9 +6,11 @@ import com.orchard.backend.analysis.ExecutableWorkPackageStore
 import com.orchard.backend.analysis.PLAN_OPERATION_CREATE
 import com.orchard.backend.analysis.PLAN_OPERATION_DELETE
 import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
+import com.orchard.backend.analysis.PLAN_OPERATION_VERIFY
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
+import com.orchard.backend.analysis.WorkPackageEvidenceAuthority
 import com.orchard.backend.analysis.compileExecutableWorkPackage
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
@@ -211,7 +213,17 @@ class CodingWorkerService(
     private suspend fun executeTick(runId: Long): CodingWorkerTickResult {
         val events = workerStore.loadEvents()
         val executions = codingWorkerExecutions(events)
-        executions.singleOrNull { it.claim.runId == runId && it.result == null }?.let { interrupted ->
+        val newestPlan = repositoryAnalysis?.plans()
+            ?.filter { it.runId == runId }
+            ?.maxByOrNull { it.revision }
+        executions.singleOrNull { it.claim.runId == runId && it.result == null }
+            ?.takeIf { interrupted ->
+                repositoryAnalysis == null || newestPlan?.let { plan ->
+                    interrupted.claim.executionPlanId == plan.planId &&
+                        interrupted.claim.executionPlanHash == plan.hash
+                } == true
+            }
+            ?.let { interrupted ->
             val result = terminalResult(
                 interrupted.claim.executionId,
                 CODING_EXECUTION_INTERRUPTED,
@@ -219,6 +231,15 @@ class CodingWorkerService(
             )
             return appendResult(events, interrupted.claim, result, CodingWorkerTickStatus.INTERRUPTED_RECOVERED)
         }
+        executions.singleOrNull { it.claim.runId == runId && it.result == null }
+            ?.let { superseded ->
+                val result = terminalResult(
+                    superseded.claim.executionId,
+                    CODING_EXECUTION_BLOCKED,
+                    diagnostic = "The interrupted coding execution belongs to a superseded execution plan.",
+                )
+                return appendResult(events, superseded.claim, result, CodingWorkerTickStatus.PLAN_STALE)
+            }
         val run = candidateRuns(executions).singleOrNull { it.runId == runId }
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.IDLE)
         val workspacePath = requireNotNull(run.context.workspaceReservation).path
@@ -231,22 +252,33 @@ class CodingWorkerService(
         }
         val retainedExecution = listOfNotNull(latestFailedExecution, latestAuditRepairExecution)
             .maxByOrNull { it.claim.executionId }
-        val restorationDiagnostic = if (latestFailedExecution?.claim?.workPackageId == null) {
-            restoreLatestFailedCandidate(run.runId, workspacePath, executions)
-        } else null
-        if (restorationDiagnostic != null) {
-            return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
-        }
         val executionPlan = repositoryAnalysis?.currentPlan(run.runId)
         if (repositoryAnalysis != null && executionPlan == null) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.ANALYSIS_REQUIRED)
+        }
+        val restorationDiagnostic = restoreLatestFailedCandidate(
+            run.runId,
+            workspacePath,
+            executions,
+            requireNotNull(run.context.workspaceReservation).baseRevision,
+        )
+        if (restorationDiagnostic != null) {
+            return CodingWorkerTickResult(CodingWorkerTickStatus.STORAGE_UNAVAILABLE)
         }
         val currentRevision = workspaceGateway.currentRevision(workspacePath)
         val retainedCandidateIsCurrent = retainedExecution?.let {
             it.claim.executionPlanId == executionPlan?.planId && it.claim.executionPlanHash == executionPlan?.hash &&
                 it.result?.revision == currentRevision && it.claim.workPackageId != null
         } == true
-        if (executionPlan != null && currentRevision != executionPlan.baseRevision && !retainedCandidateIsCurrent) {
+        val planTreeMatches = executionPlan != null && currentRevision != null &&
+            (workspaceGateway.treeMatches(workspacePath, currentRevision, executionPlan.baseRevision) ||
+                workspaceGateway.revisionCompatible(
+                    workspacePath,
+                    executionPlan.baseRevision,
+                    currentRevision,
+                    codingPlanContextPaths(executionPlan),
+                ))
+        if (executionPlan != null && currentRevision != executionPlan.baseRevision && !planTreeMatches && !retainedCandidateIsCurrent) {
             return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_STALE)
         }
         if (executionPlan?.content?.disposition == DISPOSITION_COMPLETE) {
@@ -275,8 +307,8 @@ class CodingWorkerService(
             company.assignment(run.runId, ROLE_IMPLEMENTER)
                 ?: return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
         }
-        val modelProvider = assignment?.let { companyControl?.provider(it) }
-            ?: resolveProvider(profile, profileOverride)
+        val modelProvider = resolveProvider(profile, profileOverride)
+            ?: assignment?.let { companyControl?.provider(it) }
             ?: return CodingWorkerTickResult(CodingWorkerTickStatus.MODEL_FAILED)
         val binding = modelProvider.bindingProfile()
         val toolchainResolution = runCatching { workspaceGateway.resolveToolchainPolicy(workspacePath) }
@@ -284,19 +316,39 @@ class CodingWorkerService(
         val workPackage = executionPlan?.let { plan ->
             val definition = run.workDefinition
                 ?: return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_BLOCKED, diagnostic = "The accepted plan has no work-definition authority.")
+            val restrictedCorrectionPath = executions.asReversed().firstNotNullOfOrNull { execution ->
+                execution.result?.takeIf { it.status == CODING_EXECUTION_FAILED }?.diagnostic
+                    ?.let { diagnostic -> firstFailingKotlinTestPath(plan, diagnostic) }
+            }
             runCatching {
                 workPackageStore.load().lastOrNull {
                     it.runId == run.runId && it.design.executionPlanId == plan.planId &&
                         it.design.executionPlanHash == plan.hash && it.intent.definitionId == definition.definitionId &&
-                        it.intent.definitionHash == definition.hash
+                        it.intent.definitionHash == definition.hash &&
+                        (restrictedCorrectionPath == null || it.ownership.paths == listOf(restrictedCorrectionPath))
                 } ?: run {
-                    val packageContext = workspaceGateway.collectIntelligenceContext(
-                        workspacePath,
-                        plan.baseRevision,
-                        codingPlanContextPaths(plan),
+                    val packagePaths = restrictedCorrectionPath?.let(::listOf) ?: codingWorkPackageContextPaths(plan)
+                    val packageContexts = packagePaths.map { path ->
+                        workspaceGateway.collectIntelligenceContext(
+                            workspacePath,
+                            requireNotNull(currentRevision),
+                            listOf(path),
+                        )
+                    }
+                    val packageContext = CodingRepositoryContext(
+                        files = packageContexts.flatMap { it.files },
+                        omittedFileCount = packageContexts.sumOf { it.omittedFileCount },
                     )
                     workPackageStore.appendNext(run.runId) { packageId, revision ->
-                        compileExecutableWorkPackage(packageId, revision, definition, plan, packageContext)
+                        compileExecutableWorkPackage(
+                            packageId,
+                            revision,
+                            definition,
+                            plan,
+                            packageContext,
+                            repositoryRevision = requireNotNull(currentRevision),
+                            restrictedPaths = restrictedCorrectionPath?.let(::setOf).orEmpty(),
+                        )
                     }
                 }
             }.getOrElse { error ->
@@ -363,7 +415,7 @@ class CodingWorkerService(
         )
 
         val contextQuery = codingContextQuery(run, executionPlan)
-        val planPaths = codingPlanContextPaths(executionPlan)
+        val contextPaths = workPackage?.ownership?.paths ?: codingPlanContextPaths(executionPlan)
         fun envelope(
             repositoryContext: CodingRepositoryContext,
             retryDiagnostic: String? = priorRejectedCodingDiagnostic,
@@ -376,8 +428,8 @@ class CodingWorkerService(
             requiredOutputSchema = if (workPackage == null) CODING_PROPOSAL_SCHEMA else BOUNDED_TOOL_BATCH_SCHEMA,
             currentRevision = requireNotNull(currentRevision),
             run = codingWorkerRunProjection(run),
-            executionPlan = executionPlan,
-            workPackage = workPackage,
+            executionPlan = if (workPackage == null) executionPlan?.let(::codingExecutionPlanProjection) else null,
+            workPackage = workPackage?.let(::codingWorkPackageProjection),
             priorRejectedCodingDiagnostic = retryDiagnostic,
             repositoryContext = repositoryContext,
         )
@@ -387,7 +439,11 @@ class CodingWorkerService(
         ): String {
             val envelopeJson = json.encodeToString(envelope(repositoryContext, retryDiagnostic))
             val promptPolicy = if (workPackage == null) systemPrompt else BOUNDED_TOOL_SYSTEM_PROMPT
-            return "$promptPolicy\n\nAuthoritative coding execution envelope:\n$envelopeJson"
+            val literalOnlyMarker = workPackage?.ownership?.paths
+                ?.takeIf { it.isNotEmpty() && it.all(::isCandidateTestSourcePath) }
+                ?.let { "\nREQUIRE_LITERAL_REPLACEMENTS" }
+                .orEmpty()
+            return "$promptPolicy$literalOnlyMarker\n\nAuthoritative coding execution envelope:\n$envelopeJson"
         }
         val planContextBudget = executionPlan?.let {
             val emptyContext = CodingRepositoryContext(emptyList(), 0)
@@ -403,7 +459,7 @@ class CodingWorkerService(
                 workspaceGateway.collectPlanContext(
                     workspacePath = workspacePath,
                     repositoryRevision = requireNotNull(currentRevision),
-                    paths = planPaths,
+                    paths = contextPaths,
                     query = contextQuery,
                     maxSerializedBytes = requireNotNull(planContextBudget),
                 )
@@ -476,12 +532,14 @@ class CodingWorkerService(
         val outputWithinBudget = generation.promptTokens <= profile.inputBudgetTokens &&
             generation.completionTokens <= profile.outputBudgetTokens &&
             estimateModelTokens(generation.text) <= profile.outputBudgetTokens
-        val proposal = if (outputWithinBudget && workPackage == null) {
-            runCatching { strictOutputJson.decodeFromString<CodingPatchProposal>(generation.text) }.getOrNull()
+        val proposalDecode = if (outputWithinBudget && workPackage == null) {
+            runCatching { strictOutputJson.decodeFromString<CodingPatchProposal>(generation.text) }
         } else null
-        val toolBatch = if (outputWithinBudget && workPackage != null) {
-            runCatching { strictOutputJson.decodeFromString<BoundedCodingToolBatch>(generation.text) }.getOrNull()
+        val toolBatchDecode = if (outputWithinBudget && workPackage != null) {
+            runCatching { strictOutputJson.decodeFromString<BoundedCodingToolBatch>(generation.text) }
         } else null
+        val proposal = proposalDecode?.getOrNull()
+        val toolBatch = toolBatchDecode?.getOrNull()
         val schemaValid = proposal != null || toolBatch != null
         val modelExecution = recordModelExecution(
             profile,
@@ -503,7 +561,12 @@ class CodingWorkerService(
             claim,
             CODING_EXECUTION_BLOCKED,
             CodingWorkerTickStatus.INVALID_PROPOSAL,
-            INVALID_CODING_PROPOSAL_DIAGNOSTIC,
+            codingModelOutputDiagnostic(
+                generation = generation,
+                profile = profile,
+                expectedSchema = if (workPackage == null) CODING_PROPOSAL_SCHEMA else BOUNDED_TOOL_BATCH_SCHEMA,
+                decodeFailure = (proposalDecode ?: toolBatchDecode)?.exceptionOrNull(),
+            ),
             modelExecutionId = modelExecution.executionId,
         )
         val proposalHash = sha256(
@@ -644,6 +707,7 @@ class CodingWorkerService(
             val productionPaths = plan.content.scopeCoverage
                 .flatMap { it.evidencePaths }
                 .filterNot(::isCandidateTestSourcePath)
+                .filter { it in candidate.changedPaths }
                 .distinct()
             val candidateContext = runCatching {
                 workspaceGateway.collectIntelligenceContext(
@@ -789,21 +853,24 @@ class CodingWorkerService(
         runId: Long,
         workspacePath: String,
         executions: List<CodingWorkerExecutionView>,
+        baseRevision: String?,
     ): String? {
         val failed = executions.lastOrNull {
             it.claim.runId == runId &&
                 it.result?.status == CODING_EXECUTION_FAILED &&
                 it.result.revision != null
         } ?: return null
+        val pinnedBaseRevision = baseRevision ?: return "Failed candidate recovery requires the execution plan base revision."
         val candidateRevision = requireNotNull(failed.result?.revision)
         if (workspaceGateway.currentRevision(workspacePath) != candidateRevision) return null
         return runCatching {
-            workspaceGateway.revertCandidate(workspacePath, candidateRevision, failed.claim.executionId)
+            workspaceGateway.restoreTree(workspacePath, candidateRevision, pinnedBaseRevision, runId)
         }.exceptionOrNull()?.message ?: return null
     }
 
     private fun candidateRuns(executions: List<CodingWorkerExecutionView>): List<WorkflowRunView> {
         val codingAttempts = attemptStore.load()
+        val repositoryPlans = repositoryAnalysis?.plans().orEmpty()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
             .filter { run ->
@@ -811,16 +878,23 @@ class CodingWorkerService(
                     run.context.workspaceReservation?.mode in setOf("ISOLATED", "INTEGRATION")
             }
             .filter { run ->
-                codingRunCanExecute(
+                val hasRepositoryPlan = repositoryPlans.any { it.runId == run.runId }
+                val currentPlan = if (hasRepositoryPlan) repositoryAnalysis?.currentPlan(run.runId) else null
+                hasRepositoryPlan && codingRunCanExecute(
                     executions = executions.filter { it.claim.runId == run.runId },
                     attempts = codingAttempts.filter { it.runId == run.runId },
-                    currentPlan = repositoryAnalysis?.currentPlan(run.runId),
+                    currentPlan = currentPlan,
                     bindToCurrentPlan = repositoryAnalysis != null,
                     retryBudget = retryBudget,
                 ) || run.state == RUN_STATE_EVIDENCE_BLOCKED && executions.lastOrNull {
                     it.claim.runId == run.runId
                 }?.let { execution ->
-                    execution.claim.workPackageId != null && execution.result?.status == CODING_EXECUTION_COMPLETED
+                    currentPlan?.let { plan ->
+                        execution.claim.executionPlanId == plan.planId &&
+                            execution.claim.executionPlanHash == plan.hash &&
+                            execution.claim.workPackageId != null &&
+                            execution.result?.status == CODING_EXECUTION_COMPLETED
+                    } == true
                 } == true
             }
             .sortedBy { it.runId }
@@ -1103,8 +1177,8 @@ class CodingWorkerService(
             .values
             .map { it.last() }
             .forEach { failed ->
-                val workspacePath = runs[failed.claim.runId]?.context?.workspaceReservation?.path ?: return@forEach
-                restoreLatestFailedCandidate(failed.claim.runId, workspacePath, executions)
+                val reservation = runs[failed.claim.runId]?.context?.workspaceReservation ?: return@forEach
+                restoreLatestFailedCandidate(failed.claim.runId, reservation.path, executions, reservation.baseRevision)
             }
         executions.groupBy { it.claim.runId }.forEach { (runId, runExecutions) ->
             if (runExecutions.none { it.result?.revision != null } || runExecutions.any { it.result?.status == CODING_EXECUTION_COMPLETED }) {
@@ -1279,10 +1353,13 @@ class CodingWorkerService(
         private val BOUNDED_TOOL_SYSTEM_PROMPT = """
             You are Orchard's bounded implementation worker.
 
-            Return exactly one JSON object matching bounded-coding-tool-batch-v1:
+            Return exactly one compact JSON object matching bounded-coding-tool-batch-v1:
             {"summary":"short implementation description","expectedRevision":"40-character current revision from the envelope","operations":[{"action":"REWRITE_FILE|CREATE_FILE|DELETE_FILE|REPLACE_LITERAL","path":"authorized relative path","content":null,"expectedLiteral":null,"replacement":null,"expectedCount":null}]}
 
-            Treat workPackage as complete intent, design, ownership, source, check, and escalation authority. Implement the required behavior without redesigning it. Use only paths inside workPackage.ownership.paths and only actions allowed by workPackage.ownership.allowedActions. REWRITE_FILE supplies complete resulting UTF-8 content. CREATE_FILE is valid only for workPackage.ownership.createPaths. REPLACE_LITERAL supplies expectedLiteral, replacement, and its exact expectedCount; Orchard validates cardinality. Use expectedRevision from the current repository context. Do not emit exact source anchors, commands, Markdown, approvals, evidence, Git actions, or claims that checks passed.
+            Treat workPackage as complete intent, design, ownership, source, check, and escalation authority. Implement the required behavior without redesigning it. Use only paths inside workPackage.ownership.paths and only actions allowed by workPackage.ownership.allowedActions. REWRITE_FILE is valid only when content is a non-null complete resulting UTF-8 file; never emit a REWRITE_FILE with null content. For localized edits, prefer REPLACE_LITERAL, which requires non-null expectedLiteral, replacement, and exact expectedCount. CREATE_FILE is valid only for workPackage.ownership.createPaths. Use expectedRevision from the current repository context. Do not emit exact source anchors, commands, Markdown, approvals, evidence, Git actions, or claims that checks passed.
+            The operations array must contain only operation objects. Every array element must be an object with an action and path; never put a string, source excerpt, explanation, or nested array in operations. Do not append prose before or after the JSON object. Before responding, validate that the complete response is one parseable JSON object, that operations is an array of objects, and that every operation matches one of the allowed payload shapes.
+            Keep summary short, omit optional JSON whitespace, and include no fields beyond the schema. Prefer the smallest complete set of localized replacements; do not repeat unchanged source or include explanations inside operation fields.
+            If a prior rejection says a WRITE appears truncated, do not emit WRITE or REWRITE_FILE for that path. Emit only bounded REPLACE_LITERAL operations with exact anchors from the current source. A source anchor is one contiguous substring: copy expectedLiteral exactly from one quoted source window and never combine separate windows, prefixes, or suffixes.
         """.trimIndent()
     }
 }
@@ -1376,12 +1453,44 @@ internal fun codingPlanContextPaths(executionPlan: RepositoryExecutionPlan?): Li
     (plan.operations.filter { it.action != "VERIFY" }.map { it.path } +
         plan.scopeCoverage.flatMap { it.evidencePaths })
         .distinct()
+        .take(8)
 }.orEmpty()
+
+internal fun codingWorkPackageContextPaths(executionPlan: RepositoryExecutionPlan): List<String> =
+    (executionPlan.content.operations.filter { it.action != "VERIFY" }.map { it.path } +
+        executionPlan.content.scopeCoverage.flatMap { it.evidencePaths })
+        .distinct()
+
+internal fun codingExecutionPlanProjection(plan: RepositoryExecutionPlan): RepositoryExecutionPlan {
+    val implementationPaths = plan.content.operations
+        .filter { it.action != "VERIFY" }
+        .mapTo(hashSetOf()) { it.path }
+    return plan.copy(
+        content = plan.content.copy(
+            operations = plan.content.operations.filter { it.action != "VERIFY" },
+            evidence = plan.content.evidence.filter { it.path in implementationPaths },
+            scopeCoverage = plan.content.scopeCoverage.map { coverage ->
+                coverage.copy(
+                    evidencePaths = coverage.evidencePaths.filter { it in implementationPaths },
+                    compliantEvidencePaths = coverage.compliantEvidencePaths.filter { it in implementationPaths },
+                )
+            },
+        ),
+    )
+}
+
+internal fun codingWorkPackageProjection(workPackage: ExecutableWorkPackage): ExecutableWorkPackage =
+    workPackage.copy(
+        evidence = WorkPackageEvidenceAuthority(),
+        sources = workPackage.sources.map { source ->
+            source.copy(content = "")
+        },
+    )
 
 internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
     result.status in setOf(CODING_EXECUTION_BLOCKED, CODING_EXECUTION_INTERRUPTED) ||
         (result.status == CODING_EXECUTION_FAILED && (
-            result.revision != null || result.diagnostic == INVALID_CODING_PROPOSAL_DIAGNOSTIC
+            result.revision != null || result.diagnostic?.startsWith(CODING_OUTPUT_REJECTED_PREFIX) == true
         ))
 
 internal fun candidateForbiddenLiteralDiagnostic(
@@ -1576,6 +1685,18 @@ internal fun sourceBackedDeclarationAnchors(contextFile: CodingContextFile): Lis
         .toList()
 }
 
+internal fun firstFailingKotlinTestPath(
+    plan: RepositoryExecutionPlan,
+    diagnostic: String?,
+): String? {
+    if (diagnostic == null || !diagnostic.contains("Unresolved reference")) return null
+    return plan.content.operations.asSequence()
+        .filter { it.action != PLAN_OPERATION_VERIFY }
+        .map { it.path }
+        .filter { it.endsWith("Test.kt") && diagnostic.contains(it) }
+        .firstOrNull()
+}
+
 internal fun sourceGroundedRetryDiagnostic(
     diagnostic: String?,
     repositoryContext: CodingRepositoryContext,
@@ -1584,13 +1705,21 @@ internal fun sourceGroundedRetryDiagnostic(
     val anchors = repositoryContext.files.asSequence()
         .filter { it.path in diagnostic }
         .flatMap { contextFile ->
-            val sourcePrefix = contextFile.content.lineSequence()
-                .filterNot { it.startsWith("[Orchard excerpt lines ") }
-                .joinToString("\n")
-                .let { takeUtf8Prefix(it, MAX_RETRY_SOURCE_PREFIX_BYTES) }
-            val sourceSuffix = contextFile.content.lineSequence()
+            val sourceLines = contextFile.content.lineSequence()
                 .filterNot { it.startsWith("[Orchard excerpt lines ") }
                 .toList()
+            val compilerWindows = compilerDiagnosticLineNumbers(diagnostic, contextFile.path).mapNotNull { lineNumber ->
+                sourceLines.getOrNull(lineNumber - 1)?.let {
+                    sourceLines.subList(
+                        maxOf(0, lineNumber - RETRY_COMPILER_WINDOW_RADIUS - 1),
+                        minOf(sourceLines.size, lineNumber + RETRY_COMPILER_WINDOW_RADIUS),
+                    ).joinToString("\n")
+                }
+            }
+            val sourcePrefix = sourceLines
+                .joinToString("\n")
+                .let { takeUtf8Prefix(it, MAX_RETRY_SOURCE_PREFIX_BYTES) }
+            val sourceSuffix = sourceLines
                 .asReversed()
                 .runningFold(emptyList<String>()) { lines, line -> listOf(line) + lines }
                 .takeWhile { it.joinToString("\n").encodeToByteArray().size <= MAX_RETRY_SOURCE_SUFFIX_BYTES }
@@ -1606,7 +1735,7 @@ internal fun sourceGroundedRetryDiagnostic(
                 .map { takeUtf8Prefix(it.substringAfter(": "), MAX_RETRY_LITERAL_ANCHOR_BYTES) }
                 .take(1)
                 .toList()
-            (literalAnchors + sourcePrefix + sourceSuffix)
+            (literalAnchors + compilerWindows.ifEmpty { listOf(sourcePrefix, sourceSuffix) })
                 .filter(String::isNotEmpty)
                 .distinct()
                 .map { contextFile.path to it }
@@ -1620,6 +1749,13 @@ internal fun sourceGroundedRetryDiagnostic(
         append('.')
     }
 }
+
+private fun compilerDiagnosticLineNumbers(diagnostic: String, path: String): List<Int> =
+    Regex("${Regex.escape(path)}:(\\d+):").findAll(diagnostic)
+        .mapNotNull { it.groupValues[1].toIntOrNull() }
+        .distinct()
+        .take(MAX_RETRY_COMPILER_WINDOWS)
+        .toList()
 
 private fun takeUtf8Prefix(value: String, maxBytes: Int): String {
     var bytes = 0
@@ -1693,11 +1829,16 @@ internal fun codingProposalBehaviorDiagnostic(
             .map { it.groupValues[1] }
             .toList()
     }.distinct()
-    proposal.operations.filter { it.action == CODING_FILE_REPLACE }.forEach { operation ->
+    proposal.operations.filter { it.action in setOf(CODING_FILE_REPLACE, CODING_FILE_WRITE) }.forEach { operation ->
         val original = files[operation.path]?.content ?: return@forEach
-        var candidate = original
-        operation.replacements.forEach { replacement ->
-            candidate = candidate.replaceFirst(replacement.old, replacement.new)
+        var candidate = when (operation.action) {
+            CODING_FILE_WRITE -> operation.content ?: return "WRITE ${operation.path} must include file content."
+            else -> original
+        }
+        if (operation.action == CODING_FILE_REPLACE) {
+            operation.replacements.forEach { replacement ->
+                candidate = candidate.replaceFirst(replacement.old, replacement.new)
+            }
         }
         forbiddenLiterals.forEach { literal ->
             val before = Regex(Regex.escape(literal), RegexOption.IGNORE_CASE).findAll(original).count()
@@ -1712,8 +1853,91 @@ internal fun codingProposalBehaviorDiagnostic(
         ) {
             return "REPLACE ${operation.path} introduces a tautological constant-true assertion; required test assertions must depend on governed production behavior or source."
         }
+        if (isCandidateTestSourcePath(operation.path) &&
+            NULLABLE_ASSERT_TRUE.containsMatchIn(candidate) &&
+            !NULLABLE_ASSERT_TRUE.containsMatchIn(original)
+        ) {
+            return "REPLACE ${operation.path} introduces assertTrue with a nullable condition; assert the nullable value explicitly before testing its property."
+        }
+        if (isCandidateTestSourcePath(operation.path) &&
+            ASSERT_NOT_NULL_CALL.containsMatchIn(candidate) &&
+            !ASSERT_NOT_NULL_CALL.containsMatchIn(original) &&
+            !KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(candidate)
+        ) {
+            return "${operation.action} ${operation.path} introduces assertNotNull without importing kotlin.test.assertNotNull."
+        }
+        if (isCandidateTestSourcePath(operation.path)) {
+            operation.replacements.forEach { replacement ->
+                val replacedEndpoints = CLIENT_ENDPOINT_CALL.findAll(replacement.old).map { it.groupValues[1] }.toSet()
+                val replacementEndpoints = CLIENT_ENDPOINT_CALL.findAll(replacement.new).map { it.groupValues[1] }.toSet()
+                val introducedReplacementEndpoints = replacementEndpoints - replacedEndpoints
+                if (replacedEndpoints.isNotEmpty() && introducedReplacementEndpoints.isNotEmpty()) {
+                    return "REPLACE ${operation.path} adds unrelated client endpoint call${if (introducedReplacementEndpoints.size == 1) "" else "s"} " +
+                        "${introducedReplacementEndpoints.sorted().joinToString()} to an existing endpoint test; extend its current endpoint behavior instead."
+                }
+                val introducedLocals = KOTLIN_LOCAL_DECLARATION.findAll(replacement.new)
+                    .map { it.groupValues[1] }
+                    .toSet() - KOTLIN_LOCAL_DECLARATION.findAll(replacement.old).map { it.groupValues[1] }.toSet()
+                val replacementOffset = original.indexOf(replacement.old)
+                if (replacementOffset >= 0 && introducedLocals.isNotEmpty()) {
+                    val followingSource = original.substring((replacementOffset + replacement.old.length).coerceAtMost(original.length))
+                    val followingLocals = KOTLIN_LOCAL_DECLARATION.findAll(followingSource)
+                        .map { it.groupValues[1] }
+                        .toSet()
+                    val shadowedFollowingLocals = introducedLocals intersect followingLocals
+                    if (shadowedFollowingLocals.isNotEmpty()) {
+                        return "REPLACE ${operation.path} introduces local declaration${if (shadowedFollowingLocals.size == 1) "" else "s"} " +
+                            "${shadowedFollowingLocals.sorted().joinToString()} before an existing declaration in the same test; preserve the existing local names."
+                    }
+                }
+            }
+            val originalEndpoints = CLIENT_ENDPOINT_CALL.findAll(original).map { it.groupValues[1] }.toSet()
+            val candidateEndpoints = CLIENT_ENDPOINT_CALL.findAll(candidate).map { it.groupValues[1] }.toSet()
+            val unrelatedEndpoints = candidateEndpoints - originalEndpoints
+            if (originalEndpoints.isNotEmpty() && unrelatedEndpoints.isNotEmpty()) {
+                return "REPLACE ${operation.path} adds unrelated client endpoint call${if (unrelatedEndpoints.size == 1) "" else "s"} " +
+                    "${unrelatedEndpoints.sorted().joinToString()}; extend the existing endpoint behavior or create a separately scoped test."
+            }
+            val originalDuplicates = duplicateKotlinLocalDeclarations(original)
+            val candidateDuplicates = duplicateKotlinLocalDeclarations(candidate)
+            val introducedDuplicates = candidateDuplicates - originalDuplicates
+            if (introducedDuplicates.isNotEmpty()) {
+                return "REPLACE ${operation.path} introduces duplicate local declaration${if (introducedDuplicates.size == 1) "" else "s"} " +
+                    introducedDuplicates.sorted().joinToString() + "; preserve the existing test's local names."
+            }
+        }
     }
     return null
+}
+
+private fun duplicateKotlinLocalDeclarations(source: String): Set<String> {
+    val duplicates = linkedSetOf<String>()
+    kotlinFunctionBodies(source).forEach { body ->
+        val declarations = KOTLIN_LOCAL_DECLARATION.findAll(body)
+            .map { it.groupValues[1] }
+            .toList()
+        declarations.groupingBy { it }.eachCount()
+            .filterValues { it > 1 }
+            .keys
+            .forEach(duplicates::add)
+    }
+    return duplicates
+}
+
+private fun kotlinFunctionBodies(source: String): List<String> = buildList {
+    KOTLIN_FUNCTION_START.findAll(source).forEach { function ->
+        val openingBrace = function.range.last
+        var depth = 1
+        var index = openingBrace + 1
+        while (index < source.length && depth > 0) {
+            when (source[index]) {
+                '{' -> depth += 1
+                '}' -> depth -= 1
+            }
+            index += 1
+        }
+        if (depth == 0) add(source.substring(openingBrace + 1, index - 1))
+    }
 }
 
 private const val MAX_REJECTED_ANCHOR_DECLARATIONS = 5
@@ -1725,8 +1949,44 @@ private const val MAX_RETRY_SOURCE_PREFIX_BYTES = 512
 private const val MAX_RETRY_SOURCE_SUFFIX_BYTES = 512
 private const val MAX_RETRY_LITERAL_ANCHOR_BYTES = 2_048
 private const val MAX_RETRY_SOURCE_ANCHORS = 4
+private const val MAX_RETRY_COMPILER_WINDOWS = 2
+private const val RETRY_COMPILER_WINDOW_RADIUS = 6
 private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024
-private const val INVALID_CODING_PROPOSAL_DIAGNOSTIC = "The coding model returned invalid or oversized proposal JSON."
+private val CLIENT_ENDPOINT_CALL = Regex("\\bclient\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\(")
+private val KOTLIN_FUNCTION_START = Regex("\\bfun\\b[^\\n{]*\\{")
+private val KOTLIN_LOCAL_DECLARATION = Regex("\\b(?:val|var)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b")
+private val NULLABLE_ASSERT_TRUE = Regex("\\bassertTrue\\s*\\([^\\n]*\\?\\.")
+private val ASSERT_NOT_NULL_CALL = Regex("\\bassertNotNull\\s*\\(")
+private val KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT = Regex("(?m)^import\\s+kotlin\\.test\\.assertNotNull\\s*$")
+internal fun codingModelOutputDiagnostic(
+    generation: ModelGeneration,
+    profile: ModelExecutionProfile,
+    expectedSchema: String,
+    decodeFailure: Throwable?,
+): String {
+    val budgetFailure = when {
+        generation.promptTokens > profile.inputBudgetTokens ->
+            "prompt tokens ${generation.promptTokens} exceed input budget ${profile.inputBudgetTokens}"
+        generation.completionTokens > profile.outputBudgetTokens ->
+            "completion tokens ${generation.completionTokens} exceed output budget ${profile.outputBudgetTokens}"
+        estimateModelTokens(generation.text) > profile.outputBudgetTokens ->
+            "serialized response estimate ${estimateModelTokens(generation.text)} exceeds output budget ${profile.outputBudgetTokens}"
+        else -> null
+    }
+    if (budgetFailure != null) {
+        return "Coding model output rejected for $expectedSchema: $budgetFailure."
+    }
+    val parserFailure = decodeFailure?.message
+        ?.replace(Regex("\\s+"), " ")
+        ?.take(512)
+    return if (parserFailure.isNullOrBlank()) {
+        "Coding model output rejected for $expectedSchema: response was not valid strict JSON."
+    } else {
+        "Coding model output rejected for $expectedSchema: strict JSON decoding failed: $parserFailure"
+    }
+}
+
+private const val CODING_OUTPUT_REJECTED_PREFIX = "Coding model output rejected for "
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
 private const val MIN_SOURCE_ANCHOR_TOKEN_LENGTH = 4
 private val CAMEL_CASE_TOKEN = Regex("[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")

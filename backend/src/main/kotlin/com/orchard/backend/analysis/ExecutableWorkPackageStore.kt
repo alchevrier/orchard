@@ -7,6 +7,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -43,43 +44,51 @@ class TransientExecutableWorkPackageStore : ExecutableWorkPackageStore {
 class FileExecutableWorkPackageStore(private val directory: Path) : ExecutableWorkPackageStore {
     private val path = directory.resolve("executable-work-packages.jsonl")
     private val lockPath = directory.resolve("executable-work-packages.lock")
+    private val processLock = PROCESS_LOCKS.computeIfAbsent(lockPath.toAbsolutePath().normalize()) { Any() }
     private val json = Json { encodeDefaults = true }
 
-    @Synchronized
     override fun load(): List<ExecutableWorkPackage> {
-        Files.createDirectories(directory)
-        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
-            lock.lock().use { loadUnlocked() }
-        }
-    }
-
-    @Synchronized
-    override fun append(packageAuthority: ExecutableWorkPackage) {
-        Files.createDirectories(directory)
-        FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
-            lock.lock().use {
-                val packages = loadUnlocked()
-                validateExecutableWorkPackageRecord(packageAuthority, packages)
-                appendUnlocked(packageAuthority)
+        return synchronized(processLock) {
+            Files.createDirectories(directory)
+            FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+                lock.lock().use { loadUnlocked() }
             }
         }
     }
 
-    @Synchronized
+    override fun append(packageAuthority: ExecutableWorkPackage) {
+        synchronized(processLock) {
+            Files.createDirectories(directory)
+            FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+                lock.lock().use {
+                    val packages = loadUnlocked()
+                    validateExecutableWorkPackageRecord(packageAuthority, packages)
+                    appendUnlocked(packageAuthority)
+                }
+            }
+        }
+    }
+
     override fun appendNext(
         runId: Long,
         create: (packageId: Long, revision: Int) -> ExecutableWorkPackage,
     ): ExecutableWorkPackage {
-        Files.createDirectories(directory)
-        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
-            lock.lock().use {
-                val packages = loadUnlocked()
-                val packageAuthority = create(packages.size + 1L, packages.count { it.runId == runId } + 1)
-                validateExecutableWorkPackageRecord(packageAuthority, packages)
-                appendUnlocked(packageAuthority)
-                packageAuthority
+        return synchronized(processLock) {
+            Files.createDirectories(directory)
+            FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+                lock.lock().use {
+                    val packages = loadUnlocked()
+                    val packageAuthority = create(packages.size + 1L, packages.count { it.runId == runId } + 1)
+                    validateExecutableWorkPackageRecord(packageAuthority, packages)
+                    appendUnlocked(packageAuthority)
+                    packageAuthority
+                }
             }
         }
+    }
+
+    private companion object {
+        val PROCESS_LOCKS = ConcurrentHashMap<Path, Any>()
     }
 
     private fun loadUnlocked(): List<ExecutableWorkPackage> = mutableListOf<ExecutableWorkPackage>().also { packages ->

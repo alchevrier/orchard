@@ -117,6 +117,36 @@ class ExecutableWorkPackageTest {
     }
 
     @Test
+    fun `compiler admits one source operation per reviewable package`() {
+        val original = plan()
+        val plan = original.copy(content = original.content.copy(operations = original.content.operations +
+            ExecutionPlanOperation(
+                2,
+                PLAN_OPERATION_CREATE,
+                "src/Next.kt",
+                null,
+                "Add the next independently verifiable step.",
+                listOf("The next step is available."),
+            )))
+
+        val packageAuthority = compileExecutableWorkPackage(
+            packageId = 1,
+            revision = 1,
+            definition = definition(),
+            plan = plan,
+            repositoryContext = context("fun answer() = 1\n"),
+        )
+
+        assertEquals(listOf("src/Main.kt"), packageAuthority.ownership.paths)
+        assertEquals(listOf("src/Main.kt"), packageAuthority.operations.operations.map { it.path })
+        assertEquals(
+            listOf(WORK_PACKAGE_ACTION_READ_SOURCE, WORK_PACKAGE_ACTION_REWRITE_FILE, WORK_PACKAGE_ACTION_RUN_CHECK),
+            packageAuthority.ownership.allowedActions,
+        )
+        assertTrue(verifyExecutableWorkPackage(packageAuthority).adequate)
+    }
+
+    @Test
     fun `recompiler pins review correction without widening package authority`() {
         val prior = workPackage("fun answer() = 1\n")
         val correctionDraft = CandidatePullRequestCorrection(
@@ -149,6 +179,43 @@ class ExecutableWorkPackageTest {
         assertEquals(listOf(correction.correctionId), successor.corrections.map { it.correctionId })
         assertTrue(successor.expectedBehavior.contains(correction.findings.single().observation))
         assertTrue(verifyExecutableWorkPackage(successor).adequate)
+    }
+
+    @Test
+    fun `compile correction selects only named test paths`() {
+        val base = workPackage("fun answer() = 1\n")
+        val prior = base.copy(
+            ownership = base.ownership.copy(
+                paths = listOf("frontend/src/desktopTest/kotlin/ExampleTest.kt", "frontend/src/desktopMain/kotlin/Example.kt"),
+            ),
+            hash = "",
+        ).let { it.copy(hash = executableWorkPackageHash(it)) }
+        val correction = CandidatePullRequestCorrection(
+            correctionId = 8,
+            reviewId = 9,
+            reviewHash = "b".repeat(64),
+            pullRequestId = 4,
+            pullRequestHash = "c".repeat(64),
+            runId = prior.runId,
+            workPackageId = prior.packageId,
+            workPackageHash = prior.hash,
+            correctionTarget = REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE,
+            findings = listOf(
+                CandidatePullRequestReviewFinding(
+                    criterion = "Verification TEST failed: frontend compilation failed.",
+                    observation = "frontend/src/desktopTest/kotlin/ExampleTest.kt:12: Unresolved reference 'answer'.",
+                    severity = "BLOCKER",
+                    correctionTarget = REVIEW_CORRECTION_WORK_PACKAGE_RECOMPILE,
+                    evidenceHashes = listOf("d".repeat(64)),
+                ),
+            ),
+            hash = "",
+        ).let { it.copy(hash = candidatePullRequestCorrectionHash(it)) }
+
+        assertEquals(
+            listOf("frontend/src/desktopTest/kotlin/ExampleTest.kt"),
+            compileFailureCorrectionPaths(prior, correction),
+        )
     }
 
     @Test

@@ -72,6 +72,7 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
     private val bindingPath = directory.resolve("repository-bindings.json")
     private val json = Json { encodeDefaults = true; prettyPrint = true }
     private var bindings = load()
+    private var cachedViews: Pair<Long, Map<Int, RepositoryView>>? = null
 
     @Synchronized
     override fun bind(projectId: Int, requestedPath: String) {
@@ -79,16 +80,27 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
         val updated = bindings + (projectId to RepositoryBinding(projectId, repository.path))
         write(updated.values.sortedBy { it.projectId })
         bindings = updated
+        cachedViews = null
     }
 
-    @Synchronized
-    override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = bindings
-        .filterKeys { it in projectIds }
-        .mapValues { (_, binding) -> inspectExisting(binding) }
+    override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> {
+        val now = System.nanoTime()
+        val selectedBindings = synchronized(this) {
+            cachedViews?.takeIf { now - it.first < VIEW_CACHE_NANOS }
+                ?.second
+                ?.takeIf { cached -> projectIds.all(cached::containsKey) }
+                ?.let { cached -> return cached.filterKeys { it in projectIds } }
+            bindings.filterKeys { it in projectIds }
+        }
+        val inspected = selectedBindings.mapValues { (_, binding) -> inspectExisting(binding) }
+        synchronized(this) {
+            cachedViews = now to inspected
+        }
+        return inspected
+    }
 
-    @Synchronized
     override fun resolveHead(projectId: Int): RepositoryHead? {
-        val binding = bindings[projectId] ?: return null
+        val binding = synchronized(this) { bindings[projectId] } ?: return null
         val root = Path.of(binding.path)
         if (!Files.isDirectory(root)) return null
         val revision = runGit(root, "rev-parse", "--verify", "HEAD")
@@ -321,10 +333,12 @@ class FileRepositoryBindingStore(private val directory: Path) : RepositoryBindin
     private companion object {
         const val FORMAT_VERSION = 1
         const val COMMAND_TIMEOUT_SECONDS = 5L
+        const val VIEW_CACHE_NANOS = 1_000_000_000L
         val compactJson = Json { encodeDefaults = true }
         val GIT_HASH = Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
         val SHA256 = Regex("[0-9a-f]{64}")
     }
+
 }
 
 @Serializable

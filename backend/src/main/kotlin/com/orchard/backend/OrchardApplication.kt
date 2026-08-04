@@ -234,6 +234,7 @@ fun main() {
         codingWorkspaceGateway,
         resourceController,
         repositoryIntelligenceImporter,
+        modelProfileSettingsStore,
     )
     val companyControl = CompanyControlService(
         workspace,
@@ -262,6 +263,7 @@ fun main() {
         candidatePullRequestReviews,
         modelProviders,
         resourceController,
+        modelProfileSettingsStore,
     )
     val candidatePullRequestLearning = CandidatePullRequestLearningService(
         candidatePullRequestStore,
@@ -1742,6 +1744,38 @@ fun Application.workspaceApi(
                 CodingWorkerTickStatus.IDLE -> HttpStatusCode.Conflict
                 CodingWorkerTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
                 else -> HttpStatusCode.Conflict
+            }
+            call.respond(status, result)
+        }
+        post("/api/coding-worker/runs/{runId}/tick") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (codingWorker == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            if (runId == null || runId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = runCatching { codingWorker.tick(runId) }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val status = when (result.status) {
+                CodingWorkerTickStatus.CANDIDATE_COMPLETED -> HttpStatusCode.Created
+                CodingWorkerTickStatus.IDLE,
+                CodingWorkerTickStatus.INTERRUPTED_RECOVERED -> HttpStatusCode.OK
+                CodingWorkerTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
+                CodingWorkerTickStatus.BUSY -> HttpStatusCode.Conflict
+                CodingWorkerTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
+                CodingWorkerTickStatus.INVALID_PROPOSAL,
+                CodingWorkerTickStatus.PLAN_BLOCKED -> HttpStatusCode.UnprocessableEntity
+                CodingWorkerTickStatus.ANALYSIS_REQUIRED,
+                CodingWorkerTickStatus.PLAN_STALE -> HttpStatusCode.Conflict
+                CodingWorkerTickStatus.MODEL_FAILED,
+                CodingWorkerTickStatus.APPLICATION_FAILED,
+                CodingWorkerTickStatus.VERIFICATION_FAILED,
+                CodingWorkerTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
             call.respond(status, result)
         }

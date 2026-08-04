@@ -119,13 +119,17 @@ class FileRepositoryIntelligenceGraphStore(private val directory: Path) : Reposi
     private val path = directory.resolve("repository-intelligence-graphs.jsonl")
     private val lockPath = directory.resolve("repository-intelligence-graphs.lock")
     private val json = Json { encodeDefaults = true }
+    private var cachedGraphs: List<RepositoryIntelligenceGraph>? = null
 
     @Synchronized
     override fun load(): List<RepositoryIntelligenceGraph> {
+        cachedGraphs?.let { return it }
         Files.createDirectories(directory)
-        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+        val graphs = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
             lock.lock().use { loadUnlocked() }
         }
+        cachedGraphs = graphs
+        return graphs
     }
 
     private fun loadUnlocked(): List<RepositoryIntelligenceGraph> = mutableListOf<RepositoryIntelligenceGraph>().also { graphs ->
@@ -161,6 +165,7 @@ class FileRepositoryIntelligenceGraphStore(private val directory: Path) : Reposi
                     channel.force(true)
                 }
                 FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+                cachedGraphs = graphs + graph
                 graph
             }
         }

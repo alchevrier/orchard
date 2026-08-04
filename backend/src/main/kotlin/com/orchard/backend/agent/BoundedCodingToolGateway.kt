@@ -108,7 +108,7 @@ fun CodingWorkspaceGateway.applyBoundedToolBatch(
                 val source = readAuthorizedSource(workspacePath, packageAuthority, batch.expectedRevision, operation.path).content
                 val actualCount = exactLiteralCount(source, literal)
                 require(actualCount == expectedCount) {
-                    "REPLACE_LITERAL ${operation.path} found $actualCount occurrences; expected $expectedCount"
+                    "REPLACE_LITERAL ${operation.path} found $actualCount occurrences at lines ${literalLineNumbers(source, literal)}; expected $expectedCount. Rejected expectedLiteral preview: ${literal.replace("\n", "\\n").take(240)}. Select a contiguous anchor copied from the current repositoryContext for this path, and verify it occurs exactly once."
                 }
                 CodingFileOperation(CODING_FILE_WRITE, operation.path, content = source.replace(literal, replacement))
             }
@@ -160,4 +160,16 @@ private fun exactLiteralCount(source: String, literal: String): Int {
         offset = index + literal.length
     }
     return count
+}
+
+private fun literalLineNumbers(source: String, literal: String): List<Int> {
+    val lineNumbers = mutableListOf<Int>()
+    var offset = 0
+    while (offset <= source.length - literal.length) {
+        val index = source.indexOf(literal, offset)
+        if (index < 0) break
+        lineNumbers += source.substring(0, index).count { it == '\n' } + 1
+        offset = index + literal.length
+    }
+    return lineNumbers
 }

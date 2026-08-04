@@ -230,6 +230,8 @@ class FileConversationStore(private val directory: Path) : ConversationStore {
     private val path = directory.resolve("conversations.jsonl")
     private val lockPath = directory.resolve("conversations.lock")
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false }
+    private var cachedFingerprint: Pair<Long, Long>? = null
+    private var cachedEvents: List<ConversationEvent>? = null
 
     @Synchronized override fun events() = load()
     @Synchronized override fun appendConversation(conversation: Conversation) = append(conversation = conversation)
@@ -264,15 +266,28 @@ class FileConversationStore(private val directory: Path) : ConversationStore {
                     while (bytes.hasRemaining()) channel.write(bytes)
                     channel.force(true)
                 }
+                cachedFingerprint = null
+                cachedEvents = null
             }
         }
     }
 
-    private fun load(): List<ConversationEvent> = loadRecoverableJsonl(path, "conversation authority") { line, _ ->
+    private fun load(): List<ConversationEvent> {
+        val fingerprint = if (Files.exists(path)) {
+            Files.size(path) to Files.getLastModifiedTime(path).toMillis()
+        } else {
+            0L to 0L
+        }
+        cachedEvents?.takeIf { cachedFingerprint == fingerprint }?.let { return it }
+        val events = loadRecoverableJsonl(path, "conversation authority") { line, _ ->
         json.decodeFromString<ConversationEvent>(line)
-    }.also { events ->
+        }.also { events ->
         val accepted = mutableListOf<ConversationEvent>()
         events.forEach { event -> validateConversationEvent(accepted, event); accepted += event }
+        }
+        cachedFingerprint = fingerprint
+        cachedEvents = events
+        return events
     }
 }
 

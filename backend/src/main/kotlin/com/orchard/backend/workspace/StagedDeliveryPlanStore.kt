@@ -73,6 +73,13 @@ data class StageExecutionWorkflowDefinition(
 object StageExecutionWorkflowRegistry {
     private val workflows = listOf(
         StageExecutionWorkflowDefinition(
+            "historical-context-v1",
+            1,
+            "DEPENDENCIES_SETTLED",
+            "ALL_STAGE_NODES_SETTLED",
+            "Preserve historical delivery nodes while allowing completed or cancelled work.",
+        ),
+        StageExecutionWorkflowDefinition(
             "contract-design-v1",
             1,
             "DEPENDENCIES_AND_ARTIFACTS_ACCEPTED",

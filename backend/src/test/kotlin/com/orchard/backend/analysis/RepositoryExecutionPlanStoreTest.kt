@@ -2,9 +2,13 @@ package com.orchard.backend.analysis
 
 import com.orchard.backend.agent.CodingContextFile
 import com.orchard.backend.agent.CodingWorkerAttempt
+import com.orchard.backend.agent.CodingWorkerClaim
+import com.orchard.backend.agent.CodingWorkerEvent
+import com.orchard.backend.agent.CodingWorkerResult
 import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
 import com.orchard.backend.agent.CODING_ATTEMPT_RETRY_AUTHORIZED
+import com.orchard.backend.agent.CODING_EXECUTION_COMPLETED
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import kotlinx.serialization.json.Json
@@ -36,6 +40,68 @@ class RepositoryExecutionPlanStoreTest {
         assertFalse(repositoryPlanRequiresRevision(current, listOf(blocked.copy(executionPlanId = 1))))
         assertFalse(repositoryPlanRequiresRevision(current, listOf(blocked.copy(state = CODING_ATTEMPT_RETRY_AUTHORIZED))))
         assertFalse(repositoryPlanRequiresRevision(current, listOf(blocked, blocked.copy(attemptId = 2, state = CODING_ATTEMPT_RETRY_AUTHORIZED))))
+    }
+
+    @Test
+    fun `committed one-operation candidate requires successor analysis at its revision`() {
+        val plan = plan(2, 2, "a".repeat(40))
+        val claim = CodingWorkerClaim(
+            executionId = 5,
+            runId = plan.runId,
+            attempt = 1,
+            contextHash = "b".repeat(64),
+            workspacePath = "/workspace",
+            bindingFingerprint = "c".repeat(64),
+            executionPlanId = plan.planId,
+            executionPlanHash = plan.hash,
+            workPackageId = 9,
+            workPackageHash = "d".repeat(64),
+            hash = "e".repeat(64),
+        )
+        val result = CodingWorkerResult(
+            executionId = claim.executionId,
+            status = CODING_EXECUTION_COMPLETED,
+            revision = "f".repeat(40),
+            diagnostic = "Candidate revision was committed.",
+            hash = "g".repeat(64),
+        )
+        val events = listOf(
+            CodingWorkerEvent(1, claim = claim),
+            CodingWorkerEvent(2, result = result),
+        )
+
+        assertTrue(completedCandidateRequiresSuccessor(plan, result.revision.orEmpty(), events))
+        assertFalse(completedCandidateRequiresSuccessor(plan, "a".repeat(40), events))
+        assertFalse(completedCandidateRequiresSuccessor(plan, result.revision.orEmpty(), listOf(CodingWorkerEvent(1, claim = claim.copy(workPackageId = null)))))
+    }
+
+    @Test
+    fun `failed candidate requires successor analysis after worktree restoration`() {
+        val plan = plan(2, 2, "a".repeat(40))
+        val claim = CodingWorkerClaim(
+            executionId = 5,
+            runId = plan.runId,
+            attempt = 1,
+            contextHash = "b".repeat(64),
+            workspacePath = "/workspace",
+            bindingFingerprint = "c".repeat(64),
+            executionPlanId = plan.planId,
+            executionPlanHash = plan.hash,
+            workPackageId = 9,
+            workPackageHash = "d".repeat(64),
+            hash = "e".repeat(64),
+        )
+        val result = CodingWorkerResult(
+            executionId = claim.executionId,
+            status = "FAILED",
+            revision = "f".repeat(40),
+            diagnostic = "Verification TEST failed.",
+            hash = "g".repeat(64),
+        )
+        val events = listOf(CodingWorkerEvent(1, claim = claim), CodingWorkerEvent(2, result = result))
+
+        assertTrue(failedCandidatePlanRequiresRevision(plan, events))
+        assertFalse(failedCandidatePlanRequiresRevision(plan.copy(planId = 3), events))
     }
 
     @Test
@@ -310,51 +376,13 @@ class RepositoryExecutionPlanStoreTest {
             )
         ).bufferedReader().use { it.readText() }
 
-        assert(prompt.contains("A valid response has exactly this shape:"))
+        assert(prompt.contains("This stage identifies ownership, existing behavior, and concrete source paths that require mutation."))
         assert(prompt.contains("\"disposition\":\"PARTIALLY_IMPLEMENTED\""))
-        assert(prompt.contains("If priorRejectedCodingPlanDiagnostic is non-null"))
-        assert(prompt.contains("a supplied neighboring authority establishes the owning package and filename convention for a CREATE path"))
-        assert(prompt.contains("The required new file's absence is expected and must not appear in unresolvedQuestions."))
-        assert(prompt.contains("Revise the operation authority to correct that exact plan defect"))
-        assert(prompt.contains("Re-evaluate every blocked source-operation path independently"))
-        assert(prompt.contains("otherwise remove that source operation and classify the path in compliantEvidencePaths"))
-        assert(prompt.contains("A missing, invented, ambiguous, reused, or cosmetic replacement is not by itself proof that a source mutation remains necessary"))
-        assert(prompt.contains("Test or regression scope still requires a CREATE or MODIFY operation on its exact pinned test source path"))
-        assert(prompt.contains("Include exactly the disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage, operations, verificationCommands, and unresolvedQuestions top-level keys."))
-        assert(prompt.contains("copying scope exactly without paraphrasing, omission, or invention"))
-        assert(prompt.contains("or from a path targeted by a CREATE, MODIFY, or DELETE operation"))
-        assert(prompt.contains("classify every evidencePath exactly once"))
-        assert(prompt.contains("include it in compliantEvidencePaths when pinned evidence proves its bytes already satisfy that scope unchanged"))
-        assert(prompt.contains("must not be targeted by any CREATE, MODIFY, or DELETE operation in the plan"))
-        assert(prompt.contains("every referenced order must exist"))
-        assert(prompt.contains("Treat universal scope words such as all, every, and across as exhaustive"))
-        assert(prompt.contains("typed repository evidence selectors evaluated against complete supplied source"))
-        assert(prompt.contains("return those gaps in unresolvedQuestions instead of claiming complete scope coverage"))
-        assert(prompt.contains("matchedDeclarations selected from its complete source before content excerpting"))
-        assert(prompt.contains("do not claim an owner or surface is absent when matchedDeclarations identifies it"))
-        assert(prompt.contains("requiredEvidencePathGroups is deterministic evidence authority"))
-        assert(prompt.contains("forbiddenLiteralFacts is deterministic complete-source compliance authority keyed by exact path and literal"))
-        assert(prompt.contains("never mark a path compliant when one of its forbiddenLiteralFacts has a positive count"))
-        assert(prompt.contains("Group IDs are selector IDs"))
-        assert(prompt.contains("Never omit a grouped path"))
-        assert(prompt.contains("each value is a list of selector IDs"))
-        assert(prompt.contains("copy that exact union to the matching scopeCoverage evidencePaths"))
-        assert(prompt.contains("Any test or regression scope requiring a test source mutation must consume one of those current-plan slots and must never be deferred."))
-        assert(prompt.contains("Scope clauses beginning with Inspect, Analyze, or Audit are evidence-only analysis scope"))
-        assert(prompt.contains("each evidencePath must be the same string as either a CREATE, MODIFY, or DELETE operation path, or an entry in compliantEvidencePaths"))
-        assert(prompt.contains("A VERIFY operation on \".\" or another path never satisfies this path requirement"))
-        assert(prompt.contains("Any implementation scope clause containing the word test or regression"))
-        assert(prompt.contains("including a declarative clause such as \"Deterministic typography regression coverage in src/TypographyTest.kt\""))
-        assert(prompt.contains("requires a CREATE or MODIFY operation on its exact pinned test source path"))
-        assert(prompt.contains("DELETE, VERIFY-only coverage, and compliantEvidencePaths cannot satisfy that clause"))
-        assert(prompt.contains("put only the created or modified test source path in evidencePaths"))
-        assert(prompt.contains("never put a requiredScope value in acceptanceCriteria"))
-        assert(prompt.contains("verificationCommands may contain only exact values from requiredVerificationCommands"))
-        assert(prompt.contains("copy path and contentHash together as one unchanged pair from requiredEvidence"))
-        assert(prompt.contains("Every operation, including every CREATE, MODIFY, DELETE, and VERIFY operation, must contain at least one exact value from requiredAcceptanceCriteria"))
-        assert(prompt.contains("never emit an empty acceptanceCriteria array"))
-        assert(prompt.contains("Copy values from requiredAcceptanceCriteria and requiredVerificationCommands exactly; do not paraphrase them."))
-        assert(prompt.contains("Copy the complete requiredAcceptanceCriteria list into the final VERIFY operation"))
+        assert(prompt.contains("Deterministic compilation owns scope coverage, evidence-only paths, acceptance criteria, verification commands, operation ordering, test-path synthesis, and operation-budget enforcement."))
+        assert(prompt.contains("Do not emit scopeCoverage or operations."))
+        assert(prompt.contains("\"sourcePaths\":[\"exact repository-relative paths that require source mutation\"]"))
+        assert(prompt.contains("Every sourcePaths entry must be a concrete path from the supplied implementation context."))
+        assert(prompt.contains("If priorRejectedCodingPlanDiagnostic is present"))
     }
 
     @Test
@@ -1066,24 +1094,27 @@ class RepositoryExecutionPlanStoreTest {
         }
 
         assertEquals(
-            "Execution plan has 3 source operations; at most 2 are allowed for this bounded coding slice. " +
+            "Execution plan has 13 source operations; at most 12 are allowed for this bounded coding slice. " +
                 "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan.",
-            repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations.take(3))),
+            repositorySourceOperationBudgetDiagnostic(original.copy(operations = (1..13).map { order ->
+                ExecutionPlanOperation(order, PLAN_OPERATION_MODIFY, "src/Owner$order.kt", null, "Update owner $order.", listOf("Behavior works."))
+            })),
         )
-        assertNull(repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations.take(2))))
+        assertNull(repositorySourceOperationBudgetDiagnostic(original.copy(operations = operations)))
         val requiredThree = original.copy(
-            operations = operations.take(3),
+            operations = (1..13).map { order ->
+                ExecutionPlanOperation(order, PLAN_OPERATION_MODIFY, "src/Owner$order.kt", null, "Update owner $order.", listOf("Behavior works."))
+            },
             scopeCoverage = listOf(ExecutionPlanScopeCoverage(
                 scope = "Required owners and focused tests",
-                evidencePaths = operations.take(3).map(ExecutionPlanOperation::path),
-                operationOrders = listOf(1, 2, 3),
+                evidencePaths = (1..13).map { "src/Owner$it.kt" },
+                operationOrders = (1..13).toList(),
             )),
         )
-        assertNull(repositorySourceOperationBudgetDiagnostic(requiredThree))
         assertEquals(
-            "Execution plan has 4 source operations; at most 3 are allowed for this bounded coding slice. " +
+            "Execution plan has 13 source operations; at most 12 are allowed for this bounded coding slice. " +
                 "Classify unchanged pinned paths as compliant evidence and defer additional mutations to a successor plan.",
-            repositorySourceOperationBudgetDiagnostic(requiredThree.copy(operations = operations)),
+            repositorySourceOperationBudgetDiagnostic(requiredThree),
         )
     }
 
@@ -1403,26 +1434,15 @@ class RepositoryExecutionPlanStoreTest {
             listOf(
                 Triple(1, PLAN_OPERATION_MODIFY, "frontend/src/main/Theme.kt"),
                 Triple(2, PLAN_OPERATION_MODIFY, "frontend/src/main/Inbox.kt"),
-                Triple(3, PLAN_OPERATION_VERIFY, "."),
+                Triple(3, PLAN_OPERATION_MODIFY, "frontend/src/test/TypographyTest.kt"),
+                Triple(4, PLAN_OPERATION_VERIFY, "."),
             ),
             compiledMissingTest.operations.map { Triple(it.order, it.action, it.path) },
         )
-        assertEquals(listOf(listOf(1, 2), listOf(3)), compiledMissingTest.scopeCoverage.map { it.operationOrders })
-        assertEquals(
-            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
-                "frontend/src/test/TypographyTest.kt. DELETE and compliant evidence cannot satisfy regression scope.",
-            repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledMissingTest),
-        )
-        assertEquals(
-            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
-                "frontend/src/test/TypographyTest.kt. DELETE and compliant evidence cannot satisfy regression scope.",
-            repositoryScopeCoverageDiagnostic(scope, compiledMissingTest),
-        )
-        assertEquals(
-            "Scope coverage 2 requires a CREATE or MODIFY operation for its pinned test source path: " +
-                "frontend/src/test/TypographyTest.kt. DELETE and compliant evidence cannot satisfy regression scope.",
-            repositoryScopeAuthorityDiagnostic(scope, selectors, context, compiledMissingTest),
-        )
+        assertEquals(listOf(listOf(1, 2), listOf(3, 4)), compiledMissingTest.scopeCoverage.map { it.operationOrders })
+        assertNull(repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, compiledMissingTest))
+        assertNull(repositoryScopeCoverageDiagnostic(scope, compiledMissingTest))
+        assertNull(repositoryScopeAuthorityDiagnostic(scope, selectors, context, compiledMissingTest))
         assertNull(repositoryAcceptanceCoverageDiagnostic(listOf("Behavior works."), compiledMissingTest))
         assertNull(repositoryOperationShapeDiagnostic(context, compiledMissingTest))
         assertEquals(
@@ -1458,10 +1478,21 @@ class RepositoryExecutionPlanStoreTest {
                 ),
             ),
         )
+        val scopeWithEvidenceOnlyClause = scope + "Produce source-diff and promotion evidence."
+        val compiledMissingEvidenceOnlyScope = compileRepositoryScopeAuthority(
+            scopeWithEvidenceOnlyClause,
+            selectors,
+            context,
+            complete,
+        )
+        assertEquals(scopeWithEvidenceOnlyClause, compiledMissingEvidenceOnlyScope.scopeCoverage.map { it.scope })
+        assertEquals(emptyList<String>(), compiledMissingEvidenceOnlyScope.scopeCoverage.last().evidencePaths)
+        assertEquals(listOf(4), compiledMissingEvidenceOnlyScope.scopeCoverage.last().operationOrders)
+        assertEquals(emptyList<String>(), compiledMissingEvidenceOnlyScope.scopeCoverage.last().compliantEvidencePaths)
     }
 
     @Test
-    fun `scope authority retains linked create paths outside existing-file selectors`() {
+    fun `scope authority excludes unselected create paths`() {
         val scope = listOf("Backend correlation authority and focused tests")
         val test = "backend/src/test/CorrelationTest.kt"
         val created = "backend/src/main/Correlation.kt"
@@ -1489,12 +1520,12 @@ class RepositoryExecutionPlanStoreTest {
 
         val compiled = compileRepositoryScopeAuthority(scope, selectors, context, output)
 
-        assertEquals(listOf(created, test), compiled.scopeCoverage.single().evidencePaths)
-        assertEquals(listOf(1, 2), compiled.scopeCoverage.single().operationOrders)
+        assertEquals(listOf(test), compiled.scopeCoverage.single().evidencePaths)
+        assertEquals(listOf(1), compiled.scopeCoverage.single().operationOrders)
     }
 
     @Test
-    fun `backend scope authority links retained backend create after reconciliation`() {
+    fun `scope authority does not leak unlinked backend creates`() {
         val scope = listOf("Backend correlation authority and focused tests", "Compose Desktop Inbox integration and focused tests")
         val test = "frontend/src/desktopTest/ui/DurableConversationWorkspaceTest.kt"
         val created = "backend/src/main/correlation/ConversationDomainCorrelation.kt"
@@ -1518,7 +1549,7 @@ class RepositoryExecutionPlanStoreTest {
 
         val compiled = compileRepositoryScopeAuthority(scope, selectors, context, output)
 
-        assertEquals(listOf(1, 2), compiled.scopeCoverage[0].operationOrders)
+        assertEquals(listOf(1), compiled.scopeCoverage[0].operationOrders)
         assertEquals(listOf(1), compiled.scopeCoverage[1].operationOrders)
     }
 

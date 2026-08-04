@@ -25,6 +25,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.net.HttpURLConnection
 import java.net.URI
 import java.time.Duration
@@ -236,7 +239,13 @@ class CatalogModelProvider(
             authorize()
             header(HttpHeaders.ContentType, ContentType.Application.Json)
             if (structured) {
-                setBody(OllamaCatalogRequest(binding.model, prompt, think = think, options = options))
+                setBody(OllamaCatalogRequest(
+                    binding.model,
+                    prompt,
+                    format = ollamaResponseFormat(prompt),
+                    think = think,
+                    options = options,
+                ))
             } else {
                 setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options))
             }
@@ -276,8 +285,8 @@ class CatalogModelProvider(
         install(ContentNegotiation) { json(json) }
         install(HttpTimeout) {
             connectTimeoutMillis = 10_000
-            requestTimeoutMillis = 300_000
-            socketTimeoutMillis = 300_000
+            requestTimeoutMillis = 900_000
+            socketTimeoutMillis = 900_000
         }
         install(HttpRedirect) { checkHttpMethod = true; allowHttpsDowngrade = false }
         followRedirects = false
@@ -430,12 +439,61 @@ class ModelProviderRegistry(
     override fun close() = activeProviders.forEach(ModelProvider::close)
 }
 
+private fun ollamaResponseFormat(prompt: String): JsonElement = if ("bounded-coding-tool-batch-v1" in prompt) {
+    val requiresLiteralReplacements = "appears truncated; use bounded replacements" in prompt ||
+        "REQUIRE_LITERAL_REPLACEMENTS" in prompt
+    buildJsonObject {
+        put("type", "object")
+        put("additionalProperties", false)
+        put("required", buildJsonArray {
+            add(JsonPrimitive("summary"))
+            add(JsonPrimitive("expectedRevision"))
+            add(JsonPrimitive("operations"))
+        })
+        put("properties", buildJsonObject {
+            put("summary", buildJsonObject { put("type", "string") })
+            put("expectedRevision", buildJsonObject { put("type", "string") })
+            put("operations", buildJsonObject {
+                put("type", "array")
+                put("minItems", 1)
+                put("items", buildJsonObject {
+                    put("type", "object")
+                    put("required", buildJsonArray {
+                        add(JsonPrimitive("action"))
+                        add(JsonPrimitive("path"))
+                        if (requiresLiteralReplacements) {
+                            add(JsonPrimitive("expectedLiteral"))
+                            add(JsonPrimitive("replacement"))
+                            add(JsonPrimitive("expectedCount"))
+                        }
+                    })
+                    put("properties", buildJsonObject {
+                        put("action", buildJsonObject {
+                            put("type", "string")
+                            if (requiresLiteralReplacements) {
+                                put("enum", buildJsonArray { add(JsonPrimitive("REPLACE_LITERAL")) })
+                            }
+                        })
+                        put("path", buildJsonObject { put("type", "string") })
+                        put("content", buildJsonObject { put("type", buildJsonArray { add(JsonPrimitive("string")); add(JsonPrimitive("null")) }) })
+                        put("expectedLiteral", buildJsonObject { put("type", buildJsonArray { add(JsonPrimitive("string")); add(JsonPrimitive("null")) }) })
+                        put("replacement", buildJsonObject { put("type", buildJsonArray { add(JsonPrimitive("string")); add(JsonPrimitive("null")) }) })
+                        put("expectedCount", buildJsonObject { put("type", buildJsonArray { add(JsonPrimitive("integer")); add(JsonPrimitive("null")) }) })
+                    })
+                })
+            })
+        })
+    }
+} else {
+    JsonPrimitive("json")
+}
+
 @Serializable
 private data class OllamaCatalogRequest(
     val model: String,
     val prompt: String,
     val stream: Boolean = false,
-    val format: String = "json",
+    val format: JsonElement = JsonPrimitive("json"),
     val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
 )

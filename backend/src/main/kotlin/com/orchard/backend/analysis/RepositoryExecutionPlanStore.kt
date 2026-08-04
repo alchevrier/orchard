@@ -45,6 +45,8 @@ data class ExecutionPlanOperation(
     val symbol: String? = null,
     val instruction: String,
     val acceptanceCriteria: List<String>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val dependsOnOrders: List<Int> = emptyList(),
 )
 
 @Serializable
@@ -131,6 +133,8 @@ class FileRepositoryExecutionPlanStore(private val directory: Path) : Repository
     private val path = directory.resolve("repository-analysis-plans.jsonl")
     private val lockPath = directory.resolve("repository-analysis-plans.lock")
     private val json = Json { encodeDefaults = true }
+    private var cachedPlans: List<RepositoryExecutionPlan>? = null
+    private var cachedFileStamp: Pair<Long, Long>? = null
 
     @Synchronized
     override fun load(): List<RepositoryExecutionPlan> {
@@ -140,7 +144,12 @@ class FileRepositoryExecutionPlanStore(private val directory: Path) : Repository
         }
     }
 
-    private fun loadUnlocked(): List<RepositoryExecutionPlan> = mutableListOf<RepositoryExecutionPlan>().also { plans ->
+    private fun loadUnlocked(): List<RepositoryExecutionPlan> {
+        val fileStamp = if (Files.exists(path)) {
+            Files.getLastModifiedTime(path).toMillis() to Files.size(path)
+        } else null
+        cachedPlans?.takeIf { cachedFileStamp == fileStamp }?.let { return it }
+        return mutableListOf<RepositoryExecutionPlan>().also { plans ->
         loadRecoverableJsonl(path, "repository-analysis-plans") { line, recordNumber ->
             val envelope = json.decodeFromString<RepositoryExecutionPlanEnvelope>(line)
             require(envelope.version == FORMAT_VERSION) { "Unsupported repository execution plan format ${envelope.version}" }
@@ -150,6 +159,9 @@ class FileRepositoryExecutionPlanStore(private val directory: Path) : Repository
             validateRepositoryExecutionPlan(envelope.value, plans)
             plans += envelope.value
             envelope.value
+        }
+            cachedPlans = plans.toList()
+            cachedFileStamp = fileStamp
         }
     }
 
@@ -170,6 +182,8 @@ class FileRepositoryExecutionPlanStore(private val directory: Path) : Repository
                     channel.force(true)
                 }
                 FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+                cachedPlans = null
+                cachedFileStamp = null
             }
         }
     }
@@ -202,6 +216,8 @@ class FileRepositoryExecutionPlanStore(private val directory: Path) : Repository
             channel.force(true)
         }
         FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+        cachedPlans = null
+        cachedFileStamp = null
     }
 
     private companion object {
@@ -254,6 +270,10 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
     require(plan.content.operations.all {
         it.action in PLAN_OPERATIONS && validOperationPath(it) && it.instruction.isNotBlank() && it.acceptanceCriteria.isNotEmpty()
     }) { "Execution plan operation is invalid" }
+    require(plan.content.operations.all { operation ->
+        operation.dependsOnOrders.distinct().size == operation.dependsOnOrders.size &&
+            operation.dependsOnOrders.all { dependency -> dependency in 1 until operation.order }
+    }) { "Execution plan operation dependencies must reference distinct earlier operations" }
     require(plan.content.scopeCoverage.all { coverage ->
         coverage.scope.isNotBlank() && coverage.evidencePaths.isNotEmpty() && coverage.evidencePaths.all(::validPath) &&
             coverage.compliantEvidencePaths.distinct().size == coverage.compliantEvidencePaths.size &&

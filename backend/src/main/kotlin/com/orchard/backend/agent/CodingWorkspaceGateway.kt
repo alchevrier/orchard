@@ -14,6 +14,7 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.Comparator
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -96,6 +97,13 @@ interface CodingWorkspaceGateway {
     fun collectIntelligenceContext(workspacePath: String, repositoryRevision: String, paths: List<String>): CodingRepositoryContext =
         collectAnalysisContext(workspacePath, paths.joinToString(" "))
     fun currentRevision(workspacePath: String): String? = null
+    fun treeMatches(workspacePath: String, firstRevision: String, secondRevision: String): Boolean = false
+    fun revisionCompatible(
+        workspacePath: String,
+        baseRevision: String,
+        currentRevision: String,
+        relevantPaths: List<String>,
+    ): Boolean = false
     fun applyAndCommit(workspacePath: String, proposal: CodingPatchProposal, executionId: Long): CodingCandidate
     fun revertCandidate(workspacePath: String, candidateRevision: String, executionId: Long): String? = null
     fun restoreTree(workspacePath: String, expectedRevision: String, baseRevision: String, runId: Long): String? = null
@@ -111,6 +119,8 @@ interface CodingWorkspaceGateway {
 class LocalCodingWorkspaceGateway(
     private val policyCatalog: ToolchainPolicyCatalog = FileToolchainPolicyCatalog(),
 ) : CodingWorkspaceGateway {
+    private val contextLocks = ConcurrentHashMap<String, Any>()
+
     override fun collectContext(workspacePath: String, query: String): CodingRepositoryContext =
         collectContext(workspacePath, query, MAX_CONTEXT_FILES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FILE_BYTES)
 
@@ -274,6 +284,37 @@ class LocalCodingWorkspaceGateway(
             ?.output
     }
 
+    override fun treeMatches(workspacePath: String, firstRevision: String, secondRevision: String): Boolean {
+        val root = validatedRoot(workspacePath)
+        requireGitWorkspace(root)
+        require(firstRevision.matches(GIT_HASH) && secondRevision.matches(GIT_HASH)) {
+            "Tree comparison revisions are invalid"
+        }
+        return run(root, listOf("git", "diff", "--quiet", firstRevision, secondRevision, "--"), GIT_COMMAND_TIMEOUT_SECONDS)
+            .exitCode == 0
+    }
+
+    override fun revisionCompatible(
+        workspacePath: String,
+        baseRevision: String,
+        currentRevision: String,
+        relevantPaths: List<String>,
+    ): Boolean {
+        val root = validatedRoot(workspacePath)
+        requireGitWorkspace(root)
+        require(baseRevision.matches(GIT_HASH) && currentRevision.matches(GIT_HASH)) {
+            "Revision compatibility hashes are invalid"
+        }
+        if (relevantPaths.isEmpty()) return false
+        val mergeBase = run(root, listOf("git", "merge-base", baseRevision, currentRevision), GIT_COMMAND_TIMEOUT_SECONDS)
+        if (mergeBase.exitCode != 0) return false
+        val merge = run(root, listOf("git", "merge-tree", "--write-tree", baseRevision, currentRevision), GIT_COMMAND_TIMEOUT_SECONDS)
+        if (merge.exitCode != 0) return false
+        val arguments = mutableListOf("git", "diff", "--quiet", baseRevision, currentRevision, "--")
+        arguments += relevantPaths.distinct()
+        return run(root, arguments, GIT_COMMAND_TIMEOUT_SECONDS).exitCode == 0
+    }
+
     override fun revertCandidate(workspacePath: String, candidateRevision: String, executionId: Long): String {
         val root = validatedRoot(workspacePath)
         requireGitWorkspace(root)
@@ -345,6 +386,18 @@ class LocalCodingWorkspaceGateway(
         maxFileBytes: Int,
         includePath: (String) -> Boolean = { true },
         selectors: List<RepositoryEvidenceSelector> = emptyList(),
+    ): CodingRepositoryContext = synchronized(contextLocks.computeIfAbsent(workspacePath) { Any() }) {
+        collectContextUncached(workspacePath, query, maxFiles, maxBytes, maxFileBytes, includePath, selectors)
+    }
+
+    private fun collectContextUncached(
+        workspacePath: String,
+        query: String,
+        maxFiles: Int,
+        maxBytes: Int,
+        maxFileBytes: Int,
+        includePath: (String) -> Boolean = { true },
+        selectors: List<RepositoryEvidenceSelector> = emptyList(),
     ): CodingRepositoryContext {
         val root = validatedRoot(workspacePath)
         requireGitWorkspace(root)
@@ -380,9 +433,9 @@ class LocalCodingWorkspaceGateway(
                 }
             }
             val lowerPath = relative.lowercase()
-            val lowerContent = source.lowercase()
+            val sourceTokens = contextTokens(source)
             val score = queryTokens.sumOf { token ->
-                (if (lowerPath.contains(token)) 20 else 0) + (if (lowerContent.contains(token)) 1 else 0)
+                (if (lowerPath.contains(token)) 20 else 0) + (if (token in sourceTokens) 1 else 0)
             } + foundationScore(relative) + ownershipScore(relative, queryTokens, selectorIds, affineOwnerNames)
             RankedContextFile(
                 score,
@@ -420,6 +473,16 @@ class LocalCodingWorkspaceGateway(
                 segment.contains("benchmark") || segment == "test" || segment.endsWith("test") ||
                 segment == "tests" || segment.endsWith("tests")
         }
+
+    private fun isSuspiciousRewrite(original: String, candidate: String): Boolean {
+        if (original.length < 1_000) return false
+        if (candidate.length * 3 < original.length) return true
+        val originalImports = importLineCount(original)
+        return originalImports >= 3 && importLineCount(candidate) * 2 < originalImports
+    }
+
+    private fun importLineCount(source: String): Int = source.lineSequence()
+        .count { it.trimStart().startsWith("import ") }
 
     override fun applyAndCommit(
         workspacePath: String,
@@ -467,6 +530,13 @@ class LocalCodingWorkspaceGateway(
                     }
                     require(!Files.exists(target) || Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
                         "WRITE target must be a regular file"
+                    }
+                    if (Files.isRegularFile(target) && !Files.isSymbolicLink(target)) {
+                        val original = Files.readString(target, Charsets.UTF_8)
+                        val candidate = requireNotNull(operation.content)
+                        require(!isSuspiciousRewrite(original, candidate)) {
+                            "WRITE ${operation.path} appears truncated; use bounded replacements or provide the complete source"
+                        }
                     }
                     require(!Files.exists(target) || !Files.readAllBytes(target).contentEquals(operation.content.toByteArray(Charsets.UTF_8))) {
                         "WRITE ${operation.path} content matches the existing file; every required operation must change its target"
@@ -770,10 +840,7 @@ class LocalCodingWorkspaceGateway(
         return "/test/" in normalized || normalized.substringAfterLast('/').contains("test.")
     }
 
-    private fun tokens(value: String): Set<String> = value.lowercase()
-        .split(Regex("[^a-z0-9_]+"))
-        .filter { it.length >= 3 }
-        .toSet()
+    private fun tokens(value: String): Set<String> = contextTokens(value)
 
     private fun sha256(value: String): String = sha256Content(value)
 
@@ -799,7 +866,7 @@ class LocalCodingWorkspaceGateway(
         const val MAX_GENESIS_CONTEXT_FILES = 6
         const val MAX_GENESIS_CONTEXT_BYTES = 4 * 1024
         const val MAX_OPERATIONS = 32
-        const val MAX_PATCH_BYTES = 512 * 1024
+        const val MAX_PATCH_BYTES = 2 * 1024 * 1024
         const val MAX_PATH_LENGTH = 512
         const val MAX_SUMMARY_LENGTH = 2_000
         const val MAX_COMMAND_LENGTH = 1_024
@@ -912,19 +979,21 @@ private enum class KotlinLexicalState { CODE, STRING, CHARACTER, RAW_STRING, BLO
 internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, maxBytes: Int): String {
     require(maxBytes > 0)
     if (content.encodeToByteArray().size <= maxBytes) return content
-    val lexicalSummary = lexicalMatchSummary(content, queryTokens, maxBytes / 4)
+    val boundedQueryTokens = queryTokens.asSequence().sorted().take(MAX_LEXICAL_SUMMARY_TOKENS).toSet()
+    val lexicalSummary = lexicalMatchSummary(content, boundedQueryTokens, maxBytes / 4)
     val excerptBudget = maxBytes - lexicalSummary.encodeToByteArray().size
     if (excerptBudget <= 0) return lexicalSummary
     val lines = content.split('\n')
     val matches = lines.indices.mapNotNull { index ->
-        val lower = lines[index].lowercase()
-        val matchedTokens = queryTokens.filterTo(mutableSetOf(), lower::contains)
+        val lineTokens = contextTokens(lines[index])
+        val matchedTokens = boundedQueryTokens.filterTo(mutableSetOf(), lineTokens::contains)
         matchedTokens.size.takeIf { it > 0 }?.let { tokenScore ->
+            val declaration = lineTokens.any(SOURCE_DECLARATION_TOKENS::contains)
             ExcerptMatch(
                 index,
-                tokenScore + if (SOURCE_DECLARATION.containsMatchIn(lower)) DECLARATION_MATCH_BONUS else 0,
+                tokenScore + if (declaration) DECLARATION_MATCH_BONUS else 0,
                 matchedTokens,
-                SOURCE_DECLARATION.containsMatchIn(lower),
+                declaration,
             )
         }
     }
@@ -961,10 +1030,13 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
     windows.sortedBy { it.first }.forEach { window -> excerpt.append(excerptSection(lines, window)) }
     return excerpt.toString().takeIf { it.length > lexicalSummary.length } ?: buildString {
         append(lexicalSummary)
-        lines.asSequence().runningFold("") { result, line -> "$result$line\n" }
-            .takeWhile { it.encodeToByteArray().size <= excerptBudget }
-            .lastOrNull()
-            ?.let(::append)
+        var bytes = 0
+        for (line in lines) {
+            val lineBytes = line.encodeToByteArray().size + 1
+            if (bytes + lineBytes > excerptBudget) break
+            append(line).append('\n')
+            bytes += lineBytes
+        }
     }
 }
 
@@ -996,19 +1068,36 @@ internal fun planContextFileBudgets(sourceBytes: List<Int>, totalBytes: Int, min
 
 private fun lexicalMatchSummary(content: String, queryTokens: Set<String>, maxBytes: Int): String {
     if (maxBytes <= 0 || queryTokens.isEmpty()) return ""
-    val lower = content.lowercase()
-    val entries = queryTokens.asSequence()
-        .map { token -> token to Regex(Regex.escape(token)).findAll(lower).count() }
+    val summaryTokens = queryTokens.asSequence().sorted().take(MAX_LEXICAL_SUMMARY_TOKENS).toSet()
+    val counts = summaryTokens.associateWith { 0 }.toMutableMap()
+    var tokenStart = -1
+    content.forEachIndexed { index, character ->
+        if (character in 'a'..'z' || character in 'A'..'Z' || character in '0'..'9' || character == '_') {
+            if (tokenStart < 0) tokenStart = index
+        } else if (tokenStart >= 0) {
+            val token = content.substring(tokenStart, index).lowercase()
+            counts[token]?.let { counts[token] = it + 1 }
+            tokenStart = -1
+        }
+    }
+    if (tokenStart >= 0) {
+        val token = content.substring(tokenStart).lowercase()
+        counts[token]?.let { counts[token] = it + 1 }
+    }
+    val entries = summaryTokens.asSequence()
+        .map { token -> token to counts.getValue(token) }
         .sortedWith(compareBy<Pair<String, Int>> { it.second == 0 }.thenBy { it.first })
         .map { (token, count) -> "$token=$count" }
         .toList()
-    return entries.asSequence().runningFold("[Orchard lexical query counts: ") { summary, entry ->
-        val separator = if (summary.endsWith(": ")) "" else ", "
-        "$summary$separator$entry"
-    }.map { "$it]\n" }
-        .takeWhile { it.encodeToByteArray().size <= maxBytes }
-        .lastOrNull()
-        .orEmpty()
+    val summary = StringBuilder("[Orchard lexical query counts: ")
+    for ((index, entry) in entries.withIndex()) {
+        val separator = if (index == 0) "" else ", "
+        val addition = "$separator$entry"
+        if ((summary.length + addition.length + 2) > maxBytes) break
+        summary.append(addition)
+    }
+    if (summary.length == "[Orchard lexical query counts: ".length) return ""
+    return summary.append("]\n").toString()
 }
 
 internal fun rejectedReplacementAnchor(old: String): String {
@@ -1051,8 +1140,9 @@ internal fun replacementAnchorDiagnostic(content: String, old: String): String =
 internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>): List<String> {
     val matches = content.lineSequence().mapIndexedNotNull { index, line ->
         val lower = line.lowercase()
-        if (!SOURCE_DECLARATION.containsMatchIn(lower)) return@mapIndexedNotNull null
-        val matchedTokens = queryTokens.filterTo(mutableSetOf(), lower::contains)
+        val lineTokens = contextTokens(lower)
+        if (lineTokens.none(SOURCE_DECLARATION_TOKENS::contains)) return@mapIndexedNotNull null
+        val matchedTokens = queryTokens.filterTo(mutableSetOf(), lineTokens::contains)
         matchedTokens.size.takeIf { it > 0 }?.let {
             SourceDeclarationMatch(index, line.trim().take(MAX_DECLARATION_CHARS), matchedTokens)
         }
@@ -1081,11 +1171,12 @@ private fun excerptSection(lines: List<String>, window: IntRange): String = buil
 private const val MAX_EXCERPT_WINDOWS = 64
 private const val EXCERPT_CONTEXT_LINES = 3
 private const val DECLARATION_MATCH_BONUS = 2
+private const val MAX_LEXICAL_SUMMARY_TOKENS = 128
 private const val MAX_MATCHED_DECLARATIONS = 64
 private const val MAX_DECLARATION_CHARS = 512
 private const val MAX_AMBIGUOUS_ANCHOR_CONTEXT_LINES = 3
 private const val MAX_AMBIGUOUS_ANCHOR_SUGGESTIONS = 8
-private val SOURCE_DECLARATION = Regex("\\b(class|interface|object|fun|val|var|typealias)\\b")
+private val SOURCE_DECLARATION_TOKENS = setOf("class", "interface", "object", "fun", "val", "var", "typealias")
 private data class ExcerptMatch(
     val index: Int,
     val score: Int,
@@ -1101,6 +1192,26 @@ private data class SourceDeclarationMatch(
 internal fun sha256Content(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8))
     .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+internal fun contextTokens(value: String): Set<String> {
+    val tokens = linkedSetOf<String>()
+    var start = -1
+    fun add(end: Int) {
+        if (start >= 0 && end - start >= 3) {
+            tokens += value.substring(start, end).lowercase()
+        }
+        start = -1
+    }
+    value.forEachIndexed { index, character ->
+        if (character in 'A'..'Z' || character in 'a'..'z' || character in '0'..'9' || character == '_') {
+            if (start < 0) start = index
+        } else {
+            add(index)
+        }
+    }
+    add(value.length)
+    return tokens
+}
 
 private fun exactOccurrenceCount(content: String, value: String): Int {
     var count = 0

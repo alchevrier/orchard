@@ -1592,8 +1592,17 @@ class WorkspaceStore(
         return WorkflowMutationResult(WorkflowMutationStatus.RECORDED, snapshot(MESSAGE_WORKFLOW_EVENT))
     }
 
-    @Synchronized
     fun snapshot(messageCode: Int): WorkspaceSnapshot {
+        val projectIds = synchronized(this) {
+            entities.take(committedEntityCount)
+                .filter { it.type == ENTITY_PROJECT }
+                .mapTo(linkedSetOf()) { it.id }
+        }
+        val repositoryViews = repositoryBindings.views(projectIds)
+        val genesisViews = synchronized(this) {
+            projectGenesisViews(projectIds, repositoryViews)
+        }
+        return synchronized(this) {
         val resources = linkedMapOf<String, WorkspaceResource>()
         resources["focus"] = WorkspaceResource(
             "FOCUS",
@@ -1614,16 +1623,13 @@ class WorkspaceStore(
                 action = "id=${entity.id};parent=${entity.parentId};status=$projectedStatus",
             )
         }
-        val projectIds = entities.take(committedEntityCount)
-            .filter { it.type == ENTITY_PROJECT }
-            .mapTo(linkedSetOf()) { it.id }
         val latestDefinitions = workDefinitions.groupBy { it.workItemId }
             .values
             .map { revisions -> revisions.maxBy { it.revision } }
             .sortedBy { it.workItemId }
         return WorkspaceSnapshot(
             resources,
-            repositoryBindings.views(projectIds),
+            repositoryViews,
             workflowRuns.map(::runView),
             latestDefinitions,
             definitionProposalViews(),
@@ -1634,8 +1640,9 @@ class WorkspaceStore(
             circuitDispatchViews(),
             designRevisionViews(),
             projectGovernanceViews(),
-            projectGenesisViews(projectIds),
+            genesisViews,
         )
+        }
     }
 
     @Synchronized
@@ -2421,12 +2428,15 @@ class WorkspaceStore(
     private fun currentProjectGenesis(projectId: Int): ProjectGenesisRevision? =
         projectGenesisEvents.lastOrNull { it.revision.projectId == projectId }?.revision
 
-    private fun projectGenesisViews(projectIds: Set<Int>): List<ProjectGenesisView> = projectIds.sorted().map { projectId ->
+    private fun projectGenesisViews(
+        projectIds: Set<Int>,
+        repositoryViews: Map<Int, RepositoryView>,
+    ): List<ProjectGenesisView> = projectIds.sorted().map { projectId ->
         val revision = currentProjectGenesis(projectId)
         val phase = revision?.phase ?: GENESIS_CLASSIFICATION
         val organizationBlocked = revision?.classification == PROJECT_ORGANIZATION_GOVERNED
         val repositoryRequired = revision?.classification == PROJECT_EXISTING_LOCAL &&
-            repositoryBindings.views(setOf(projectId))[projectId] == null
+            repositoryViews[projectId] == null
         ProjectGenesisView(
             projectId = projectId,
             phase = phase,
@@ -3112,7 +3122,15 @@ class WorkspaceStore(
                 ) return null
                 val dependencyStages = dependencies.map { dependency -> nodeStage[dependency] ?: return null }
                 if (dependencyStages.any { it >= ordinal }) return null
-                if ((dependencyStages.maxOrNull()?.plus(1) ?: 1) != ordinal) return null
+                val priorStageAllowsSettledTransition = ordinal > 1 &&
+                    StageExecutionWorkflowRegistry.resolve(
+                        submission.stages[ordinal - 2].executionWorkflowId.trim(),
+                        submission.stages[ordinal - 2].executionWorkflowVersion,
+                    )?.exitPolicy == "ALL_STAGE_NODES_SETTLED"
+                if (
+                    (dependencyStages.maxOrNull()?.plus(1) ?: 1) != ordinal &&
+                    !(dependencies.isEmpty() && priorStageAllowsSettledTransition)
+                ) return null
                 val produces = submittedNode.produces.map { artifact ->
                     artifact.copy(
                         kind = artifact.kind.trim(),
@@ -3251,16 +3269,22 @@ class WorkspaceStore(
         val stage = plan.stages.single { candidate -> candidate.nodes.any { it.nodeId == node.nodeId } }
         val previousStage = plan.stages.getOrNull(stage.ordinal - 2)
         if (previousStage != null) {
-            val incomplete = previousStage.nodes.filterNot { planNodeComplete(it.workItemId) }
-            if (incomplete.isNotEmpty()) {
-                return "Waiting for stage ${previousStage.ordinal} to satisfy its exit policy."
-            }
             val previousPolicy = requireNotNull(
                 StageExecutionWorkflowRegistry.resolve(
                     previousStage.executionWorkflowId,
                     previousStage.executionWorkflowVersion,
                 )
             )
+            val incomplete = previousStage.nodes.filterNot {
+                if (previousPolicy.exitPolicy == "ALL_STAGE_NODES_SETTLED") {
+                    planNodeSettled(it.workItemId)
+                } else {
+                    planNodeComplete(it.workItemId)
+                }
+            }
+            if (incomplete.isNotEmpty()) {
+                return "Waiting for stage ${previousStage.ordinal} to satisfy its exit policy."
+            }
             if (
                 previousPolicy.exitPolicy == "ALL_STAGE_NODES_DONE_AND_OUTPUTS_ACCEPTED" &&
                 previousStage.nodes.any { producer ->
@@ -3276,7 +3300,20 @@ class WorkspaceStore(
         val priorNodes = plan.stages.filter { it.ordinal < stage.ordinal }.flatMap { it.nodes }
         if (
             policy.entryPolicy in setOf("ALL_PRIOR_STAGE_NODES_DONE", "ALL_PRIOR_STAGE_OUTPUTS_ACCEPTED") &&
-            priorNodes.any { !planNodeComplete(it.workItemId) }
+            priorNodes.any { prior ->
+                val priorStage = plan.stages.single { candidate -> candidate.nodes.any { it.nodeId == prior.nodeId } }
+                val priorPolicy = requireNotNull(
+                    StageExecutionWorkflowRegistry.resolve(
+                        priorStage.executionWorkflowId,
+                        priorStage.executionWorkflowVersion,
+                    )
+                )
+                if (priorPolicy.exitPolicy == "ALL_STAGE_NODES_SETTLED") {
+                    !planNodeSettled(prior.workItemId)
+                } else {
+                    !planNodeComplete(prior.workItemId)
+                }
+            }
         ) return "Waiting for all prior circuit stages."
         if (
             policy.entryPolicy == "ALL_PRIOR_STAGE_OUTPUTS_ACCEPTED" &&

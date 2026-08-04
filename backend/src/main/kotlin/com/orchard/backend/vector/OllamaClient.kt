@@ -69,8 +69,8 @@ class OllamaClient(
         install(ContentNegotiation) { json(json) }
         install(HttpTimeout) {
             connectTimeoutMillis = 10_000
-            requestTimeoutMillis = 120_000
-            socketTimeoutMillis = 120_000
+            requestTimeoutMillis = 900_000
+            socketTimeoutMillis = 900_000
         }
     }
     private val triagePrompt = loadArchitectPrompt("architect_phase0_triage.md")

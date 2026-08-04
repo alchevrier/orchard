@@ -203,6 +203,55 @@ class ModelProviderCatalogTest {
     }
 
     @Test
+    fun `Ollama adapter constrains bounded coding batches to operation objects`() = runTest {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += (request.body as? TextContent)?.text.orEmpty()
+            respond(
+                """{"response":"{\"summary\":\"change\",\"expectedRevision\":\"abc\",\"operations\":[{\"action\":\"REPLACE_LITERAL\",\"path\":\"src/Main.kt\"}]}","done":true}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+
+        provider.executeCodingPatch("Return bounded-coding-tool-batch-v1 only.", 128, 4_096)
+        provider.close()
+
+        assertTrue(requests.single().contains("\"format\":{\"type\":\"object\""))
+        assertTrue(requests.single().contains("\"operations\""))
+        assertTrue(requests.single().contains("\"items\":{\"type\":\"object\""))
+    }
+
+    @Test
+    fun `Ollama adapter constrains a truncated-write correction to literal replacements`() = runTest {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += (request.body as? TextContent)?.text.orEmpty()
+            respond(
+                """{"response":"{\"summary\":\"repair\",\"expectedRevision\":\"abc\",\"operations\":[{\"action\":\"REPLACE_LITERAL\",\"path\":\"src/Main.kt\"}]}","done":true}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+
+        provider.executeCodingPatch(
+            "Return bounded-coding-tool-batch-v1 only. REQUIRE_LITERAL_REPLACEMENTS",
+            128,
+            4_096,
+        )
+        provider.close()
+
+        assertTrue(requests.single().contains("\"enum\":[\"REPLACE_LITERAL\"]"))
+        assertTrue(
+            requests.single().contains(
+                "\"required\":[\"action\",\"path\",\"expectedLiteral\",\"replacement\",\"expectedCount\"]",
+            ),
+        )
+    }
+
+    @Test
     fun `Ollama adapter retries empty JSON mode without weakening strict decoding`() = runTest {
         val requests = mutableListOf<String>()
         val diagnostics = mutableListOf<String>()

@@ -586,9 +586,10 @@ class ConversationConductorService(
         )
     }
 
-    fun projectWorkspaceActivity(workspace: WorkspaceStore): Int = synchronized(authorityLock) {
-        var events = store.events()
+    fun projectWorkspaceActivity(workspace: WorkspaceStore): Int {
         val snapshot = workspace.snapshot(MESSAGE_READY)
+        return synchronized(authorityLock) {
+        var events = store.events()
         val commands = events.mapNotNull { it.command }.associateBy { it.commandId }
         val correlatedRuns = events.mapNotNull { it.execution }
             .filter { it.state == COMMAND_CORRELATED && it.downstreamType == "WORKFLOW_RUN" }
@@ -647,6 +648,7 @@ class ConversationConductorService(
             }
         }
         projected
+        }
     }
 
     fun projectCompanyActivity(companyViews: List<CompanyProjectView>): Int = synchronized(authorityLock) {
