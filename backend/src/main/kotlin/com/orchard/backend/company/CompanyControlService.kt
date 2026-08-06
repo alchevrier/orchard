@@ -456,10 +456,10 @@ class CompanyControlService(
         if (!head.clean || head.commitHash.equals(run.context.repository.commitHash, ignoreCase = true)) {
             return CompanyMutationResult(CompanyMutationStatus.EVIDENCE_STALE)
         }
-        if (workspace.requireAuditRepair(
-                runId,
-                "Accepted candidate ${acceptance.candidateRevision} is stale against clean destination ${head.commitHash}; " +
-                    "a successor will revalidate the change from the current repository head.",
+        if (run.state == RUN_STATE_DONE && workspace.requireAuditRepair(
+            runId,
+            "Accepted candidate ${acceptance.candidateRevision} is stale against clean destination ${head.commitHash}; " +
+                "a successor will revalidate the change from the current repository head.",
             ).status != com.orchard.backend.workspace.WorkflowMutationStatus.RECORDED
         ) return CompanyMutationResult(CompanyMutationStatus.STORAGE_UNAVAILABLE)
         if (workspace.cancelWorkflow(runId).status != com.orchard.backend.workspace.WorkflowMutationStatus.RECORDED) {
