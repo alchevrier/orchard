@@ -8,6 +8,7 @@ import com.orchard.backend.workspace.ModelCapabilityProfile
 import com.orchard.backend.workspace.ProjectGenesisRevision
 import com.orchard.backend.workspace.RepositoryBindingStore
 import com.orchard.backend.workspace.RUN_STATE_DONE
+import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_BLOCKED
 import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.TransientRepositoryBindingStore
 import com.orchard.backend.workspace.WorkflowStartStatus
@@ -26,7 +27,7 @@ const val PHASE_LOCAL_PROMOTION = "LOCAL_PROMOTION"
 const val PHASE_OBSERVATION = "OBSERVATION"
 
 internal fun stalePromotionRecoveryEligible(runState: String): Boolean =
-    runState in setOf(RUN_STATE_DONE, RUN_STATE_EVIDENCE_PENDING)
+    runState in setOf(RUN_STATE_DONE, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED)
 
 enum class CompanyMutationStatus {
     RECORDED,

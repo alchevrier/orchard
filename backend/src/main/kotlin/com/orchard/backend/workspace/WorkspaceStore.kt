@@ -2116,7 +2116,8 @@ class WorkspaceStore(
                 val effectiveSignal = decision.signal.ifBlank { legacyDecisionSignal(decision) }
                 if (effectiveSignal == SIGNAL_AUDIT_REPAIR_REQUIRED) {
                     require(
-                        decision.fromState == RUN_STATE_DONE && decision.toState == RUN_STATE_EVIDENCE_BLOCKED &&
+                        decision.fromState in setOf(RUN_STATE_DONE, RUN_STATE_EVIDENCE_PENDING) &&
+                            decision.toState == RUN_STATE_EVIDENCE_BLOCKED &&
                             !decision.accepted && event.evidence == null && event.judgment == null
                     ) { "Workflow event ${event.eventId} contains an invalid audit repair transition" }
                 } else {
