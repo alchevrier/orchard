@@ -480,12 +480,12 @@ class CompanyControlService(
     fun acceptedPromotionRunIds(): List<Long> {
         val promotedAcceptanceIds = store.loadEvents().mapNotNull { it.promotion }
             .mapTo(hashSetOf()) { it.acceptanceId }
-        val completedRunIds = workspace.snapshot(MESSAGE_READY).workflowRuns
-            .filter { it.state == RUN_STATE_DONE }
+        val eligibleRunIds = workspace.snapshot(MESSAGE_READY).workflowRuns
+            .filter { stalePromotionRecoveryEligible(it.state) }
             .mapTo(hashSetOf()) { it.runId }
         return store.loadEvents().mapNotNull { it.acceptance }
             .asSequence()
-            .filter { it.acceptanceId !in promotedAcceptanceIds && it.runId in completedRunIds }
+            .filter { it.acceptanceId !in promotedAcceptanceIds && it.runId in eligibleRunIds }
             .map { it.runId }
             .distinct()
             .sorted()
