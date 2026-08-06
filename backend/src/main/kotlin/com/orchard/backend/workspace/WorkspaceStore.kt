@@ -292,7 +292,7 @@ class WorkspaceStore(
         val parentId = validateWorkflowHierarchy(intent)
         if (lastWorkflowResult != WORKFLOW_ACCEPTED) return false
         if (
-            intent.entityTypeId in setOf(ENTITY_STORY, ENTITY_TASK, ENTITY_BUG) &&
+            intent.entityTypeId in setOf(ENTITY_STORY, ENTITY_TASK) &&
             activeStagedPlan(parentId)?.stages?.flatMap { it.nodes }?.any { planNodeStarted(it.workItemId) } == true
         ) return false
         return appendEntity(
@@ -303,6 +303,50 @@ class WorkspaceStore(
             intent.boundWorkflowId,
             intent.conversationCommand,
         )
+    }
+
+    @Synchronized
+    fun recordExternalVerificationBug(
+        runId: Long,
+        affectedModule: String,
+        command: String,
+        outputHash: String,
+        summary: String,
+    ): Int? {
+        check(!batchActive) { "External verification findings cannot be recorded during another workspace batch" }
+        val run = workflowRuns.singleOrNull { it.runId == runId } ?: return null
+        val workItem = entity(run.context.workItemId, ENTITY_TASK) ?: return null
+        val story = entity(workItem.parentId, ENTITY_STORY) ?: return null
+        val marker = "externalVerificationRunId=$runId\naffectedModule=$affectedModule\ncommand=$command\noutputHash=$outputHash"
+        entities.firstOrNull { it.type == ENTITY_BUG && it.parentId == story.id && it.content.startsWith(marker) }
+            ?.let { return it.id }
+
+        beginBatch()
+        return try {
+            val title = "External verification failure in $affectedModule"
+            val content = "$marker\n\n${summary.take(4_000)}"
+            if (!applyIntent(DocumentIntent(
+                    actionTypeId = ACTION_CREATE,
+                    entityTypeId = ENTITY_BUG,
+                    boundWorkflowId = DEFAULT_DELIVERY_WORKFLOW_ID,
+                    projectId = run.context.projectId,
+                    epicId = story.parentId,
+                    storyId = story.id,
+                    title = title,
+                    content = content,
+                ))
+            ) {
+                rollbackBatch()
+                null
+            } else {
+                val bugId = lastCreatedId
+                commitBatch()
+                bugId
+            }
+        } catch (_: Exception) {
+            if (batchActive) rollbackBatch()
+            null
+        }
     }
 
     @Synchronized

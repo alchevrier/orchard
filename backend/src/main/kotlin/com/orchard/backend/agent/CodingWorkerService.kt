@@ -10,7 +10,6 @@ import com.orchard.backend.analysis.PLAN_OPERATION_VERIFY
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
-import com.orchard.backend.analysis.WorkPackageEvidenceAuthority
 import com.orchard.backend.analysis.compileExecutableWorkPackage
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
@@ -86,11 +85,35 @@ private data class CodingWorkerModelEnvelope(
     val forbiddenActions: List<String>,
     val requiredOutputSchema: String,
     val currentRevision: String,
-    val run: WorkflowRunView,
+    val run: CodingWorkerRunAuthority,
     val executionPlan: RepositoryExecutionPlan? = null,
-    val workPackage: ExecutableWorkPackage? = null,
+    val workPackage: CodingWorkerWorkPackageAuthority? = null,
     val priorRejectedCodingDiagnostic: String? = null,
     val repositoryContext: CodingRepositoryContext,
+)
+
+@Serializable
+private data class CodingWorkerRunAuthority(
+    val runId: Long,
+    val state: String,
+    val title: String,
+    val content: String,
+)
+
+@Serializable
+internal data class CodingWorkerWorkPackageAuthority(
+    val packageId: Long,
+    val packageHash: String,
+    val requestedOutcome: String,
+    val requiredBehavior: String,
+    val acceptanceCriteria: List<String>,
+    val ownershipPaths: List<String>,
+    val createPaths: List<String>,
+    val requiredImplementationPaths: List<String>,
+    val allowedActions: List<String>,
+    val operations: List<com.orchard.backend.analysis.WorkPackageOperation>,
+    val expectedBehavior: List<String>,
+    val checks: List<com.orchard.backend.analysis.WorkPackageCheck>,
 )
 
 class CodingWorkerService(
@@ -125,6 +148,7 @@ class CodingWorkerService(
         bootstrapApplicationFailureBlocks()
         bootstrapTerminalPlanBlocks()
         bootstrapRecurrentRetryBlocks()
+        bootstrapCodingEnvelopeBudgetRetries()
     }
 
     fun executions(): List<CodingWorkerExecutionView> = codingWorkerExecutions(workerStore.loadEvents())
@@ -217,7 +241,8 @@ class CodingWorkerService(
         val newestPlan = repositoryAnalysis?.plans()
             ?.filter { it.runId == runId }
             ?.maxByOrNull { it.revision }
-        executions.singleOrNull { it.claim.runId == runId && it.result == null }
+        executions.filter { it.claim.runId == runId && it.result == null }
+            .minByOrNull { it.claim.executionId }
             ?.takeIf { interrupted ->
                 repositoryAnalysis == null || newestPlan?.let { plan ->
                     interrupted.claim.executionPlanId == plan.planId &&
@@ -232,7 +257,8 @@ class CodingWorkerService(
             )
             return appendResult(events, interrupted.claim, result, CodingWorkerTickStatus.INTERRUPTED_RECOVERED)
         }
-        executions.singleOrNull { it.claim.runId == runId && it.result == null }
+        executions.filter { it.claim.runId == runId && it.result == null }
+            .minByOrNull { it.claim.executionId }
             ?.let { superseded ->
                 val result = terminalResult(
                     superseded.claim.executionId,
@@ -317,18 +343,20 @@ class CodingWorkerService(
         val workPackage = executionPlan?.let { plan ->
             val definition = run.workDefinition
                 ?: return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_BLOCKED, diagnostic = "The accepted plan has no work-definition authority.")
-            val restrictedCorrectionPath = executions.asReversed().firstNotNullOfOrNull { execution ->
+            val restrictedCorrectionPaths = executions.asReversed().firstNotNullOfOrNull { execution ->
+                externalVerificationRetryPaths(execution)?.takeIf { it.isNotEmpty() }
+            } ?: executions.asReversed().firstNotNullOfOrNull { execution ->
                 execution.result?.takeIf { it.status == CODING_EXECUTION_FAILED }?.diagnostic
-                    ?.let { diagnostic -> firstFailingKotlinTestPath(plan, diagnostic) }
+                    ?.let { diagnostic -> firstFailingKotlinTestPath(plan, diagnostic)?.let(::listOf) }
             }
             runCatching {
                 workPackageStore.load().lastOrNull {
                     it.runId == run.runId && it.design.executionPlanId == plan.planId &&
                         it.design.executionPlanHash == plan.hash && it.intent.definitionId == definition.definitionId &&
                         it.intent.definitionHash == definition.hash &&
-                        (restrictedCorrectionPath == null || it.ownership.paths == listOf(restrictedCorrectionPath))
+                        (restrictedCorrectionPaths == null || it.ownership.paths == restrictedCorrectionPaths)
                 } ?: run {
-                    val packagePaths = restrictedCorrectionPath?.let(::listOf) ?: codingWorkPackageContextPaths(plan)
+                    val packagePaths = restrictedCorrectionPaths ?: codingWorkPackageContextPaths(plan)
                     val packageContexts = packagePaths.map { path ->
                         workspaceGateway.collectIntelligenceContext(
                             workspacePath,
@@ -348,7 +376,7 @@ class CodingWorkerService(
                             plan,
                             packageContext,
                             repositoryRevision = requireNotNull(currentRevision),
-                            restrictedPaths = restrictedCorrectionPath?.let(::setOf).orEmpty(),
+                            restrictedPaths = restrictedCorrectionPaths?.toSet().orEmpty(),
                         )
                     }
                 }
@@ -1037,6 +1065,17 @@ class CodingWorkerService(
                     }.getOrElse { return "Verification ${requirement.kind} could not run: ${it.message.orEmpty()}" }
                 }
                 val failed = observations.firstOrNull { it.exitCode != 0 }
+                val externalModule = failed?.let { externalVerificationModule(it, candidate) }
+                if (failed != null && externalModule != null) {
+                    val bugId = workspace.recordExternalVerificationBug(
+                        runId = run.runId,
+                        affectedModule = externalModule,
+                        command = failed.command,
+                        outputHash = failed.outputHash,
+                        summary = failed.summary,
+                    ) ?: return "External verification failure could not be recorded as a bug ticket."
+                    continue
+                }
                 if (failed != null) failed else VerificationObservation(
                     commands.last().evidenceCommand,
                     0,
@@ -1065,6 +1104,27 @@ class CodingWorkerService(
             if (!recorded.passed) return "Verification ${requirement.kind} failed: ${recorded.summary}"
         }
         return null
+    }
+
+    private fun externalVerificationModule(
+        observation: VerificationObservation,
+        candidate: CodingCandidate,
+    ): String? {
+        val candidateModules = candidate.changedPaths
+            .mapNotNull { it.substringBefore('/', missingDelimiterValue = "").takeIf(String::isNotBlank) }
+            .toSet()
+        if (candidateModules.isEmpty()) return null
+        val testedModules = GRADLE_TASK_MODULE.findAll(observation.summary)
+            .map { it.groupValues[1] }
+            .toSet()
+        return testedModules.firstOrNull { it !in candidateModules }
+    }
+
+    private fun externalVerificationRetryPaths(execution: CodingWorkerExecutionView): List<String>? {
+        val result = execution.result?.takeIf { it.status == CODING_EXECUTION_FAILED } ?: return null
+        val candidate = CodingCandidate(result.revision ?: return null, result.changedPaths)
+        val observation = VerificationObservation("", 1, "", result.diagnostic)
+        return externalVerificationModule(observation, candidate)?.let { candidate.changedPaths.distinct().sorted() }
     }
 
     private fun runStillActionable(expected: WorkflowRunView): Boolean =
@@ -1359,6 +1419,51 @@ class CodingWorkerService(
             }
     }
 
+    private fun bootstrapCodingEnvelopeBudgetRetries() {
+        val latestPlans = repositoryAnalysis?.plans()
+            ?.groupBy { it.runId }
+            ?.mapValues { (_, plans) -> plans.maxByOrNull { it.revision } }
+            .orEmpty()
+        val executions = codingWorkerExecutions(workerStore.loadEvents())
+        attemptStore.load()
+            .groupBy { Triple(it.runId, it.executionPlanId, it.executionPlanHash) }
+            .values
+            .forEach { attempts ->
+                val latest = attempts.lastOrNull() ?: return@forEach
+                val currentPlan = latestPlans[latest.runId]
+                if (currentPlan?.planId != latest.executionPlanId || currentPlan.hash != latest.executionPlanHash) {
+                    return@forEach
+                }
+                val envelopeBudgetBlocked = latest.state == CODING_ATTEMPT_BLOCKED &&
+                    latest.diagnostic.startsWith(CODING_ENVELOPE_BUDGET_DIAGNOSTIC)
+                val deferredAfterConsumedRetry = latest.state == CODING_ATTEMPT_RETRY_CONSUMED &&
+                    executions.lastOrNull {
+                        it.claim.runId == latest.runId &&
+                            it.claim.executionPlanId == latest.executionPlanId &&
+                            it.claim.executionPlanHash == latest.executionPlanHash
+                    }?.result?.status == CODING_EXECUTION_DEFERRED
+                if (!envelopeBudgetBlocked && !deferredAfterConsumedRetry) {
+                    return@forEach
+                }
+                val recoveryAttempts = attempts.count { it.diagnostic == AUTOMATIC_ENVELOPE_BUDGET_RETRY_DIAGNOSTIC }
+                if (recoveryAttempts >= MAX_AUTOMATIC_ENVELOPE_BUDGET_RETRIES) {
+                    return@forEach
+                }
+                attemptStore.appendNext { attemptId ->
+                    CodingWorkerAttempt(
+                        attemptId = attemptId,
+                        runId = latest.runId,
+                        executionPlanId = latest.executionPlanId,
+                        executionPlanHash = latest.executionPlanHash,
+                        state = CODING_ATTEMPT_RETRY_AUTHORIZED,
+                        resultStatus = CodingWorkerTickStatus.RETRY_AUTHORIZED.name,
+                        diagnostic = AUTOMATIC_ENVELOPE_BUDGET_RETRY_DIAGNOSTIC,
+                        proposalHash = latest.proposalHash,
+                    )
+                }
+            }
+    }
+
     private companion object {
         const val CODING_WORKFLOW_STEP_ID = "DELIVER_CHANGE:CODING_PATCH"
         const val CODING_PROPOSAL_SCHEMA = "coding-patch-proposal-v2"
@@ -1396,11 +1501,11 @@ class CodingWorkerService(
 internal fun codingExecutionBlockRemains(executionStatus: String?, authorityState: String?): Boolean =
     executionStatus == CODING_EXECUTION_BLOCKED && authorityState != CODING_ATTEMPT_RETRY_AUTHORIZED
 
-internal fun codingWorkerRunProjection(run: WorkflowRunView): WorkflowRunView = run.copy(
-    evidence = emptyList(),
-    attempts = emptyList(),
-    decisions = emptyList(),
-    judgments = emptyList(),
+private fun codingWorkerRunProjection(run: WorkflowRunView): CodingWorkerRunAuthority = CodingWorkerRunAuthority(
+    runId = run.runId,
+    state = run.state,
+    title = run.context.title,
+    content = run.context.content,
 )
 
 internal fun codingRunCanExecute(
@@ -1508,12 +1613,20 @@ internal fun codingExecutionPlanProjection(plan: RepositoryExecutionPlan): Repos
     )
 }
 
-internal fun codingWorkPackageProjection(workPackage: ExecutableWorkPackage): ExecutableWorkPackage =
-    workPackage.copy(
-        evidence = WorkPackageEvidenceAuthority(),
-        sources = workPackage.sources.map { source ->
-            source.copy(content = "")
-        },
+internal fun codingWorkPackageProjection(workPackage: ExecutableWorkPackage): CodingWorkerWorkPackageAuthority =
+    CodingWorkerWorkPackageAuthority(
+        packageId = workPackage.packageId,
+        packageHash = workPackage.hash,
+        requestedOutcome = workPackage.intent.requestedOutcome,
+        requiredBehavior = workPackage.intent.requiredBehavior,
+        acceptanceCriteria = workPackage.intent.acceptanceCriteria,
+        ownershipPaths = workPackage.ownership.paths,
+        createPaths = workPackage.ownership.createPaths,
+        requiredImplementationPaths = workPackage.ownership.requiredImplementationPaths,
+        allowedActions = workPackage.ownership.allowedActions,
+        operations = workPackage.operations.operations,
+        expectedBehavior = workPackage.expectedBehavior,
+        checks = workPackage.checks,
     )
 
 internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
@@ -2004,6 +2117,7 @@ private const val MAX_RETRY_SOURCE_ANCHORS = 4
 private const val MAX_RETRY_COMPILER_WINDOWS = 2
 private const val RETRY_COMPILER_WINDOW_RADIUS = 6
 private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024
+private val GRADLE_TASK_MODULE = Regex("(?m):([A-Za-z][A-Za-z0-9_-]*):[A-Za-z][A-Za-z0-9_-]*")
 private val CLIENT_ENDPOINT_CALL = Regex("\\bclient\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\(")
 private val KOTLIN_FUNCTION_START = Regex("\\bfun\\b[^\\n{]*\\{")
 private val KOTLIN_LOCAL_DECLARATION = Regex("\\b(?:val|var)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b")
@@ -2040,6 +2154,9 @@ internal fun codingModelOutputDiagnostic(
 }
 
 private const val CODING_OUTPUT_REJECTED_PREFIX = "Coding model output rejected for "
+private const val CODING_ENVELOPE_BUDGET_DIAGNOSTIC = "Coding envelope exceeds the model input budget."
+private const val AUTOMATIC_ENVELOPE_BUDGET_RETRY_DIAGNOSTIC = "Coding retries automatically after an envelope-budget repair."
+private const val MAX_AUTOMATIC_ENVELOPE_BUDGET_RETRIES = 2
 private const val SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES = 4_096
 private const val MIN_SOURCE_ANCHOR_TOKEN_LENGTH = 4
 private val CAMEL_CASE_TOKEN = Regex("[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")

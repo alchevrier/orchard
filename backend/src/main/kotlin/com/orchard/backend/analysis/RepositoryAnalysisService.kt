@@ -5,6 +5,7 @@ import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.CodingWorkerAttempt
 import com.orchard.backend.agent.CodingWorkerAttemptStore
 import com.orchard.backend.agent.CodingWorkerEvent
+import com.orchard.backend.agent.CodingWorkerExecutionView
 import com.orchard.backend.agent.CodingWorkerStore
 import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.CODING_ATTEMPT_BLOCKED
@@ -188,8 +189,30 @@ class RepositoryAnalysisService(
             .forEach { run ->
                 val baseRevision = workspaceGateway.currentRevision(requireNotNull(run.context.workspaceReservation).path)
                     ?: return@forEach
-                val authorization = attempts.lastOrNull { it.runId == run.runId && it.baseRevision == baseRevision }
-                    ?.takeIf { it.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED }
+                val latest = attempts.lastOrNull { it.runId == run.runId && it.baseRevision == baseRevision }
+                    ?: return@forEach
+                if (latest.state == ANALYSIS_ATTEMPT_BLOCKED && recoverableAnalysisInterruption(latest)) {
+                    attemptStore.appendNext { attemptId ->
+                        RepositoryAnalysisAttempt(
+                            attemptId = attemptId,
+                            runId = run.runId,
+                            baseRevision = baseRevision,
+                            state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                            resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
+                            diagnostic = "Repository analysis resumes automatically after process interruption.",
+                            promptHash = latest.promptHash,
+                        )
+                    }
+                    return@forEach
+                }
+                if (latest.state == ANALYSIS_ATTEMPT_BLOCKED &&
+                    latest.resultStatus == RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name &&
+                    automaticCorrectionCount(run.runId, baseRevision) < MAX_AUTOMATIC_ANALYSIS_CORRECTIONS
+                ) {
+                    authorizeAutomaticCorrection(run.runId, baseRevision, latest.promptHash)
+                    return@forEach
+                }
+                val authorization = latest.takeIf { it.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED }
                     ?: return@forEach
                 val interrupted = workspace.modelExecutions(run.context.workItemId)
                     .filter {
@@ -207,6 +230,17 @@ class RepositoryAnalysisService(
                         state = ANALYSIS_ATTEMPT_BLOCKED,
                         resultStatus = RepositoryAnalysisTickStatus.CANCELLED.name,
                         diagnostic = "Repository analysis execution was interrupted before producing an admissible plan.",
+                        promptHash = interrupted.promptHash,
+                    )
+                }
+                attemptStore.appendNext { attemptId ->
+                    RepositoryAnalysisAttempt(
+                        attemptId = attemptId,
+                        runId = run.runId,
+                        baseRevision = baseRevision,
+                        state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                        resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
+                        diagnostic = "Repository analysis resumes automatically after process interruption.",
                         promptHash = interrupted.promptHash,
                     )
                 }
@@ -253,16 +287,33 @@ class RepositoryAnalysisService(
 
     fun currentPlan(runId: Long): RepositoryExecutionPlan? {
         val run = workspace.snapshot(MESSAGE_READY).workflowRuns.singleOrNull { it.runId == runId } ?: return null
-        val staticCandidates = planStore.load().filter { it.runId == runId && it.coversAcceptedScope(run) }
+        val codingWorkerEvents = codingWorkerStore?.loadEvents().orEmpty()
+        val externalFailure = codingWorkerExecutions(codingWorkerEvents).asReversed().firstOrNull { execution ->
+            execution.claim.runId == runId &&
+                execution.result?.status == CODING_EXECUTION_FAILED &&
+                externalVerificationModule(execution) != null
+        }
+        if (externalFailure != null) {
+            return planStore.load().lastOrNull { plan ->
+                plan.planId == externalFailure.claim.executionPlanId &&
+                    plan.hash == externalFailure.claim.executionPlanHash
+            }
+        }
+        val staticCandidates = planStore.load().filter {
+            it.runId == runId &&
+                it.coversAcceptedScope(run) &&
+                !it.adoptsExternalVerificationFailure(currentRevision = null, codingWorkerEvents)
+        }
         if (staticCandidates.isEmpty()) return null
         val workspacePath = run.context.workspaceReservation?.path ?: return null
         val currentRevision = workspaceGateway.currentRevision(workspacePath) ?: return null
-        val latestCandidate = staticCandidates.maxByOrNull { it.revision } ?: return null
-        if (latestCandidate.baseRevision == currentRevision) return latestCandidate
+        if (staticCandidates.any { it.baseRevision == currentRevision }) {
+            return staticCandidates.asReversed().firstOrNull { it.baseRevision == currentRevision }
+        }
         val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
         val context = runCatching { workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run), selectors) }.getOrNull() ?: return null
         val complianceContext = runCatching { collectComplianceContext(workspacePath, run, selectors, context) }.getOrNull() ?: return null
-        return latestCandidate.takeIf {
+        return staticCandidates.asReversed().firstOrNull {
             it.coversAcceptedScope(run, context, complianceContext) &&
                 (it.baseRevision == currentRevision || planRevisionCompatible(workspacePath, it, currentRevision))
         }
@@ -298,8 +349,13 @@ class RepositoryAnalysisService(
             .filter { candidate ->
                 val workspacePath = requireNotNull(candidate.context.workspaceReservation).path
                 val currentRevision = workspaceGateway.currentRevision(workspacePath)
+                if (currentRevision != null && failedCandidateExternalVerificationModule(currentRevision, codingWorkerEvents) != null) {
+                    return@filter false
+                }
                 val staticCandidates = plans.filter {
-                    it.runId == candidate.runId && it.coversAcceptedScope(candidate)
+                    it.runId == candidate.runId &&
+                        it.coversAcceptedScope(candidate) &&
+                        !it.adoptsExternalVerificationFailure(currentRevision, codingWorkerEvents)
                 }
                 val latestCandidate = staticCandidates.maxByOrNull { it.revision }
                 if (latestCandidate != null && (
@@ -431,9 +487,10 @@ class RepositoryAnalysisService(
                 run.runId,
                 diagnostic = "The reserved repository revision is unavailable.",
             )
-        val retryAuthorized = attemptStore.load().lastOrNull {
+        val analysisAttempts = attemptStore.load().filter {
             it.runId == run.runId && it.baseRevision == baseRevision
-        }?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
+        }
+        val retryAuthorized = analysisAttempts.lastOrNull()?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
         attemptStore.blockedAttempt(run.runId, baseRevision)?.takeUnless { retryAuthorized }?.let { blocked ->
             return RepositoryAnalysisTickResult(
                 RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED,
@@ -443,40 +500,63 @@ class RepositoryAnalysisService(
         }
         val query = analysisQuery(run)
         val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
+        val correctionPaths = analysisAttempts.lastOrNull {
+            it.state == ANALYSIS_ATTEMPT_BLOCKED && it.rejectedPlan != null
+        }
+            ?.takeIf { retryAuthorized }
+            ?.rejectedPlan
+            ?.scopeCoverage
+            ?.flatMap { it.evidencePaths }
+            ?.distinct()
+            ?.takeIf { it.isNotEmpty() }
         val context = runCatching {
-            workspaceGateway.collectAnalysisContext(
-                workspacePath,
-                query,
-                selectors,
-            )
+            if (correctionPaths == null) {
+                workspaceGateway.collectAnalysisContext(workspacePath, query, selectors)
+            } else {
+                workspaceGateway.collectPlanContext(
+                    workspacePath,
+                    baseRevision,
+                    correctionPaths,
+                    query,
+                    FOCUSED_CORRECTION_CONTEXT_BYTES,
+                )
+            }
         }.getOrElse {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
         if (context.files.isEmpty()) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = "No repository evidence was selected.")
         }
+        val authorityContext = if (correctionPaths == null) context else runCatching {
+            workspaceGateway.collectAnalysisContext(workspacePath, query, selectors)
+        }.getOrElse {
+            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
+        }
         val complianceContext = runCatching {
-            collectComplianceContext(workspacePath, run, selectors, context)
+            collectComplianceContext(workspacePath, run, selectors, authorityContext)
         }.getOrElse {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
         repositoryEvidenceSelectionDiagnostic(
             run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
-            context,
+            authorityContext,
         )?.let { diagnostic ->
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = diagnostic)
         }
+        val codingWorkerEvents = codingWorkerStore?.loadEvents().orEmpty()
+        val externalVerificationModule = failedCandidateExternalVerificationModule(baseRevision, codingWorkerEvents)
         val currentPlan = plans.asSequence()
             .filter {
                 it.runId == run.runId &&
                     (it.baseRevision == baseRevision || planRevisionCompatible(workspacePath, it, baseRevision)) &&
-                    it.coversAcceptedScope(run, context) &&
+                    it.coversAcceptedScope(run, authorityContext) &&
+                    !it.adoptsExternalVerificationFailure(baseRevision, codingWorkerEvents) &&
                     (admittedDesignOverride == null || it.admittedDesign?.hash == admittedDesignOverride.hash)
             }
             .maxByOrNull { it.revision }
-        val codingWorkerEvents = codingWorkerStore?.loadEvents().orEmpty()
         val rejectedCodingPlanDiagnostic = listOfNotNull(
-            currentPlan?.let { repositoryPlanRevisionDiagnostic(it, codingAttemptStore?.load().orEmpty()) },
+            currentPlan?.takeIf { externalVerificationModule == null }
+                ?.let { repositoryPlanRevisionDiagnostic(it, codingAttemptStore?.load().orEmpty()) },
             failedCandidateVerificationDiagnostic(baseRevision, codingWorkerEvents),
             currentPlan?.takeIf { completedCandidateRequiresSuccessor(it, baseRevision, codingWorkerEvents) }
                 ?.let { "The preceding one-operation candidate was committed at this revision. Analyze the remaining accepted scope and emit only its next independently verifiable source operation." },
@@ -488,7 +568,13 @@ class RepositoryAnalysisService(
         val profileOverride = runCatching { profileSettingsStore.load() }.getOrElse {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
         }.singleOrNull { it.profileId == defaultProfile.id }
-        val profile = effectiveModelExecutionProfile(defaultProfile, profileOverride)
+        val profile = effectiveModelExecutionProfile(defaultProfile, profileOverride).let { resolved ->
+            if (correctionPaths == null) resolved else resolved.copy(
+                id = FOCUSED_CORRECTION_PROFILE_ID,
+                inputBudgetTokens = FOCUSED_CORRECTION_INPUT_TOKENS,
+                outputBudgetTokens = FOCUSED_CORRECTION_OUTPUT_TOKENS,
+            )
+        }
         val assignment = companyControl?.let { company ->
             if (company.assign(run.runId, ROLE_ANALYST_DESIGNER, RISK_HIGH).status != CompanyMutationStatus.RECORDED) return RepositoryAnalysisTickResult(
                 RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL,
@@ -500,12 +586,15 @@ class RepositoryAnalysisService(
         val preferredProvider = profileOverride?.preferredBindingId?.let { preferredBindingId ->
             modelProviders.singleOrNull { it.bindingProfile().bindingId == preferredBindingId }
         }
-        val provider = preferredProvider
+        val focusedCorrectionProvider = modelProviders.singleOrNull {
+            it.bindingProfile().bindingId == FOCUSED_CORRECTION_BINDING_ID
+        }
+        val provider = (if (correctionPaths != null) focusedCorrectionProvider else preferredProvider)
             ?: assignment?.let { companyControl?.provider(it) }
             ?: runCatching { ModelProfileResolver.resolve(profile, modelProviders) }.getOrNull()
             ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL, run.runId)
         val acceptedScope = run.workDefinition?.definition?.scope.orEmpty()
-        val analysisPaths = boundedRepositoryAnalysisPaths(acceptedScope, selectors, context)
+        val analysisPaths = correctionPaths?.toSet() ?: boundedRepositoryAnalysisPaths(acceptedScope, selectors, context)
         fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryAnalysisEnvelope(
             profile.id,
             baseRevision,
@@ -513,9 +602,9 @@ class RepositoryAnalysisService(
             candidate,
             DISPOSITIONS,
             OUTPUT_SCHEMA,
-            candidate.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
+            authorityContext.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
             run.workDefinition?.definition?.scope.orEmpty(),
-            requiredRepositoryEvidencePathGroups(selectors, candidate),
+            requiredRepositoryEvidencePathGroups(selectors, authorityContext),
             requiredRepositoryScopeEvidencePathGroupIds(
                 run.workDefinition?.definition?.scope.orEmpty(),
                 run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
@@ -598,7 +687,7 @@ class RepositoryAnalysisService(
         val output = decodedOutput?.getOrNull()?.let {
             compileRepositoryAnalysisCandidate(
                 it,
-                context,
+                authorityContext,
                 run.workDefinition?.definition?.scope.orEmpty(),
                 selectors,
                 run.workDefinition?.definition?.acceptanceCriteria?.map { criterion -> criterion.description }.orEmpty(),
@@ -615,7 +704,7 @@ class RepositoryAnalysisService(
             RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
             repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
         )
-        repositoryAnalysisIdentityDiagnostic(context, output)?.let {
+        repositoryAnalysisIdentityDiagnostic(authorityContext, output)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
         val createResolvedOutput = compileResolvedCreateQuestions(output)
@@ -663,8 +752,8 @@ class RepositoryAnalysisService(
                 resolvedOutput,
             )
         }
-        val ownerResolvedOutput = compileRepositoryImplementationOwners(boundedContext, resolvedOutput)
-        val scopedOutput = compileRepositoryScopeAuthority(acceptedScope, selectors, boundedContext, ownerResolvedOutput)
+        val ownerResolvedOutput = compileRepositoryImplementationOwners(authorityContext, resolvedOutput)
+        val scopedOutput = compileRepositoryScopeAuthority(acceptedScope, selectors, authorityContext, ownerResolvedOutput)
         val reconciledOutput = attemptStore.compileRetainedExactPathOperations(
             run.runId,
             baseRevision,
@@ -676,8 +765,8 @@ class RepositoryAnalysisService(
             compileRepositoryScopeAuthority(
                 acceptedScope,
                 selectors,
-                boundedContext,
-                compileRepositoryImplementationOwners(boundedContext, reconciledOutput),
+                authorityContext,
+                compileRepositoryImplementationOwners(authorityContext, reconciledOutput),
             ),
         )
         val failedCandidatePaths = failedCandidateCorrectionPaths(
@@ -686,7 +775,7 @@ class RepositoryAnalysisService(
         )
         val invalid = validateOutput(
             run,
-            boundedContext,
+            authorityContext,
             complianceContext,
             compiledOutput,
             failedCandidatePaths,
@@ -812,6 +901,12 @@ class RepositoryAnalysisService(
                 promptHash = sha256(prompt),
                 rejectedPlan = rejectedPlan,
             )
+        }.also { blocked ->
+            if (status == RepositoryAnalysisTickStatus.INVALID_ANALYSIS &&
+                automaticCorrectionCount(runId, baseRevision) < MAX_AUTOMATIC_ANALYSIS_CORRECTIONS
+            ) {
+                authorizeAutomaticCorrection(runId, baseRevision, blocked.promptHash)
+            }
         }
     }.fold(
         onSuccess = { RepositoryAnalysisTickResult(status, runId, diagnostic = diagnostic) },
@@ -823,6 +918,32 @@ class RepositoryAnalysisService(
             )
         },
     )
+
+    private fun recoverableAnalysisInterruption(attempt: RepositoryAnalysisAttempt): Boolean =
+        attempt.resultStatus == RepositoryAnalysisTickStatus.CANCELLED.name ||
+            attempt.resultStatus == RepositoryAnalysisTickStatus.MODEL_FAILED.name &&
+            attempt.diagnostic.contains("stream ended without a terminal done frame")
+
+    private fun automaticCorrectionCount(runId: Long, baseRevision: String): Int = attemptStore.load().count {
+        it.runId == runId &&
+            it.baseRevision == baseRevision &&
+            it.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED &&
+            it.diagnostic == AUTOMATIC_ANALYSIS_CORRECTION_DIAGNOSTIC
+    }
+
+    private fun authorizeAutomaticCorrection(runId: Long, baseRevision: String, promptHash: String?) {
+        attemptStore.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = runId,
+                baseRevision = baseRevision,
+                state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
+                diagnostic = AUTOMATIC_ANALYSIS_CORRECTION_DIAGNOSTIC,
+                promptHash = promptHash,
+            )
+        }
+    }
 
     private fun analysisQuery(run: WorkflowRunView): String = buildString {
         appendLine(run.context.title)
@@ -877,6 +998,11 @@ class RepositoryAnalysisService(
 
     private companion object {
         const val REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS = 2_000
+        const val FOCUSED_CORRECTION_CONTEXT_BYTES = 96 * 1024
+        const val FOCUSED_CORRECTION_PROFILE_ID = "focused-repository-correction-v1"
+        const val FOCUSED_CORRECTION_INPUT_TOKENS = 16_000
+        const val FOCUSED_CORRECTION_OUTPUT_TOKENS = 1_200
+        const val FOCUSED_CORRECTION_BINDING_ID = "ollama:qwen3-coder-30b:json:t0:s42"
         val ACTIONABLE_STATES = setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED)
         val DISPOSITIONS = listOf(
             DISPOSITION_ABSENT,
@@ -1141,7 +1267,12 @@ private fun RepositoryExecutionPlan.coversAcceptedScope(run: WorkflowRunView): B
 internal fun repositoryPlanRequiresRevision(
     currentPlan: RepositoryExecutionPlan,
     codingAttempts: List<CodingWorkerAttempt>,
-): Boolean = repositoryPlanRevisionDiagnostic(currentPlan, codingAttempts) != null
+): Boolean = repositoryPlanRevisionDiagnostic(currentPlan, codingAttempts)
+    ?.let(::codingPlanRequiresAnalysisRevision)
+    ?: false
+
+private fun codingPlanRequiresAnalysisRevision(diagnostic: String): Boolean =
+    !diagnostic.startsWith(CODING_ENVELOPE_BUDGET_DIAGNOSTIC)
 
 internal fun completedCandidateRequiresSuccessor(
     currentPlan: RepositoryExecutionPlan,
@@ -1163,7 +1294,10 @@ internal fun failedCandidateCorrectionPaths(
 internal fun failedCandidateVerificationDiagnostic(
     baseRevision: String,
     codingWorkerEvents: List<CodingWorkerEvent>,
-): String? = failedCandidateExecution(baseRevision, codingWorkerEvents)?.result?.diagnostic
+): String? = failedCandidateExecution(baseRevision, codingWorkerEvents)
+    ?.takeIf { failedCandidateExternalVerificationModule(baseRevision, codingWorkerEvents) == null }
+    ?.result
+    ?.diagnostic
 
 internal fun failedCandidatePlanRequiresRevision(
     currentPlan: RepositoryExecutionPlan,
@@ -1172,7 +1306,8 @@ internal fun failedCandidatePlanRequiresRevision(
     execution.claim.executionPlanId == currentPlan.planId &&
         execution.claim.executionPlanHash == currentPlan.hash &&
         execution.result?.status == CODING_EXECUTION_FAILED &&
-        execution.result.revision != null
+        execution.result.revision != null &&
+        externalVerificationModule(execution) == null
 }
 
 private fun failedCandidateExecution(
@@ -1180,6 +1315,35 @@ private fun failedCandidateExecution(
     codingWorkerEvents: List<CodingWorkerEvent>,
 ) = codingWorkerExecutions(codingWorkerEvents).asReversed().firstOrNull { execution ->
     execution.result?.status == CODING_EXECUTION_FAILED && execution.result.revision == baseRevision
+}
+
+private fun RepositoryExecutionPlan.adoptsExternalVerificationFailure(
+    currentRevision: String?,
+    codingWorkerEvents: List<CodingWorkerEvent>,
+): Boolean {
+    val failed = currentRevision?.let { failedCandidateExecution(it, codingWorkerEvents) }
+        ?: codingWorkerExecutions(codingWorkerEvents).asReversed().firstOrNull {
+            it.claim.runId == runId && it.result?.status == CODING_EXECUTION_FAILED
+        }
+        ?: return false
+    val externalModule = externalVerificationModule(failed) ?: return false
+    return content.operations.any { operation ->
+        operation.action != PLAN_OPERATION_VERIFY && operation.path.substringBefore('/', missingDelimiterValue = "") == externalModule
+    }
+}
+
+private fun failedCandidateExternalVerificationModule(
+    baseRevision: String,
+    codingWorkerEvents: List<CodingWorkerEvent>,
+): String? = failedCandidateExecution(baseRevision, codingWorkerEvents)?.let(::externalVerificationModule)
+
+private fun externalVerificationModule(execution: CodingWorkerExecutionView): String? {
+    val candidateModules = execution.result?.changedPaths.orEmpty()
+        .mapNotNull { it.substringBefore('/', missingDelimiterValue = "").takeIf(String::isNotBlank) }
+        .toSet()
+    return REPOSITORY_GRADLE_TASK_MODULE.findAll(execution.result?.diagnostic.orEmpty())
+        .map { it.groupValues[1] }
+        .firstOrNull { it !in candidateModules }
 }
 
 internal fun failedCandidateCorrectionDiagnostic(
@@ -1770,6 +1934,7 @@ private fun commonPathPrefixLength(first: String, second: String): Int = first
     .takeWhile { (left, right) -> left == right }
     .size
 
+private val REPOSITORY_GRADLE_TASK_MODULE = Regex("(?m):([A-Za-z][A-Za-z0-9_-]*):[A-Za-z][A-Za-z0-9_-]*")
 private val FORBIDDEN_CONTAINS_LITERAL = Regex(
     "\\bnone\\b[^.]*?\\bcontains\\s+([A-Za-z_][A-Za-z0-9_.]*)",
     RegexOption.IGNORE_CASE,
@@ -1778,6 +1943,9 @@ private val FORBIDDEN_CONTAINS_LITERAL = Regex(
 internal const val MAX_SOURCE_OPERATIONS_PER_PLAN = 12
 private const val MAX_ANALYSIS_CONTEXT_PATHS = 24
 private const val ANALYSIS_TICK_TIMEOUT_MILLIS = 900_000L
+private const val MAX_AUTOMATIC_ANALYSIS_CORRECTIONS = 3
+private const val CODING_ENVELOPE_BUDGET_DIAGNOSTIC = "Coding envelope exceeds the model input budget."
+private const val AUTOMATIC_ANALYSIS_CORRECTION_DIAGNOSTIC = "Repository analysis retries automatically after deterministic contract rejection."
 
 private fun canonicalAuthorityText(value: String): String = value
     .replace(Regex("[\\u2010-\\u2015\\u2212]"), "-")

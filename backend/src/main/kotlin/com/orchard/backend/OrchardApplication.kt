@@ -545,6 +545,7 @@ fun main() {
             runCatching {
                 coroutineScope {
                     codingWorker.interruptedRunIds()
+                        .distinct()
                         .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
                     conversationConductor.dispatchableRunIds(codingWorker.eligibleRunIds())
                         .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
