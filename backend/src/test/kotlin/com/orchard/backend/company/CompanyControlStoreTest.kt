@@ -1,5 +1,7 @@
 package com.orchard.backend.company
 
+import com.orchard.backend.workspace.RUN_STATE_DONE
+import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import java.nio.file.Files
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -7,6 +9,13 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 class CompanyControlStoreTest {
+    @Test
+    fun `stale promotion recovery admits audit accepted external verification candidates`() {
+        assertEquals(true, stalePromotionRecoveryEligible(RUN_STATE_DONE))
+        assertEquals(true, stalePromotionRecoveryEligible(RUN_STATE_EVIDENCE_PENDING))
+        assertEquals(false, stalePromotionRecoveryEligible("RUNNING"))
+    }
+
     @Test
     fun `company ledger restores linked authority and rejects stale acceptance`() {
         val directory = createTempDirectory("orchard-company-control-")

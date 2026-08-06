@@ -8,6 +8,7 @@ import com.orchard.backend.workspace.ModelCapabilityProfile
 import com.orchard.backend.workspace.ProjectGenesisRevision
 import com.orchard.backend.workspace.RepositoryBindingStore
 import com.orchard.backend.workspace.RUN_STATE_DONE
+import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.TransientRepositoryBindingStore
 import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowRunView
@@ -23,6 +24,9 @@ const val PHASE_AUDIT = "AUDIT"
 const val PHASE_ARCHITECT_REVIEW = "ARCHITECT_REVIEW"
 const val PHASE_LOCAL_PROMOTION = "LOCAL_PROMOTION"
 const val PHASE_OBSERVATION = "OBSERVATION"
+
+internal fun stalePromotionRecoveryEligible(runState: String): Boolean =
+    runState in setOf(RUN_STATE_DONE, RUN_STATE_EVIDENCE_PENDING)
 
 enum class CompanyMutationStatus {
     RECORDED,
@@ -444,7 +448,7 @@ class CompanyControlService(
         val run = run(runId) ?: return CompanyMutationResult(CompanyMutationStatus.RUN_NOT_FOUND)
         val acceptance = store.loadEvents().mapNotNull { it.acceptance }.lastOrNull { it.runId == runId }
             ?: return CompanyMutationResult(CompanyMutationStatus.AUDIT_INCOMPLETE)
-        if (run.state != RUN_STATE_DONE || acceptance.candidateRevision.isBlank()) {
+        if (!stalePromotionRecoveryEligible(run.state) || acceptance.candidateRevision.isBlank()) {
             return CompanyMutationResult(CompanyMutationStatus.EVIDENCE_STALE)
         }
         val head = repositories.resolveHead(run.context.projectId)
