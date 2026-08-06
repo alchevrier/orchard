@@ -352,6 +352,17 @@ class RepositoryAnalysisService(
                 if (currentRevision != null && failedCandidateExternalVerificationModule(currentRevision, codingWorkerEvents) != null) {
                     return@filter false
                 }
+                val context = runCatching {
+                    workspaceGateway.collectAnalysisContext(
+                        workspacePath,
+                        analysisQuery(candidate),
+                        candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+                    )
+                }.getOrNull() ?: return@filter false
+                val selectors = candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
+                val complianceContext = runCatching {
+                    collectComplianceContext(workspacePath, candidate, selectors, context)
+                }.getOrNull() ?: return@filter false
                 val staticCandidates = plans.filter {
                     it.runId == candidate.runId &&
                         it.coversAcceptedScope(candidate) &&
@@ -379,17 +390,6 @@ class RepositoryAnalysisService(
                         it.baseRevision == revision || planRevisionCompatible(workspacePath, it, revision)
                     }
                 }
-                val context = runCatching {
-                    workspaceGateway.collectAnalysisContext(
-                        workspacePath,
-                        analysisQuery(candidate),
-                        candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
-                    )
-                }.getOrNull() ?: return@filter false
-                val selectors = candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
-                val complianceContext = runCatching {
-                    collectComplianceContext(workspacePath, candidate, selectors, context)
-                }.getOrNull() ?: return@filter false
                 if (staticCandidates.isEmpty()) return@filter true
                 val currentPlan = compatibleCandidate?.takeIf {
                     it.coversAcceptedScope(candidate, context, complianceContext)
