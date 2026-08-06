@@ -15,6 +15,7 @@ const val ENTITY_TASK = 4
 const val ENTITY_BUG = 5
 
 const val ACTION_CREATE = 1
+private const val EXTERNAL_VERIFICATION_BUG_MARKER = "externalVerificationRunId="
 
 const val MESSAGE_READY = 0
 const val MESSAGE_CREATED = 1
@@ -317,7 +318,7 @@ class WorkspaceStore(
         val run = workflowRuns.singleOrNull { it.runId == runId } ?: return null
         val workItem = entity(run.context.workItemId, ENTITY_TASK) ?: return null
         val story = entity(workItem.parentId, ENTITY_STORY) ?: return null
-        val marker = "externalVerificationRunId=$runId\naffectedModule=$affectedModule\ncommand=$command\noutputHash=$outputHash"
+        val marker = "$EXTERNAL_VERIFICATION_BUG_MARKER$runId\naffectedModule=$affectedModule\ncommand=$command\noutputHash=$outputHash"
         entities.firstOrNull { it.type == ENTITY_BUG && it.parentId == story.id && it.content.startsWith(marker) }
             ?.let { return it.id }
 
@@ -3386,7 +3387,9 @@ class WorkspaceStore(
     }
 
     private fun planCoversCurrentHierarchy(plan: StagedDeliveryPlan, scope: WorkspaceEntity): Boolean =
-        directPlanChildren(scope).mapTo(linkedSetOf()) { it.id } ==
+        directPlanChildren(scope)
+            .filterNot { it.type == ENTITY_BUG && it.content.startsWith(EXTERNAL_VERIFICATION_BUG_MARKER) }
+            .mapTo(linkedSetOf()) { it.id } ==
             plan.stages.flatMap { it.nodes }.mapTo(linkedSetOf()) { it.workItemId }
 
     private fun stagedPlanArtifactInstances(plan: StagedDeliveryPlan): List<StagedPlanArtifactInstance> =
