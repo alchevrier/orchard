@@ -385,11 +385,11 @@ class RepositoryAnalysisService(
                         analysisQuery(candidate),
                         candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
                     )
-                }.getOrNull() ?: return@filter staticCandidates.isNotEmpty()
+                }.getOrNull() ?: return@filter false
                 val selectors = candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
                 val complianceContext = runCatching {
                     collectComplianceContext(workspacePath, candidate, selectors, context)
-                }.getOrNull() ?: return@filter staticCandidates.isNotEmpty()
+                }.getOrNull() ?: return@filter false
                 if (staticCandidates.isEmpty()) return@filter true
                 val currentPlan = compatibleCandidate?.takeIf {
                     it.coversAcceptedScope(candidate, context, complianceContext)
