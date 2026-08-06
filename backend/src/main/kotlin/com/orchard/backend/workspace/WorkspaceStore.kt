@@ -1607,9 +1607,9 @@ class WorkspaceStore(
         val run = workflowRuns.firstOrNull { it.runId == runId }
             ?: return workflowMutationFailure(WorkflowMutationStatus.RUN_NOT_FOUND, "The workflow run does not exist.")
         val currentState = runState(runId)
-        if (currentState != RUN_STATE_DONE) return workflowMutationFailure(
+        if (currentState !in setOf(RUN_STATE_DONE, RUN_STATE_EVIDENCE_PENDING)) return workflowMutationFailure(
             WorkflowMutationStatus.INVALID_RECORD,
-            "Only completed work can be reopened by independent audit.",
+            "Only completed work or work awaiting external verification can be reopened by independent audit.",
         )
         val normalized = reason.trim()
         if (normalized.isBlank() || normalized.length > MAX_EVIDENCE_SUMMARY) return workflowMutationFailure(
