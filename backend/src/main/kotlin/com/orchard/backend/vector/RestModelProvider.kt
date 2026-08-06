@@ -229,7 +229,7 @@ class CatalogModelProvider(
         contextWindowTokens: Int,
         structured: Boolean,
     ): OllamaCatalogResponse {
-        val think = ollamaThinkControl()
+        val think = ollamaThinkControl(structured)
         val options = OllamaCatalogOptions(
             temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
             seed = binding.configuration["seed"]?.toIntOrNull() ?: 42,
@@ -314,7 +314,7 @@ class CatalogModelProvider(
     private fun isJsonObject(value: String): Boolean = runCatching { json.parseToJsonElement(value) is JsonObject }
         .getOrDefault(false)
 
-    private fun ollamaThinkControl(): JsonPrimitive = if (binding.model.substringBefore(':').equals("gpt-oss", ignoreCase = true)) {
+    private fun ollamaThinkControl(structured: Boolean): JsonPrimitive = if (binding.model.substringBefore(':').equals("gpt-oss", ignoreCase = true) && !structured) {
         JsonPrimitive("low")
     } else {
         JsonPrimitive(false)
@@ -448,7 +448,23 @@ class ModelProviderRegistry(
     override fun close() = activeProviders.forEach(ModelProvider::close)
 }
 
-private fun ollamaResponseFormat(prompt: String): JsonElement = if ("bounded-coding-tool-batch-v1" in prompt) {
+private fun ollamaResponseFormat(prompt: String): JsonElement = if ("RepositoryAnalysisPlanContent(" in prompt) {
+    buildJsonObject {
+        put("type", "object")
+        put("additionalProperties", false)
+        put("required", buildJsonArray {
+            listOf("disposition", "summary", "evidence", "reuse", "preservedInvariants", "nonGoals", "sourcePaths", "unresolvedQuestions")
+                .forEach { add(JsonPrimitive(it)) }
+        })
+        put("properties", buildJsonObject {
+            put("disposition", buildJsonObject { put("type", "string") })
+            put("summary", buildJsonObject { put("type", "string") })
+            listOf("evidence", "reuse", "preservedInvariants", "nonGoals", "sourcePaths", "unresolvedQuestions").forEach { name ->
+                put(name, buildJsonObject { put("type", "array") })
+            }
+        })
+    }
+} else if ("bounded-coding-tool-batch-v1" in prompt) {
     val requiresLiteralReplacements = "appears truncated; use bounded replacements" in prompt ||
         "REQUIRE_LITERAL_REPLACEMENTS" in prompt
     buildJsonObject {

@@ -146,7 +146,14 @@ internal data class RepositoryAnalysisCandidate(
 )
 
 internal fun normalizeRepositoryAnalysisCandidateJson(text: String, json: Json): String {
-    val root = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return text
+    val candidate = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+        ?: text.indexOf('{').takeIf { it >= 0 }?.let { start ->
+            text.lastIndexOf('}').takeIf { it > start }?.let { end ->
+                runCatching { json.parseToJsonElement(text.substring(start, end + 1)).jsonObject }.getOrNull()
+            }
+        }
+        ?: return text
+    val root = candidate
     val normalized = root.toMutableMap()
     listOf("reuse", "preservedInvariants").forEach { field ->
         val scalar = (root[field] as? JsonPrimitive)?.contentOrNull ?: return@forEach
@@ -506,10 +513,7 @@ class RepositoryAnalysisService(
         }
             ?.takeIf { retryAuthorized }
             ?.rejectedPlan
-            ?.scopeCoverage
-            ?.flatMap { it.evidencePaths }
-            ?.distinct()
-            ?.takeIf { it.isNotEmpty() }
+            ?.let(::focusedCorrectionContextPaths)
         val context = runCatching {
             if (correctionPaths == null) {
                 workspaceGateway.collectAnalysisContext(workspacePath, query, selectors)
@@ -622,7 +626,7 @@ class RepositoryAnalysisService(
         val queryTokens = repositoryAnalysisTokens(query)
         val boundedContext = compactRepositoryContextToBudget(
             context,
-            profile.inputBudgetTokens * 70 / 100,
+            if (correctionPaths == null) profile.inputBudgetTokens * 70 / 100 else profile.inputBudgetTokens,
             analysisPaths,
             contentCompactor = { content, maxBytes -> focusedContextExcerpt(content, queryTokens, maxBytes) },
         ) { candidate ->
@@ -998,12 +1002,12 @@ class RepositoryAnalysisService(
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
 
     private companion object {
-        const val REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS = 2_000
+        const val REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS = 4_000
         const val FOCUSED_CORRECTION_CONTEXT_BYTES = 96 * 1024
         const val FOCUSED_CORRECTION_PROFILE_ID = "focused-repository-correction-v1"
         const val FOCUSED_CORRECTION_INPUT_TOKENS = 16_000
-        const val FOCUSED_CORRECTION_OUTPUT_TOKENS = 1_200
-        const val FOCUSED_CORRECTION_BINDING_ID = "ollama:qwen3-coder-30b:json:t0:s42"
+        const val FOCUSED_CORRECTION_OUTPUT_TOKENS = 4_000
+        const val FOCUSED_CORRECTION_BINDING_ID = "ollama:gpt-oss-120b:json:t0:s42"
         val ACTIONABLE_STATES = setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED)
         val DISPOSITIONS = listOf(
             DISPOSITION_ABSENT,
@@ -1286,6 +1290,25 @@ internal fun completedCandidateRequiresSuccessor(
         execution.result?.status == CODING_EXECUTION_COMPLETED &&
         execution.result.revision == currentRevision
 }
+
+internal fun focusedCorrectionContextPaths(plan: RepositoryAnalysisPlanContent): List<String> {
+    val uncoveredScopePaths = plan.scopeCoverage
+        .filter { it.operationOrders.isEmpty() }
+        .flatMap { it.evidencePaths }
+        .distinct()
+        .take(8)
+    if (uncoveredScopePaths.isNotEmpty()) return uncoveredScopePaths
+    return (
+            plan.operations
+                .filter { it.action != PLAN_OPERATION_VERIFY }
+                .map { it.path } +
+            plan.scopeCoverage.flatMap { it.evidencePaths }
+        )
+        .distinct()
+        .take(8)
+        .takeIf { it.isNotEmpty() }
+        .orEmpty()
+    }
 
 internal fun failedCandidateCorrectionPaths(
     baseRevision: String,
