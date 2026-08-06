@@ -30,6 +30,7 @@ import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProfileSettingsStore
 import com.orchard.backend.vector.OllamaGenerateRequest
 import com.orchard.backend.vector.OllamaOptions
+import com.orchard.backend.vector.reconcileOllamaStream
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceRepository
 import com.orchard.backend.workspace.RepositoryBindingStore
@@ -109,6 +110,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -715,11 +717,11 @@ class WorkspaceStoreTest {
 
 class OllamaRequestTest {
     @Test
-    fun nonStreamingJsonSettingsAreAlwaysSerialized() {
+    fun streamingJsonSettingsAreAlwaysSerialized() {
         val request = OllamaGenerateRequest(
             model = "phi3:mini",
             prompt = "test",
-            stream = false,
+            stream = true,
             format = "json",
             think = false,
             options = OllamaOptions(temperature = 0, seed = 42),
@@ -727,9 +729,32 @@ class OllamaRequestTest {
 
         val payload = Json.encodeToString(request)
 
-        assertTrue("\"stream\":false" in payload)
+        assertTrue("\"stream\":true" in payload)
         assertTrue("\"format\":\"json\"" in payload)
         assertTrue("\"think\":false" in payload)
+    }
+
+    @Test
+    fun ollamaStreamReconcilesOnlyAfterTerminalFrame() {
+        val response = reconcileOllamaStream(
+            "{\"response\":\"{\\\"disposition\\\":\",\"done\":false}\n" +
+                "{\"response\":\"\\\"ACCEPTED\\\"}\",\"done\":true,\"prompt_eval_count\":10,\"eval_count\":5}\n",
+            Json { ignoreUnknownKeys = true },
+        )
+
+        assertEquals("{\"disposition\":\"ACCEPTED\"}", response.response)
+        assertEquals(10, response.promptEvalCount)
+        assertEquals(5, response.evalCount)
+    }
+
+    @Test
+    fun incompleteOllamaStreamIsNotReconciled() {
+        assertFailsWith<IllegalStateException> {
+            reconcileOllamaStream(
+                "{\"response\":\"partial\",\"done\":false}\n",
+                Json { ignoreUnknownKeys = true },
+            )
+        }
     }
 
     @Test

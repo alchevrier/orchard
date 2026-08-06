@@ -24,6 +24,20 @@ import kotlin.test.assertTrue
 
 class RepositoryExecutionPlanStoreTest {
     @Test
+    fun `analysis candidate normalizes observed scalar list fields to arrays`() {
+        val json = Json { ignoreUnknownKeys = false }
+        val normalized = normalizeRepositoryAnalysisCandidateJson(
+            "{\"disposition\":\"ACCEPTED\",\"summary\":\"Plan\",\"evidence\":[],\"reuse\":\"Preserve current test\",\"preservedInvariants\":\"Preserve compatibility\",\"nonGoals\":[],\"sourcePaths\":[]}",
+            json,
+        )
+
+        val candidate = json.decodeFromString<RepositoryAnalysisCandidate>(normalized)
+
+        assertEquals(listOf("Preserve current test"), candidate.reuse)
+        assertEquals(listOf("Preserve compatibility"), candidate.preservedInvariants)
+    }
+
+    @Test
     fun `only a terminal block on the current plan requests repository reanalysis`() {
         val current = plan(2, 2, "a".repeat(40))
         val blocked = CodingWorkerAttempt(

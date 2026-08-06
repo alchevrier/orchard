@@ -41,6 +41,7 @@ import com.orchard.backend.workspace.ModelExecutionObservationDraft
 import com.orchard.backend.workspace.ModelExecutionObservation
 import com.orchard.backend.workspace.ModelExperienceEvent
 import com.orchard.backend.workspace.admittedAcceptanceVerification
+import com.orchard.backend.workspace.admittedAcceptanceVerifications
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
@@ -1173,6 +1174,20 @@ class WorkspaceRepositoryTest {
         assertEquals(
             null,
             admittedAcceptanceVerification(listOf("Inspect the returned value", "Review the source diff")),
+        )
+        assertEquals(
+            listOf("./gradlew :backend:jvmTest --no-daemon", "./gradlew assemble --no-daemon"),
+            admittedAcceptanceVerifications(listOf(
+                "./gradlew :backend:jvmTest --no-daemon",
+                "./gradlew assemble --no-daemon",
+            )),
+        )
+        assertEquals(
+            "./gradlew assemble --no-daemon",
+            admittedAcceptanceVerifications(listOf(
+                "./gradlew :backend:jvmTest --no-daemon",
+                "./gradlew assemble --no-daemon",
+            )).lastOrNull(),
         )
     }
 

@@ -30,6 +30,25 @@ data class BoundedCodingToolBatch(
     val operations: List<BoundedCodingToolOperation>,
 )
 
+internal fun boundedCodingToolBehaviorDiagnostic(batch: BoundedCodingToolBatch): String? {
+    batch.operations.filter { isCandidateTestSourcePath(it.path) }.forEach { operation ->
+        val proposedText = operation.content ?: operation.replacement.orEmpty()
+        if (NULLABLE_ASSERT_TRUE.containsMatchIn(proposedText)) {
+            return "${operation.action} ${operation.path} introduces assertTrue with a nullable condition; assert the nullable value explicitly before testing its property."
+        }
+        if (operation.action != BOUNDED_TOOL_REPLACE_LITERAL &&
+            ASSERT_NOT_NULL_CALL.containsMatchIn(proposedText) &&
+            !KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(proposedText)
+        ) {
+            return "${operation.action} ${operation.path} introduces assertNotNull without importing kotlin.test.assertNotNull."
+        }
+        FORBIDDEN_PROPOSAL_TEST_PROPERTY.find(proposedText)?.let { match ->
+            return "${operation.action} ${operation.path} references ${match.value}, which is not a supported proposal property in this governed test context."
+        }
+    }
+    return null
+}
+
 fun CodingWorkspaceGateway.readAuthorizedSource(
     workspacePath: String,
     packageAuthority: ExecutableWorkPackage,
@@ -110,7 +129,11 @@ fun CodingWorkspaceGateway.applyBoundedToolBatch(
                 require(actualCount == expectedCount) {
                     "REPLACE_LITERAL ${operation.path} found $actualCount occurrences at lines ${literalLineNumbers(source, literal)}; expected $expectedCount. Rejected expectedLiteral preview: ${literal.replace("\n", "\\n").take(240)}. Select a contiguous anchor copied from the current repositoryContext for this path, and verify it occurs exactly once."
                 }
-                CodingFileOperation(CODING_FILE_WRITE, operation.path, content = source.replace(literal, replacement))
+                CodingFileOperation(
+                    CODING_FILE_WRITE,
+                    operation.path,
+                    content = materializeRequiredTestImports(operation.path, source.replace(literal, replacement)),
+                )
             }
             BOUNDED_TOOL_DELETE_FILE -> {
                 require(WORK_PACKAGE_ACTION_DELETE_FILE in packageAuthority.ownership.allowedActions &&
@@ -127,6 +150,28 @@ fun CodingWorkspaceGateway.applyBoundedToolBatch(
     }
     require(currentRevision(workspacePath) == batch.expectedRevision) { "Coding workspace changed before tool application" }
     return applyAndCommit(workspacePath, CodingPatchProposal(batch.summary, proposalOperations), executionId)
+}
+
+internal fun materializeRequiredTestImports(path: String, content: String): String {
+    if (!isCandidateTestSourcePath(path) ||
+        !ASSERT_NOT_NULL_CALL.containsMatchIn(content) ||
+        KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(content)
+    ) return content
+    val imports = Regex("(?m)^import .+$").findAll(content).toList()
+    if (imports.isNotEmpty()) {
+        val lastImport = imports.last()
+        return content.substring(0, lastImport.range.last + 1) +
+            "\nimport kotlin.test.assertNotNull" +
+            content.substring(lastImport.range.last + 1)
+    }
+    val packageDeclaration = Regex("(?m)^package .+$").find(content)
+    return if (packageDeclaration != null) {
+        content.substring(0, packageDeclaration.range.last + 1) +
+            "\n\nimport kotlin.test.assertNotNull" +
+            content.substring(packageDeclaration.range.last + 1)
+    } else {
+        "import kotlin.test.assertNotNull\n\n$content"
+    }
 }
 
 fun CodingWorkspaceGateway.runNamedCheck(

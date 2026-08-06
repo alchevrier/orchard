@@ -77,6 +77,27 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `test write proposal rejects nullable assert true without source context`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val proposal = CodingPatchProposal(
+            "Add experience quality coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_WRITE,
+                path = path,
+                content = "assertTrue(proposal.submission.experience?.domainCorrelation != null)",
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(emptyList(), omittedFileCount = 1),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("assertTrue with a nullable condition"))
+    }
+
+    @Test
     fun `test proposal rejects assert not null without import`() {
         val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
         val old = "assertEquals(\"Calm\", proposal.submission.experience?.emotionalQualities?.single())"
@@ -99,6 +120,67 @@ class CodingWorkerTest {
         )
 
         assertTrue(requireNotNull(diagnostic).contains("assertNotNull without importing"))
+    }
+
+    @Test
+    fun `test write proposal rejects assert not null without source context`() {
+        val path = "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"
+        val proposal = CodingPatchProposal(
+            "Add conversation correlation coverage.",
+            listOf(CodingFileOperation(
+                action = CODING_FILE_WRITE,
+                path = path,
+                content = "assertNotNull(proposal.conversation)",
+            )),
+        )
+
+        val diagnostic = codingProposalBehaviorDiagnostic(
+            proposal,
+            emptyList(),
+            CodingRepositoryContext(emptyList(), omittedFileCount = 1),
+        )
+
+        assertTrue(requireNotNull(diagnostic).contains("assertNotNull without importing"))
+    }
+
+    @Test
+    fun `test bounded replacement materializes assert not null import`() {
+        val diagnostic = boundedCodingToolBehaviorDiagnostic(BoundedCodingToolBatch(
+            "Add conversation correlation coverage.",
+            "a".repeat(40),
+            listOf(BoundedCodingToolOperation(
+                BOUNDED_TOOL_REPLACE_LITERAL,
+                "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt",
+                expectedLiteral = "assertEquals(1, 1)",
+                replacement = "assertNotNull(proposal.conversation)",
+                expectedCount = 1,
+            )),
+        ))
+
+        assertEquals(null, diagnostic)
+        assertTrue(
+            materializeRequiredTestImports(
+                "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt",
+                "package com.orchard.frontend.network\n\nimport kotlin.test.assertTrue\n\nassertNotNull(proposal)",
+            ).contains("import kotlin.test.assertNotNull"),
+        )
+    }
+
+    @Test
+    fun `test bounded tool batch rejects unsupported proposal conversation property`() {
+        val diagnostic = boundedCodingToolBehaviorDiagnostic(BoundedCodingToolBatch(
+            "Add conversation coverage.",
+            "a".repeat(40),
+            listOf(BoundedCodingToolOperation(
+                BOUNDED_TOOL_REPLACE_LITERAL,
+                "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt",
+                expectedLiteral = "assertEquals(1, 1)",
+                replacement = "assertNotNull(proposal.conversation)",
+                expectedCount = 1,
+            )),
+        ))
+
+        assertTrue(requireNotNull(diagnostic).contains("proposal.conversation"))
     }
 
     @Test
@@ -439,10 +521,7 @@ class CodingWorkerTest {
         assertEquals(candidateRevision, run(Path.of(reservation.path), "git", "rev-parse", "$candidateRevision^{commit}"))
         assertEquals("", run(Path.of(reservation.path), "git", "diff", "--name-only", "$candidateRevision^", "HEAD"))
         assertEquals("", run(Path.of(reservation.path), "git", "status", "--porcelain"))
-        assertEquals(
-            "Evidence ACCEPTANCE has no admitted or repository verification command.",
-            result.execution?.result?.diagnostic,
-        )
+        assertTrue(requireNotNull(result.execution?.result?.diagnostic).contains("Evidence ACCEPTANCE has no admitted or repository verification command."))
         assertEquals("orchard.default-toolchains", result.execution?.claim?.toolchainPackId)
         assertEquals("gradle-wrapper", result.execution?.claim?.toolchainProfileId)
         assertTrue(requireNotNull(result.execution?.claim?.toolchainPolicyHash).matches(Regex("[0-9a-f]{64}")))

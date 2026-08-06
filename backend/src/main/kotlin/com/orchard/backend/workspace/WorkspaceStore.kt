@@ -1335,10 +1335,13 @@ class WorkspaceStore(
             WorkflowMutationStatus.INVALID_RECORD,
             "Criterion ${requirement.criterionId} requires an explicit human approval record.",
         )
-        if (
-            requirement.gate == CRITERION_AUTOMATED &&
-            submission.command.trim() != requirement.verification
-        ) return workflowMutationFailure(
+        val admittedVerification = requirement.verification?.takeIf(String::isNotBlank) ?: run.workDefinition?.definition
+            ?.takeIf { kind == "ACCEPTANCE" }
+            ?.acceptanceCriteria
+            ?.map { it.verification }
+            ?.let(::admittedAcceptanceVerifications)
+            ?.lastOrNull()
+        if (requirement.gate == CRITERION_AUTOMATED && submission.command.trim() != admittedVerification) return workflowMutationFailure(
             WorkflowMutationStatus.INVALID_RECORD,
             "Criterion ${requirement.criterionId} requires its admitted verification command.",
         )

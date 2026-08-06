@@ -8,6 +8,8 @@ import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.workspace.WorkspaceStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 
 class CandidatePullRequestAutomatedReviewServiceTest {
@@ -40,7 +42,7 @@ class CandidatePullRequestAutomatedReviewServiceTest {
         )
 
         assertEquals(CandidateAutomatedReviewTickStatus.RECORDED, service.tick().status)
-        assertEquals(24_000, observedContextWindow)
+        assertEquals(20_512, observedContextWindow)
     }
 
     @Test
@@ -72,6 +74,39 @@ class CandidatePullRequestAutomatedReviewServiceTest {
         )
         assertEquals(CANDIDATE_DISPOSITION_ACCEPTED, dispositions.dispositions(pullRequest.pullRequestId).last().status)
         assertEquals(CandidateAutomatedReviewTickStatus.IDLE, service.tick().status)
+    }
+
+    @Test
+    fun `concurrent ticks do not start overlapping automated reviews`() = runBlocking {
+        val pullRequests = TransientCandidatePullRequestStore()
+        val pullRequest = pullRequests.appendNext { pullRequestId -> pullRequest(pullRequestId) }
+        val dispositions = CandidatePullRequestDispositionService(pullRequests)
+        dispositions.record(pullRequest.pullRequestId, CANDIDATE_DISPOSITION_REVIEW_REQUIRED, "Candidate awaits review.")
+        val reviews = CandidatePullRequestReviewService(
+            pullRequests, TransientCandidatePullRequestReviewStore(), dispositionService = dispositions,
+        )
+        val generationStarted = CompletableDeferred<Unit>()
+        val allowGenerationToFinish = CompletableDeferred<Unit>()
+        val service = CandidatePullRequestAutomatedReviewService(
+            pullRequests,
+            reviews,
+            listOf(object : ModelProvider {
+                override suspend fun triage(prompt: String): String = error("unused")
+                override suspend fun plan(prompt: String, actionType: Int, entityType: Int, workspace: WorkspaceStore): String = error("unused")
+                override suspend fun executeCircuitSynthesis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration {
+                    generationStarted.complete(Unit)
+                    allowGenerationToFinish.await()
+                    return ModelGeneration("{\"findings\":[]}", 10, 3)
+                }
+            }),
+            MachineResourceController.unrestricted(),
+        )
+
+        val first = async { service.tick() }
+        generationStarted.await()
+        assertEquals(CandidateAutomatedReviewTickStatus.BUSY, service.tick().status)
+        allowGenerationToFinish.complete(Unit)
+        assertEquals(CandidateAutomatedReviewTickStatus.RECORDED, first.await().status)
     }
 
     private fun pullRequest(pullRequestId: Long): CandidatePullRequest {

@@ -13,6 +13,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -31,6 +32,7 @@ import kotlinx.serialization.json.put
 import java.net.HttpURLConnection
 import java.net.URI
 import java.time.Duration
+import io.ktor.utils.io.readUTF8Line
 
 @Serializable
 data class ModelEndpointInspection(
@@ -250,10 +252,17 @@ class CatalogModelProvider(
                 setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options))
             }
         }
-        val body = response.bodyAsText()
+        val body = response.bodyAsOllamaStream()
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
+        val streamed = reconcileOllamaStream(body, json)
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
-        return json.decodeFromString<OllamaCatalogResponse>(body).also { decoded ->
+        return OllamaCatalogResponse(
+            response = streamed.response,
+            thinking = streamed.thinking,
+            done = true,
+            promptEvalCount = streamed.promptEvalCount,
+            evalCount = streamed.evalCount,
+        ).also { decoded ->
             ollamaResidentContextTokens = contextWindowTokens
             ollamaResidentUntilNanos = nanoTime() + OLLAMA_RESIDENCY_WINDOW_NANOS
             if (providerDiagnosticsEnabled) {
@@ -492,7 +501,7 @@ private fun ollamaResponseFormat(prompt: String): JsonElement = if ("bounded-cod
 private data class OllamaCatalogRequest(
     val model: String,
     val prompt: String,
-    val stream: Boolean = false,
+    val stream: Boolean = true,
     val format: JsonElement = JsonPrimitive("json"),
     val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
@@ -502,7 +511,7 @@ private data class OllamaCatalogRequest(
 private data class OllamaCatalogPlainRequest(
     val model: String,
     val prompt: String,
-    val stream: Boolean = false,
+    val stream: Boolean = true,
     val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
 )
@@ -543,6 +552,16 @@ private data class OllamaAttemptDiagnostic(
     val formatPresent: Boolean,
     val think: JsonElement,
 )
+
+private suspend fun io.ktor.client.statement.HttpResponse.bodyAsOllamaStream(): String = buildString {
+    val channel = bodyAsChannel()
+    while (!channel.isClosedForRead) {
+        channel.readUTF8Line()?.let {
+            append(it)
+            append('\n')
+        }
+    }
+}
 
 @Serializable
 private data class OllamaModelsResponse(val models: List<OllamaModel>)

@@ -489,9 +489,21 @@ fun main() {
             runCatching { candidatePullRequestLearning.reconcile() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Candidate outcome learning reconciliation failed", error)
             }
-            runCatching { candidatePullRequestAutomatedReviews.tick() }.onFailure { error ->
-                DISPATCH_LOGGER.log(Level.WARNING, "Automated candidate review reconciliation failed", error)
-            }
+            runCatching { candidatePullRequestAutomatedReviews.tick() }
+                .onSuccess { result ->
+                    if (result.status != CandidateAutomatedReviewTickStatus.IDLE &&
+                        result.status != CandidateAutomatedReviewTickStatus.RECORDED &&
+                        result.status != CandidateAutomatedReviewTickStatus.BUSY
+                    ) {
+                        DISPATCH_LOGGER.warning(
+                            "Automated candidate review resolved as ${result.status} for PR ${result.pullRequestId}, " +
+                                "kind ${result.kind}: ${result.diagnostic}",
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    DISPATCH_LOGGER.log(Level.WARNING, "Automated candidate review reconciliation failed", error)
+                }
             runCatching { conversationConductor.projectWorkspaceActivity(workspace) }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation activity projection failed", error)
             }
@@ -1726,6 +1738,7 @@ fun Application.workspaceApi(
             val status = when (result.status) {
                 CandidateAutomatedReviewTickStatus.RECORDED -> HttpStatusCode.Created
                 CandidateAutomatedReviewTickStatus.IDLE -> HttpStatusCode.OK
+                CandidateAutomatedReviewTickStatus.BUSY -> HttpStatusCode.Conflict
                 CandidateAutomatedReviewTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
                 CandidateAutomatedReviewTickStatus.MODEL_FAILED -> HttpStatusCode.ServiceUnavailable
                 CandidateAutomatedReviewTickStatus.INVALID_OUTPUT -> HttpStatusCode.UnprocessableEntity

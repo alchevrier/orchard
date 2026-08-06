@@ -43,6 +43,7 @@ import com.orchard.backend.workspace.WorkflowMutationStatus
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceStore
 import com.orchard.backend.workspace.admittedAcceptanceVerification
+import com.orchard.backend.workspace.admittedAcceptanceVerifications
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
@@ -573,6 +574,17 @@ class CodingWorkerService(
             proposal?.let { strictOutputJson.encodeToString(it) }
                 ?: strictOutputJson.encodeToString(requireNotNull(toolBatch))
         )
+        val toolBatchBehaviorDiagnostic = toolBatch?.let(::boundedCodingToolBehaviorDiagnostic)
+        if (toolBatchBehaviorDiagnostic != null) {
+            return finish(
+                claim,
+                CODING_EXECUTION_BLOCKED,
+                CodingWorkerTickStatus.INVALID_PROPOSAL,
+                toolBatchBehaviorDiagnostic,
+                modelExecution.executionId,
+                proposalHash,
+            )
+        }
         if (executionPlan != null && proposal != null) {
             val rejectedAnchorDiagnostic = runCatching {
                 codingRejectedAnchorDiagnostic(
@@ -1004,8 +1016,8 @@ class CodingWorkerService(
             val observation = if (requirement.kind == "SOURCE_DIFF") {
                 VerificationObservation("", 0, sha256(candidate.changedPaths.joinToString("\n")), "Candidate source diff was committed.")
             } else {
-                val command = runCatching {
-                    verificationCommand(
+                val commands = runCatching {
+                    verificationCommands(
                         requirement,
                         toolchainPolicy,
                         run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
@@ -1014,14 +1026,24 @@ class CodingWorkerService(
                     .getOrElse {
                         return "Evidence ${requirement.kind} has an invalid admitted verification command: ${it.message.orEmpty()}"
                     }
-                    ?: return "Evidence ${requirement.kind} has no admitted or repository verification command."
-                runCatching {
-                    workspaceGateway.executeVerification(
-                        requireNotNull(run.context.workspaceReservation).path,
-                        command.command,
-                        command.evidenceCommand,
-                    )
-                }.getOrElse { return "Verification ${requirement.kind} could not run: ${it.message.orEmpty()}" }
+                if (commands.isEmpty()) return "Evidence ${requirement.kind} has no admitted or repository verification command."
+                val observations = commands.map { command ->
+                    runCatching {
+                        workspaceGateway.executeVerification(
+                            requireNotNull(run.context.workspaceReservation).path,
+                            command.command,
+                            command.evidenceCommand,
+                        )
+                    }.getOrElse { return "Verification ${requirement.kind} could not run: ${it.message.orEmpty()}" }
+                }
+                val failed = observations.firstOrNull { it.exitCode != 0 }
+                if (failed != null) failed else VerificationObservation(
+                    commands.last().evidenceCommand,
+                    0,
+                    sha256(observations.joinToString("\n") { it.outputHash }),
+                    "Verified ${commands.size} admitted acceptance command${if (commands.size == 1) "" else "s"}: " +
+                        commands.joinToString("; ") { it.evidenceCommand },
+                )
             }
             val result = workspace.submitEvidence(
                 run.runId,
@@ -1053,19 +1075,25 @@ class CodingWorkerService(
                 current.context.workspaceReservation == expected.context.workspaceReservation
         } == true
 
-    private fun verificationCommand(
+    private fun verificationCommands(
         requirement: EvidenceRequirement,
         toolchainPolicy: ResolvedToolchainPolicy,
         acceptanceVerifications: List<String>,
-    ): VerificationInvocation? = (requirement.verification?.takeIf(String::isNotBlank)
-        ?: admittedAcceptanceVerification(acceptanceVerifications).takeIf { requirement.kind == "ACCEPTANCE" })?.let { admitted ->
-        VerificationInvocation(workspaceGateway.parseVerificationCommand(admitted), admitted)
-    } ?: toolchainPolicy.commands[
+    ): List<VerificationInvocation> {
+        val accepted = if (requirement.kind == "ACCEPTANCE") {
+            admittedAcceptanceVerifications(acceptanceVerifications)
+        } else emptyList()
+        val explicit = requirement.verification?.takeIf(String::isNotBlank)?.let(::listOf) ?: accepted
+        if (explicit.isNotEmpty()) return explicit.map { admitted ->
+            VerificationInvocation(workspaceGateway.parseVerificationCommand(admitted), admitted)
+        }
+        return toolchainPolicy.commands[
         when (requirement.kind) {
             "REGRESSION_TEST" -> "TEST"
             else -> requirement.kind
         }
-    ]?.let { command -> VerificationInvocation(command, command.canonical()) }
+    ]?.let { command -> listOf(VerificationInvocation(command, command.canonical())) }.orEmpty()
+    }
 
     private data class VerificationInvocation(
         val command: VerificationCommand,
@@ -1359,6 +1387,7 @@ class CodingWorkerService(
             Treat workPackage as complete intent, design, ownership, source, check, and escalation authority. Implement the required behavior without redesigning it. Use only paths inside workPackage.ownership.paths and only actions allowed by workPackage.ownership.allowedActions. REWRITE_FILE is valid only when content is a non-null complete resulting UTF-8 file; never emit a REWRITE_FILE with null content. For localized edits, prefer REPLACE_LITERAL, which requires non-null expectedLiteral, replacement, and exact expectedCount. CREATE_FILE is valid only for workPackage.ownership.createPaths. Use expectedRevision from the current repository context. Do not emit exact source anchors, commands, Markdown, approvals, evidence, Git actions, or claims that checks passed.
             The operations array must contain only operation objects. Every array element must be an object with an action and path; never put a string, source excerpt, explanation, or nested array in operations. Do not append prose before or after the JSON object. Before responding, validate that the complete response is one parseable JSON object, that operations is an array of objects, and that every operation matches one of the allowed payload shapes.
             Keep summary short, omit optional JSON whitespace, and include no fields beyond the schema. Prefer the smallest complete set of localized replacements; do not repeat unchanged source or include explanations inside operation fields.
+            When changing a test to introduce an assertion that requires an import, such as kotlin.test.assertNotNull, use one complete REWRITE_FILE for that authorized test path containing both the import and the assertion. Do not use REPLACE_LITERAL for such a change because it cannot preserve compilation by itself.
             If a prior rejection says a WRITE appears truncated, do not emit WRITE or REWRITE_FILE for that path. Emit only bounded REPLACE_LITERAL operations with exact anchors from the current source. A source anchor is one contiguous substring: copy expectedLiteral exactly from one quoted source window and never combine separate windows, prefixes, or suffixes.
         """.trimIndent()
     }
@@ -1516,7 +1545,7 @@ internal fun candidateForbiddenLiteralDiagnostic(
     return null
 }
 
-private fun isCandidateTestSourcePath(path: String): Boolean {
+internal fun isCandidateTestSourcePath(path: String): Boolean {
     val normalized = path.replace('\\', '/').lowercase()
     return "/test/" in normalized || normalized.substringAfterLast('/').contains("test.")
 }
@@ -1829,6 +1858,24 @@ internal fun codingProposalBehaviorDiagnostic(
             .map { it.groupValues[1] }
             .toList()
     }.distinct()
+    proposal.operations.filter { isCandidateTestSourcePath(it.path) }.forEach { operation ->
+        val proposedText = when (operation.action) {
+            CODING_FILE_WRITE -> operation.content.orEmpty()
+            CODING_FILE_REPLACE -> operation.replacements.joinToString("\n") { it.new }
+            else -> ""
+        }
+        if (NULLABLE_ASSERT_TRUE.containsMatchIn(proposedText)) {
+            return "${operation.action} ${operation.path} introduces assertTrue with a nullable condition; assert the nullable value explicitly before testing its property."
+        }
+        if (ASSERT_NOT_NULL_CALL.containsMatchIn(proposedText) &&
+            !KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(proposedText)
+        ) {
+            return "${operation.action} ${operation.path} introduces assertNotNull without importing kotlin.test.assertNotNull."
+        }
+        FORBIDDEN_PROPOSAL_TEST_PROPERTY.find(proposedText)?.let { match ->
+            return "${operation.action} ${operation.path} references ${match.value}, which is not a supported proposal property in this governed test context."
+        }
+    }
     proposal.operations.filter { it.action in setOf(CODING_FILE_REPLACE, CODING_FILE_WRITE) }.forEach { operation ->
         val original = files[operation.path]?.content ?: return@forEach
         var candidate = when (operation.action) {
@@ -1865,6 +1912,11 @@ internal fun codingProposalBehaviorDiagnostic(
             !KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(candidate)
         ) {
             return "${operation.action} ${operation.path} introduces assertNotNull without importing kotlin.test.assertNotNull."
+        }
+        if (isCandidateTestSourcePath(operation.path)) {
+            FORBIDDEN_PROPOSAL_TEST_PROPERTY.find(candidate)?.let { match ->
+                return "${operation.action} ${operation.path} references ${match.value}, which is not a supported proposal property in this governed test context."
+            }
         }
         if (isCandidateTestSourcePath(operation.path)) {
             operation.replacements.forEach { replacement ->
@@ -1955,9 +2007,10 @@ private const val MAX_RETRY_PROPOSAL_BYTES = 16 * 1024
 private val CLIENT_ENDPOINT_CALL = Regex("\\bclient\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\(")
 private val KOTLIN_FUNCTION_START = Regex("\\bfun\\b[^\\n{]*\\{")
 private val KOTLIN_LOCAL_DECLARATION = Regex("\\b(?:val|var)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b")
-private val NULLABLE_ASSERT_TRUE = Regex("\\bassertTrue\\s*\\([^\\n]*\\?\\.")
-private val ASSERT_NOT_NULL_CALL = Regex("\\bassertNotNull\\s*\\(")
-private val KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT = Regex("(?m)^import\\s+kotlin\\.test\\.assertNotNull\\s*$")
+internal val NULLABLE_ASSERT_TRUE = Regex("\\bassertTrue\\s*\\([^\\n]*\\?\\.")
+internal val ASSERT_NOT_NULL_CALL = Regex("\\bassertNotNull\\s*\\(")
+internal val KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT = Regex("(?m)^import\\s+kotlin\\.test\\.assertNotNull\\s*$")
+internal val FORBIDDEN_PROPOSAL_TEST_PROPERTY = Regex("\\bproposal\\.(?:conversation|domainCorrelation)\\b")
 internal fun codingModelOutputDiagnostic(
     generation: ModelGeneration,
     profile: ModelExecutionProfile,

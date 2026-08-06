@@ -8,6 +8,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -16,6 +17,10 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import io.ktor.utils.io.readUTF8Line
 
 interface ModelProvider : AutoCloseable {
     suspend fun triage(prompt: String): String
@@ -162,7 +167,7 @@ class OllamaClient(
                 OllamaGenerateRequest(
                     model = MODEL,
                     prompt = prompt,
-                    stream = false,
+                    stream = true,
                     format = "json",
                     think = false,
                     options = OllamaOptions(
@@ -175,10 +180,9 @@ class OllamaClient(
                 )
             )
         }
-        val body = response.bodyAsText()
+        val body = response.bodyAsOllamaStream()
         check(response.status.isSuccess()) { "Ollama returned HTTP ${response.status.value}: ${body.take(512)}" }
-        check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Ollama response exceeded $MAX_RESPONSE_BYTES bytes" }
-        val decoded = json.decodeFromString<OllamaGenerateResponse>(body)
+        val decoded = reconcileOllamaStream(body, json)
         check(decoded.response.isNotBlank()) {
             if (decoded.thinking.isNullOrBlank()) "Ollama returned an empty structured response"
             else "Ollama exhausted the generation in thinking without a structured response"
@@ -238,3 +242,38 @@ private data class OllamaGenerateResponse(
     @SerialName("prompt_eval_count") val promptEvalCount: Int? = null,
     @SerialName("eval_count") val evalCount: Int? = null,
 )
+
+internal data class OllamaStreamResponse(
+    val response: String,
+    val thinking: String?,
+    val promptEvalCount: Int?,
+    val evalCount: Int?,
+)
+
+internal fun reconcileOllamaStream(body: String, json: Json): OllamaStreamResponse {
+    var response = ""
+    var thinking = ""
+    var promptEvalCount: Int? = null
+    var evalCount: Int? = null
+    var done = false
+    body.lineSequence().filter(String::isNotBlank).forEach { line ->
+        val frame = json.parseToJsonElement(line).jsonObject
+        response += frame["response"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        thinking += frame["thinking"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        promptEvalCount = frame["prompt_eval_count"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: promptEvalCount
+        evalCount = frame["eval_count"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: evalCount
+        done = frame["done"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: done
+    }
+    check(done) { "Ollama stream ended without a terminal done frame" }
+    return OllamaStreamResponse(response, thinking.ifBlank { null }, promptEvalCount, evalCount)
+}
+
+private suspend fun io.ktor.client.statement.HttpResponse.bodyAsOllamaStream(): String = buildString {
+    val channel = bodyAsChannel()
+    while (!channel.isClosedForRead) {
+        channel.readUTF8Line()?.let {
+            append(it)
+            append('\n')
+        }
+    }
+}

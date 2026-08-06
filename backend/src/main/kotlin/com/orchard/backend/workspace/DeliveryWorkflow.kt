@@ -45,7 +45,7 @@ object DefaultDeliveryWorkflow {
             workDefinition?.let { manifest ->
                 val acceptanceVerification = if (acceptanceVerificationEnabled) {
                     val verifications = manifest.definition.acceptanceCriteria.map { it.verification }
-                    if (canonicalAcceptanceVerification) admittedAcceptanceVerification(verifications) else verifications
+                    if (canonicalAcceptanceVerification) admittedAcceptanceVerifications(verifications).lastOrNull() else verifications
                         .map(String::trim)
                         .filter(String::isNotBlank)
                         .distinct()
@@ -175,12 +175,14 @@ object DefaultDeliveryWorkflow {
     }
 }
 
-internal fun admittedAcceptanceVerification(verifications: List<String>): String? = verifications
+internal fun admittedAcceptanceVerifications(verifications: List<String>): List<String> = verifications
     .mapNotNull { verification ->
         val trimmed = verification.trim()
         GRADLE_VERIFICATION.find(trimmed)?.value
     }
     .distinct()
-    .singleOrNull()
+
+internal fun admittedAcceptanceVerification(verifications: List<String>): String? =
+    admittedAcceptanceVerifications(verifications).singleOrNull()
 
 private val GRADLE_VERIFICATION = Regex("""\./gradlew(?:\s+[^,.\n]+)*""")

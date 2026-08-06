@@ -47,6 +47,11 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 
 enum class RepositoryAnalysisTickStatus {
     IDLE,
@@ -138,6 +143,16 @@ internal data class RepositoryAnalysisCandidate(
     val sourcePaths: List<String>,
     val unresolvedQuestions: List<String> = emptyList(),
 )
+
+internal fun normalizeRepositoryAnalysisCandidateJson(text: String, json: Json): String {
+    val root = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return text
+    val normalized = root.toMutableMap()
+    listOf("reuse", "preservedInvariants").forEach { field ->
+        val scalar = (root[field] as? JsonPrimitive)?.contentOrNull ?: return@forEach
+        normalized[field] = JsonArray(listOf(JsonPrimitive(scalar)))
+    }
+    return if (normalized == root) text else JsonObject(normalized).toString()
+}
 
 class RepositoryAnalysisService(
     private val workspace: WorkspaceStore,
@@ -574,7 +589,11 @@ class RepositoryAnalysisService(
             repositoryAnalysisGenerationWithinBudget(it, profile.inputBudgetTokens, profile.outputBudgetTokens)
         }
         val decodedOutput = boundedGeneration?.let {
-            runCatching { json.decodeFromString<RepositoryAnalysisCandidate>(it.text) }
+            runCatching {
+                json.decodeFromString<RepositoryAnalysisCandidate>(
+                    normalizeRepositoryAnalysisCandidateJson(it.text, json),
+                )
+            }
         }
         val output = decodedOutput?.getOrNull()?.let {
             compileRepositoryAnalysisCandidate(
