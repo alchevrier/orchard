@@ -363,6 +363,7 @@ class RepositoryAnalysisService(
                 val complianceContext = runCatching {
                     collectComplianceContext(workspacePath, candidate, selectors, context)
                 }.getOrNull() ?: return@filter false
+                if (repositoryEvidenceSelectionDiagnostic(selectors, context) != null) return@filter false
                 val staticCandidates = plans.filter {
                     it.runId == candidate.runId &&
                         it.coversAcceptedScope(candidate) &&
