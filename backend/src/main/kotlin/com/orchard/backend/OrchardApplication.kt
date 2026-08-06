@@ -575,6 +575,19 @@ fun main() {
                                 )
                             }
                         }
+                    companyControl.acceptedPromotionRunIds().forEach { acceptedRunId ->
+                        val promotionStatus = companyControl.promote(acceptedRunId).status.let { status ->
+                            if (status == CompanyMutationStatus.EVIDENCE_STALE) {
+                                companyControl.recoverStalePromotion(acceptedRunId).status
+                            } else {
+                                status
+                            }
+                        }
+                        AUDIT_LOGGER.log(
+                            if (promotionStatus == CompanyMutationStatus.RECORDED) Level.INFO else Level.WARNING,
+                            "Accepted candidate promotion reconciliation resolved as $promotionStatus for run $acceptedRunId.",
+                        )
+                    }
                 }
             }.onFailure { error ->
                 AUDIT_LOGGER.log(Level.WARNING, "Independent company audit tick failed", error)
@@ -649,7 +662,13 @@ internal fun promoteAcceptedAudit(
 ): CompanyMutationStatus? = if (
     status == com.orchard.backend.company.CompanyAuditTickStatus.ACCEPTED && runId != null
 ) {
-    companyControl.promote(runId).status
+    companyControl.promote(runId).status.let { promotionStatus ->
+        if (promotionStatus == CompanyMutationStatus.EVIDENCE_STALE) {
+            companyControl.recoverStalePromotion(runId).status
+        } else {
+            promotionStatus
+        }
+    }
 } else {
     null
 }

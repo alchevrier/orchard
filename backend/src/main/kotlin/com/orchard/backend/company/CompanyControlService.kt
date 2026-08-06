@@ -7,7 +7,9 @@ import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.ModelCapabilityProfile
 import com.orchard.backend.workspace.ProjectGenesisRevision
 import com.orchard.backend.workspace.RepositoryBindingStore
+import com.orchard.backend.workspace.RUN_STATE_DONE
 import com.orchard.backend.workspace.TransientRepositoryBindingStore
+import com.orchard.backend.workspace.WorkflowStartStatus
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceStore
 import kotlinx.serialization.Serializable
@@ -33,6 +35,7 @@ enum class CompanyMutationStatus {
     EVIDENCE_STALE,
     AUDIT_VIOLATION,
     AUDIT_INCOMPLETE,
+    SUCCESSOR_SCHEDULED,
     STORAGE_UNAVAILABLE,
 }
 
@@ -436,11 +439,54 @@ class CompanyControlService(
         )
     }
 
+    @Synchronized
+    fun recoverStalePromotion(runId: Long): CompanyMutationResult {
+        val run = run(runId) ?: return CompanyMutationResult(CompanyMutationStatus.RUN_NOT_FOUND)
+        val acceptance = store.loadEvents().mapNotNull { it.acceptance }.lastOrNull { it.runId == runId }
+            ?: return CompanyMutationResult(CompanyMutationStatus.AUDIT_INCOMPLETE)
+        if (run.state != RUN_STATE_DONE || acceptance.candidateRevision.isBlank()) {
+            return CompanyMutationResult(CompanyMutationStatus.EVIDENCE_STALE)
+        }
+        val head = repositories.resolveHead(run.context.projectId)
+            ?: return CompanyMutationResult(CompanyMutationStatus.STORAGE_UNAVAILABLE)
+        if (!head.clean || head.commitHash.equals(run.context.repository.commitHash, ignoreCase = true)) {
+            return CompanyMutationResult(CompanyMutationStatus.EVIDENCE_STALE)
+        }
+        if (workspace.requireAuditRepair(
+                runId,
+                "Accepted candidate ${acceptance.candidateRevision} is stale against clean destination ${head.commitHash}; " +
+                    "a successor will revalidate the change from the current repository head.",
+            ).status != com.orchard.backend.workspace.WorkflowMutationStatus.RECORDED
+        ) return CompanyMutationResult(CompanyMutationStatus.STORAGE_UNAVAILABLE)
+        if (workspace.cancelWorkflow(runId).status != com.orchard.backend.workspace.WorkflowMutationStatus.RECORDED) {
+            return CompanyMutationResult(CompanyMutationStatus.STORAGE_UNAVAILABLE)
+        }
+        return when (workspace.startWorkflow(run.context.workItemId).status) {
+            WorkflowStartStatus.CREATED -> CompanyMutationResult(CompanyMutationStatus.SUCCESSOR_SCHEDULED)
+            else -> CompanyMutationResult(CompanyMutationStatus.STORAGE_UNAVAILABLE)
+        }
+    }
+
     fun projectViews(): List<CompanyProjectView> = workspace.snapshot(MESSAGE_READY).projectGenesis
         .map { it.projectId }
         .distinct()
         .sorted()
         .map(::projectView)
+
+    fun acceptedPromotionRunIds(): List<Long> {
+        val promotedAcceptanceIds = store.loadEvents().mapNotNull { it.promotion }
+            .mapTo(hashSetOf()) { it.acceptanceId }
+        val completedRunIds = workspace.snapshot(MESSAGE_READY).workflowRuns
+            .filter { it.state == RUN_STATE_DONE }
+            .mapTo(hashSetOf()) { it.runId }
+        return store.loadEvents().mapNotNull { it.acceptance }
+            .asSequence()
+            .filter { it.acceptanceId !in promotedAcceptanceIds && it.runId in completedRunIds }
+            .map { it.runId }
+            .distinct()
+            .sorted()
+            .toList()
+    }
 
     fun projectView(projectId: Int): CompanyProjectView {
         val snapshot = workspace.snapshot(MESSAGE_READY)
