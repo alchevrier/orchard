@@ -1245,7 +1245,7 @@ data class ProjectGenesisRevisionResponse(
     val decisions: List<ArchitectureDecisionRequest> = emptyList(),
     val firstEpicId: Int? = null,
     val blueprint: RepositoryBlueprintRequest? = null,
-    val admitted: Boolean = false,
+    val admitted: Boolean = true,
     val actor: String,
     val createdAt: String,
     val hash: String,
