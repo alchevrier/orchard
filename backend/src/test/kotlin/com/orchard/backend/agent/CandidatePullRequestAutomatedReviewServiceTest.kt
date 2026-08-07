@@ -14,6 +14,23 @@ import kotlinx.coroutines.runBlocking
 
 class CandidatePullRequestAutomatedReviewServiceTest {
     @Test
+    fun `automated reviews skip superseded candidates`() {
+        val pullRequest = pullRequest(1)
+        val superseded = CandidatePullRequestDisposition(
+            dispositionId = 1,
+            pullRequestId = pullRequest.pullRequestId,
+            pullRequestHash = pullRequest.hash,
+            status = CANDIDATE_DISPOSITION_SUPERSEDED,
+            reason = "A corrective candidate was frozen.",
+            recordedAt = "2026-08-07T00:00:00Z",
+            hash = "e".repeat(64),
+        )
+
+        assertEquals(false, candidateRequiresAutomatedReview(pullRequest, superseded))
+        assertEquals(true, candidateRequiresAutomatedReview(pullRequest, superseded.copy(status = CANDIDATE_DISPOSITION_REVIEW_REQUIRED)))
+    }
+
+    @Test
     fun `automated review uses the configured bounded audit aperture`() = runBlocking {
         val pullRequests = TransientCandidatePullRequestStore()
         val pullRequest = pullRequests.appendNext { pullRequestId -> pullRequest(pullRequestId) }

@@ -263,7 +263,8 @@ fun main() {
         candidatePullRequestReviews,
         modelProviders,
         resourceController,
-        modelProfileSettingsStore,
+        dispositionService = candidatePullRequestDispositions,
+        profileSettingsStore = modelProfileSettingsStore,
     )
     val candidatePullRequestLearning = CandidatePullRequestLearningService(
         candidatePullRequestStore,

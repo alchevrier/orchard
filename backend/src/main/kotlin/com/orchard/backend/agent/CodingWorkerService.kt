@@ -911,11 +911,19 @@ class CodingWorkerService(
     private fun candidateRuns(executions: List<CodingWorkerExecutionView>): List<WorkflowRunView> {
         val codingAttempts = attemptStore.load()
         val repositoryPlans = repositoryAnalysis?.plans().orEmpty()
+        val pullRequests = pullRequestStore.load()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
             .filter { run ->
                 run.context.circuitDispatchId != null &&
                     run.context.workspaceReservation?.mode in setOf("ISOLATED", "INTEGRATION")
+            }
+            .filter { run ->
+                val latestPullRequest = pullRequests.lastOrNull { it.runId == run.runId }
+                candidateRunRequiresExecution(
+                    latestPullRequest,
+                    latestPullRequest?.let { dispositionService?.dispositions(it.pullRequestId)?.lastOrNull() },
+                )
             }
             .filter { run ->
                 val hasRepositoryPlan = repositoryPlans.any { it.runId == run.runId }
@@ -1567,6 +1575,11 @@ internal fun codingContextQuery(run: WorkflowRunView, executionPlan: RepositoryE
     appendLine(run.context.content)
     append(codingPlanContextQuery(executionPlan))
 }
+
+internal fun candidateRunRequiresExecution(
+    latestPullRequest: CandidatePullRequest?,
+    latestDisposition: CandidatePullRequestDisposition?,
+): Boolean = latestPullRequest == null || latestDisposition?.status == CANDIDATE_DISPOSITION_REPAIR_REQUIRED
 
 internal fun codingPlanContextQuery(executionPlan: RepositoryExecutionPlan?): String = buildString {
     executionPlan?.content?.let { plan ->

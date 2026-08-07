@@ -60,6 +60,38 @@ import kotlinx.serialization.json.Json
 
 class CodingWorkerTest {
     @Test
+    fun `candidate run waits for review instead of freezing another corrective candidate`() {
+        val candidate = CandidatePullRequest(
+            pullRequestId = 1,
+            runId = 7,
+            workPackageId = 3,
+            workPackageHash = "a".repeat(64),
+            baseRevision = "b".repeat(40),
+            candidateRevision = "c".repeat(40),
+            changedPaths = listOf("src/Main.kt"),
+            implementationClaims = listOf("Observable behavior."),
+            checks = listOf("./gradlew test"),
+            evidence = listOf(CandidatePullRequestEvidence("TEST", "./gradlew test", true, "d".repeat(64), "Passed.")),
+            deviations = emptyList(),
+            createdAt = "2026-08-07T00:00:00Z",
+            hash = "e".repeat(64),
+        )
+        val reviewRequired = CandidatePullRequestDisposition(
+            dispositionId = 1,
+            pullRequestId = candidate.pullRequestId,
+            pullRequestHash = candidate.hash,
+            status = CANDIDATE_DISPOSITION_REVIEW_REQUIRED,
+            reason = "Candidate awaits independent review.",
+            recordedAt = "2026-08-07T00:00:00Z",
+            hash = "f".repeat(64),
+        )
+
+        assertEquals(false, candidateRunRequiresExecution(candidate, reviewRequired))
+        assertEquals(true, candidateRunRequiresExecution(candidate, reviewRequired.copy(status = CANDIDATE_DISPOSITION_REPAIR_REQUIRED)))
+        assertEquals(true, candidateRunRequiresExecution(null, null))
+    }
+
+    @Test
     fun `coding work package projection excludes durable prompt bloat`() {
         val sourceContent = "x".repeat(100_000)
         val workPackage = ExecutableWorkPackage(

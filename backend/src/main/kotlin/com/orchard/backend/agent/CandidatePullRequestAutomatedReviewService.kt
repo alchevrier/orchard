@@ -49,6 +49,7 @@ class CandidatePullRequestAutomatedReviewService(
     private val modelProviders: List<ModelProvider>,
     private val resourceController: MachineResourceController,
     private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
+    private val dispositionService: CandidatePullRequestDispositionService? = null,
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
 ) {
     private val tickMutex = Mutex()
@@ -65,6 +66,7 @@ class CandidatePullRequestAutomatedReviewService(
     private suspend fun tickExclusive(): CandidateAutomatedReviewTickResult {
         val pending = pullRequestStore.load().asSequence().flatMap { pullRequest ->
             REVIEW_FOCUS.keys.asSequence()
+                .filter { candidateRequiresAutomatedReview(pullRequest, dispositionService?.dispositions(pullRequest.pullRequestId)?.lastOrNull()) }
                 .filter { kind -> reviewService.reviews(pullRequest.pullRequestId).none { it.kind == kind } }
                 .map { kind -> pullRequest to kind }
         }.firstOrNull() ?: return CandidateAutomatedReviewTickResult(CandidateAutomatedReviewTickStatus.IDLE)
@@ -146,3 +148,8 @@ Do not admit designs, accept candidates, promote code, or request actions outsid
         )
     }
 }
+
+internal fun candidateRequiresAutomatedReview(
+    pullRequest: CandidatePullRequest,
+    disposition: CandidatePullRequestDisposition?,
+): Boolean = disposition == null || disposition.status == CANDIDATE_DISPOSITION_REVIEW_REQUIRED
