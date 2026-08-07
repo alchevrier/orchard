@@ -344,9 +344,11 @@ class CodingWorkerService(
             val definition = run.workDefinition
                 ?: return CodingWorkerTickResult(CodingWorkerTickStatus.PLAN_BLOCKED, diagnostic = "The accepted plan has no work-definition authority.")
             val restrictedCorrectionPaths = executions.asReversed().firstNotNullOfOrNull { execution ->
-                externalVerificationRetryPaths(execution)?.takeIf { it.isNotEmpty() }
+                externalVerificationRetryPaths(execution)
+                    ?.takeIf { execution.claim.runId == run.runId && it.isNotEmpty() }
             } ?: executions.asReversed().firstNotNullOfOrNull { execution ->
-                execution.result?.takeIf { it.status == CODING_EXECUTION_FAILED }?.diagnostic
+                execution.takeIf { it.claim.runId == run.runId }
+                    ?.result?.takeIf { it.status == CODING_EXECUTION_FAILED }?.diagnostic
                     ?.let { diagnostic -> firstFailingKotlinTestPath(plan, diagnostic)?.let(::listOf) }
             }
             runCatching {
