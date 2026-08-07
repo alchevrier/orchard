@@ -1249,6 +1249,10 @@ data class ProjectGenesisRevisionResponse(
     val actor: String,
     val createdAt: String,
     val hash: String,
+
+    val actor: String,
+    val createdAt: String,
+    val hash: String,
 )
 
 @Serializable
