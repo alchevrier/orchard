@@ -17,7 +17,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
-import kotlin.test.assertNotNull
 
 class DesktopNetworkClientTest {
     @Test
@@ -304,7 +303,6 @@ class DesktopNetworkClientTest {
 
         assertEquals("EXPERIENCE", proposal.phase)
         assertEquals("Calm", proposal.submission.experience?.emotionalQualities?.single())
-        assertNotNull(proposal.submission.experience)
         assertEquals("c".repeat(40), proposal.repositoryRevision)
         assertEquals("frontend/src/desktopMain/kotlin/App.kt", proposal.repositoryEvidence.single().path)
         assertEquals(7, proposal.omittedRepositoryFileCount)
