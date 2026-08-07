@@ -1072,6 +1072,9 @@ class CodingWorkerService(
                     }
                 if (commands.isEmpty()) return "Evidence ${requirement.kind} has no admitted or repository verification command."
                 val observations = commands.map { command ->
+                        if (workspaceGateway.currentRevision(requireNotNull(run.context.workspaceReservation).path) != candidate.revision) {
+                            return "Verification ${requirement.kind} is not running at candidate revision ${candidate.revision}."
+                        }
                     runCatching {
                         workspaceGateway.executeVerification(
                             requireNotNull(run.context.workspaceReservation).path,
@@ -1079,6 +1082,11 @@ class CodingWorkerService(
                             command.evidenceCommand,
                         )
                     }.getOrElse { return "Verification ${requirement.kind} could not run: ${it.message.orEmpty()}" }
+                            .also {
+                                if (workspaceGateway.currentRevision(requireNotNull(run.context.workspaceReservation).path) != candidate.revision) {
+                                    return "Verification ${requirement.kind} changed away from candidate revision ${candidate.revision}."
+                                }
+                            }
                 }
                 val failed = observations.firstOrNull { it.exitCode != 0 }
                 val externalModule = failed?.let { externalVerificationModule(it, candidate) }
