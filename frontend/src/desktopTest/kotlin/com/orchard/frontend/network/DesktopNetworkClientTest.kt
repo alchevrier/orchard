@@ -303,6 +303,9 @@ class DesktopNetworkClientTest {
 
         assertEquals("EXPERIENCE", proposal.phase)
         assertEquals("Calm", proposal.submission.experience?.emotionalQualities?.single())
+
+        assertEquals("EXPERIENCE", proposal.phase)
+        assertEquals("Calm", proposal.submission.experience?.emotionalQualities?.single())
         assertEquals("c".repeat(40), proposal.repositoryRevision)
         assertEquals("frontend/src/desktopMain/kotlin/App.kt", proposal.repositoryEvidence.single().path)
         assertEquals(7, proposal.omittedRepositoryFileCount)
