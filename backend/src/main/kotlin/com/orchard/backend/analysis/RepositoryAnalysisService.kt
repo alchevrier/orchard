@@ -1005,7 +1005,7 @@ class RepositoryAnalysisService(
         const val REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS = 4_000
         const val FOCUSED_CORRECTION_CONTEXT_BYTES = 96 * 1024
         const val FOCUSED_CORRECTION_PROFILE_ID = "focused-repository-correction-v1"
-        const val FOCUSED_CORRECTION_INPUT_TOKENS = 16_000
+        const val FOCUSED_CORRECTION_INPUT_TOKENS = 20_000
         const val FOCUSED_CORRECTION_OUTPUT_TOKENS = 4_000
         const val FOCUSED_CORRECTION_BINDING_ID = "ollama:gpt-oss-120b:json:t0:s42"
         val ACTIONABLE_STATES = setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED)
@@ -1872,18 +1872,35 @@ internal fun compileRepositoryScopeAuthority(
     val sourceOperations = output.operations.filter {
         it.action != PLAN_OPERATION_VERIFY && it.path in requiredPaths
     }
-    val operationTemplate = sourceOperations.firstOrNull()
+    val operationTemplate = sourceOperations.firstOrNull() ?: output.operations.firstOrNull()
     val synthesizedTestOperations = selectedTestPaths
         .filter { path -> sourceOperations.none { it.path == path && it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) } }
         .sorted()
         .take((MAX_SOURCE_OPERATIONS_PER_PLAN - sourceOperations.size).coerceAtLeast(0))
-        .mapNotNull { path ->
-            operationTemplate?.copy(
+        .map { path ->
+            requireNotNull(operationTemplate).copy(
                 order = 0,
                 action = PLAN_OPERATION_MODIFY,
                 path = path,
                 symbol = path.substringAfterLast('/').substringBeforeLast('.'),
                 instruction = "Update the existing regression test to cover the admitted behavior.",
+            )
+        }
+    val synthesizedImplementationOperations = acceptedScope.indices.asSequence()
+        .filter { requiresImplementationSource(acceptedScope[it]) }
+        .mapNotNull { index ->
+            scopeSelectedPaths(index, acceptedScope[index])
+                .firstOrNull { !isTestSourcePath(it) && sourceOperations.none { operation -> operation.path == it } }
+        }
+        .distinct()
+        .take((MAX_SOURCE_OPERATIONS_PER_PLAN - sourceOperations.size - synthesizedTestOperations.size).coerceAtLeast(0))
+        .map { path ->
+            requireNotNull(operationTemplate).copy(
+                order = 0,
+                action = PLAN_OPERATION_MODIFY,
+                path = path,
+                symbol = path.substringAfterLast('/').substringBeforeLast('.'),
+                instruction = "Extend the existing implementation with the admitted behavior.",
             )
         }
     val evidenceByPath = output.evidence.associateBy { it.path }.toMutableMap()
@@ -1900,6 +1917,7 @@ internal fun compileRepositoryScopeAuthority(
     val operationsToCompile = (
             sourceOperations +
             synthesizedTestOperations +
+            synthesizedImplementationOperations +
             output.operations.filter { it.action == PLAN_OPERATION_VERIFY }
         )
     val orderMap = operationsToCompile.mapIndexed { index, operation -> operation.order to index + 1 }.toMap()

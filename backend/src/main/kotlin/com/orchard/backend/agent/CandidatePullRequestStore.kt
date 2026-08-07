@@ -12,6 +12,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -67,34 +68,43 @@ class FileCandidatePullRequestStore(private val directory: Path) : CandidatePull
     private val path = directory.resolve("candidate-pull-requests.jsonl")
     private val lockPath = directory.resolve("candidate-pull-requests.lock")
     private val json = Json { encodeDefaults = true }
+    private val inProcessLock = inProcessLocks.computeIfAbsent(lockPath.toAbsolutePath().normalize()) { Any() }
 
     override fun load(): List<CandidatePullRequest> {
         Files.createDirectories(directory)
-        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
-            lock.lock().use { loadUnlocked() }
+        return synchronized(inProcessLock) {
+            FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+                lock.lock().use { loadUnlocked() }
+            }
         }
     }
 
     override fun appendNext(create: (pullRequestId: Long) -> CandidatePullRequest): CandidatePullRequest {
         Files.createDirectories(directory)
-        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
-            lock.lock().use {
-                val existing = loadUnlocked()
-                val pullRequest = create(existing.size + 1L)
-                validateCandidatePullRequest(pullRequest, existing)
-                val payload = json.encodeToString(pullRequest)
-                val line = json.encodeToString(
-                    CandidatePullRequestEnvelope(value = pullRequest, checksum = stagedPlanHash(payload))
-                ) + "\n"
-                FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND).use { channel ->
-                    val bytes = ByteBuffer.wrap(line.toByteArray(Charsets.UTF_8))
-                    while (bytes.hasRemaining()) channel.write(bytes)
-                    channel.force(true)
+        return synchronized(inProcessLock) {
+            FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+                lock.lock().use {
+                    val existing = loadUnlocked()
+                    val pullRequest = create(existing.size + 1L)
+                    validateCandidatePullRequest(pullRequest, existing)
+                    val payload = json.encodeToString(pullRequest)
+                    val line = json.encodeToString(
+                        CandidatePullRequestEnvelope(value = pullRequest, checksum = stagedPlanHash(payload))
+                    ) + "\n"
+                    FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND).use { channel ->
+                        val bytes = ByteBuffer.wrap(line.toByteArray(Charsets.UTF_8))
+                        while (bytes.hasRemaining()) channel.write(bytes)
+                        channel.force(true)
+                    }
+                    FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+                    pullRequest
                 }
-                FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
-                pullRequest
             }
         }
+    }
+
+    private companion object {
+        val inProcessLocks = ConcurrentHashMap<Path, Any>()
     }
 
     private fun loadUnlocked(): List<CandidatePullRequest> = mutableListOf<CandidatePullRequest>().also { pullRequests ->
