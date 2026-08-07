@@ -743,7 +743,13 @@ class CodingWorkerService(
                 proposalHash,
             )
         }
-        val semanticDiagnostic = executionPlan?.let { plan ->
+        val requiredImplementationDiagnostic = workPackage?.let { packageAuthority ->
+            candidateRequiredImplementationDiagnostic(
+                packageAuthority.ownership.requiredImplementationPaths,
+                candidate.changedPaths,
+            )
+        }
+        val semanticDiagnostic = requiredImplementationDiagnostic ?: executionPlan?.let { plan ->
             val productionPaths = plan.content.scopeCoverage
                 .flatMap { it.evidencePaths }
                 .filterNot(::isCandidateTestSourcePath)
@@ -1669,6 +1675,19 @@ internal fun candidateForbiddenLiteralDiagnostic(
         }
     }
     return null
+}
+
+internal fun candidateRequiredImplementationDiagnostic(
+    requiredImplementationPaths: List<String>,
+    changedPaths: List<String>,
+): String? {
+    val missingPaths = requiredImplementationPaths.distinct().filterNot { it in changedPaths }
+    return missingPaths.takeIf { it.isNotEmpty() }
+        ?.joinToString(
+            prefix = "Candidate did not modify required implementation paths: ",
+            separator = ", ",
+            postfix = ".",
+        )
 }
 
 internal fun isCandidateTestSourcePath(path: String): Boolean {

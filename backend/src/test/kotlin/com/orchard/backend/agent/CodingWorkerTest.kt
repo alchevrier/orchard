@@ -508,6 +508,26 @@ class CodingWorkerTest {
     }
 
     @Test
+    fun `candidate verification rejects test-only changes that omit required implementation paths`() {
+        assertEquals(
+            "Candidate did not modify required implementation paths: frontend/src/desktopMain/kotlin/com/orchard/frontend/network/DesktopNetworkClient.kt.",
+            candidateRequiredImplementationDiagnostic(
+                listOf("frontend/src/desktopMain/kotlin/com/orchard/frontend/network/DesktopNetworkClient.kt"),
+                listOf("frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt"),
+            ),
+        )
+        assertNull(
+            candidateRequiredImplementationDiagnostic(
+                listOf("frontend/src/desktopMain/kotlin/com/orchard/frontend/network/DesktopNetworkClient.kt"),
+                listOf(
+                    "frontend/src/desktopMain/kotlin/com/orchard/frontend/network/DesktopNetworkClient.kt",
+                    "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt",
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `governed worker does not substitute generic tests for acceptance evidence`() = runTest {
         val directory = createTempDirectory("orchard-coding-worker-e2e-")
         val repository = initializedRepository()
