@@ -1,5 +1,7 @@
 package com.orchard.backend.company
 
+import com.orchard.backend.agent.CodingWorkspaceGateway
+import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.vector.modelBindingFingerprint
 import com.orchard.backend.workspace.GENESIS_READY
@@ -89,6 +91,7 @@ class CompanyControlService(
     private val modelProviders: List<ModelProvider>,
     private val store: CompanyControlStore = TransientCompanyControlStore(),
     private val repositories: RepositoryBindingStore = TransientRepositoryBindingStore,
+    private val workspaceGateway: CodingWorkspaceGateway = LocalCodingWorkspaceGateway(),
 ) {
     init {
         store.loadEvents()
@@ -420,6 +423,28 @@ class CompanyControlService(
         if (acceptance.genesisHash != genesis.hash || ruleSet.genesisHash != genesis.hash) {
             return CompanyMutationResult(CompanyMutationStatus.EVIDENCE_STALE)
         }
+        val promotionVerification = verifyAcceptedCandidate(run, acceptance.candidateRevision)
+            ?: return CompanyMutationResult(CompanyMutationStatus.EVIDENCE_STALE)
+        val verificationDraft = PromotionVerification(
+            verificationId = events.size + 1L,
+            projectId = run.context.projectId,
+            runId = runId,
+            acceptanceId = acceptance.acceptanceId,
+            candidateRevision = acceptance.candidateRevision,
+            commands = promotionVerification.map { it.command },
+            outputHashes = promotionVerification.map { it.outputHash },
+            hash = "",
+        )
+        try {
+            store.append(
+                CompanyControlEvent(
+                    verificationDraft.verificationId,
+                    promotionVerification = verificationDraft.copy(hash = companyRecordHash(verificationDraft.toString())),
+                ),
+            )
+        } catch (_: Exception) {
+            return CompanyMutationResult(CompanyMutationStatus.STORAGE_UNAVAILABLE)
+        }
         val promoted = runCatching {
             repositories.promoteLocal(
                 run.context.projectId,
@@ -429,7 +454,7 @@ class CompanyControlService(
             )
         }.getOrNull() ?: return CompanyMutationResult(CompanyMutationStatus.EVIDENCE_STALE)
         val draft = LocalPromotion(
-            promotionId = events.size + 1L,
+            promotionId = verificationDraft.verificationId + 1L,
             projectId = run.context.projectId,
             runId = runId,
             acceptanceId = acceptance.acceptanceId,
@@ -576,6 +601,36 @@ class CompanyControlService(
         ?.revision
 
     private fun run(runId: Long): WorkflowRunView? = workspace.snapshot(MESSAGE_READY).workflowRuns.singleOrNull { it.runId == runId }
+
+    private fun verifyAcceptedCandidate(
+        run: WorkflowRunView,
+        candidateRevision: String,
+    ): List<com.orchard.backend.agent.VerificationObservation>? {
+        val workspacePath = run.context.workspaceReservation?.path ?: return null
+        val requiredEvidence = run.workflow.evidenceContract.requirements.filter {
+            it.kind != "SOURCE_DIFF" && it.gate != com.orchard.backend.workspace.CRITERION_HUMAN
+        }
+        val commands = requiredEvidence.map { requirement ->
+            run.evidence.lastOrNull {
+                it.kind == requirement.kind && it.revision == candidateRevision && it.passed && it.command.isNotBlank()
+            }?.command ?: return null
+        }.distinct()
+        if (commands.isEmpty()) return null
+        return buildList {
+            for (command in commands) {
+                if (workspaceGateway.currentRevision(workspacePath) != candidateRevision) return null
+                val observation = runCatching {
+                    workspaceGateway.executeVerification(
+                        workspacePath,
+                        workspaceGateway.parseVerificationCommand(command),
+                        command,
+                    )
+                }.getOrNull() ?: return null
+                if (observation.exitCode != 0 || workspaceGateway.currentRevision(workspacePath) != candidateRevision) return null
+                add(observation)
+            }
+        }
+    }
 
     private fun append(event: CompanyControlEvent, projectId: Int): CompanyMutationResult = try {
         store.append(event)

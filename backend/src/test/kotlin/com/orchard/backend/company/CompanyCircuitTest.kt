@@ -30,6 +30,7 @@ import com.orchard.backend.agent.CodingPatchProposal
 import com.orchard.backend.agent.CodingTextReplacement
 import com.orchard.backend.agent.CodingWorkerService
 import com.orchard.backend.agent.CodingWorkerTickStatus
+import com.orchard.backend.agent.CodingWorkspaceGateway
 import com.orchard.backend.agent.CandidatePullRequestDispositionService
 import com.orchard.backend.agent.CANDIDATE_DISPOSITION_REVIEW_REQUIRED
 import com.orchard.backend.agent.CANDIDATE_DISPOSITION_SUPERSEDED
@@ -610,6 +611,18 @@ class CompanyCircuitTest {
         assertEquals(CompanyMutationStatus.RECORDED, company.escalate(runId, ROLE_QUALITY_AUDITOR, "Rotate the auditor after acceptance.").status)
         assertEquals(CompanyMutationStatus.RECORDED, company.assign(runId, ROLE_QUALITY_AUDITOR, RISK_HIGH).status)
         assertTrue(requireNotNull(company.assignment(runId, ROLE_QUALITY_AUDITOR)).evidenceSampleCount >= 1)
+
+        val driftedCompany = CompanyControlService(
+            workspace,
+            listOf(staff),
+            FileCompanyControlStore(state),
+            bindings,
+            object : CodingWorkspaceGateway by LocalCodingWorkspaceGateway() {
+                override fun currentRevision(workspacePath: String): String = "0".repeat(40)
+            },
+        )
+        assertEquals(CompanyMutationStatus.EVIDENCE_STALE, driftedCompany.promote(runId).status)
+        assertTrue(driftedCompany.projectView(1).promotions.isEmpty())
 
         assertEquals(
             CompanyMutationStatus.RECORDED,

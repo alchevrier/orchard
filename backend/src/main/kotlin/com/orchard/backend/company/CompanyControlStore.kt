@@ -8,6 +8,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.time.Instant
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -138,6 +140,20 @@ data class LocalPromotion(
 )
 
 @Serializable
+data class PromotionVerification(
+    val verificationId: Long,
+    val projectId: Int,
+    val runId: Long,
+    val acceptanceId: Long,
+    val candidateRevision: String,
+    val commands: List<String>,
+    val outputHashes: List<String>,
+    val recordedAt: String = Instant.now().toString(),
+    val hash: String,
+)
+
+@Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class CompanyControlEvent(
     val eventId: Long,
     val ruleSet: ArchitectureRuleSet? = null,
@@ -146,6 +162,8 @@ data class CompanyControlEvent(
     val escalation: StaffEscalation? = null,
     val acceptance: CompanyAcceptance? = null,
     val promotion: LocalPromotion? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val promotionVerification: PromotionVerification? = null,
 )
 
 interface CompanyControlStore {
@@ -246,7 +264,15 @@ private fun validateCompanyControlEvent(
     preceding: List<CompanyControlEvent>,
 ) {
     require(event.eventId == expectedEventId) { "Expected company control event ID $expectedEventId" }
-    require(listOfNotNull(event.ruleSet, event.assignment, event.audit, event.escalation, event.acceptance, event.promotion).size == 1) {
+    require(listOfNotNull(
+        event.ruleSet,
+        event.assignment,
+        event.audit,
+        event.escalation,
+        event.acceptance,
+        event.promotion,
+        event.promotionVerification,
+    ).size == 1) {
         "Company control event must contain exactly one payload"
     }
     event.ruleSet?.let { ruleSet ->
@@ -315,6 +341,17 @@ private fun validateCompanyControlEvent(
                 it.candidateRevision == promotion.candidateRevision
         })
         require(promotion.hash == companyRecordHash(promotion.copy(hash = "").toString()))
+    }
+    event.promotionVerification?.let { verification ->
+        require(verification.verificationId == event.eventId && verification.projectId > 0 && verification.runId > 0)
+        require(verification.candidateRevision.matches(GIT_HASH))
+        require(verification.commands.isNotEmpty() && verification.commands.size == verification.outputHashes.size)
+        require(verification.commands.all { it.isNotBlank() } && verification.outputHashes.all { it.matches(SHA256) })
+        require(preceding.mapNotNull { it.acceptance }.any {
+            it.acceptanceId == verification.acceptanceId && it.runId == verification.runId &&
+                it.candidateRevision == verification.candidateRevision
+        })
+        require(verification.hash == companyRecordHash(verification.copy(hash = "").toString()))
     }
 }
 
