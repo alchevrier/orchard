@@ -688,6 +688,57 @@ class WorkspaceStoreTest {
         assertEquals(WorkflowStartStatus.ALREADY_STARTED, workspace.startWorkflow(4).status)
     }
 
+    @Test
+    fun externalVerificationBugCanBeRecordedInsideCallerBatch() {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "a".repeat(40), "main", "", clean = true,
+            )
+        }
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(workspace.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+        workspace.submitWorkDefinition(4, readyDefinition())
+        val runId = workspace.startWorkflow(4).snapshot.workflowRuns.single().runId
+
+        workspace.beginBatch()
+        repeat(28) { index ->
+            assertTrue(workspace.applyIntent(intent(ENTITY_BUG, "Historical bug $index", projectId = 1, epicId = 2, storyId = 3)))
+        }
+        workspace.commitBatch()
+        assertEquals(32, workspace.entityCount)
+
+        workspace.beginBatch()
+        val bugId = workspace.recordExternalVerificationBug(
+            runId,
+            "frontend",
+            "./gradlew :frontend:compileKotlinDesktop --no-daemon",
+            "b".repeat(64),
+            "Frontend compilation failed.",
+        )
+        assertTrue(bugId != null)
+        assertEquals(
+            bugId,
+            workspace.recordExternalVerificationBug(
+                runId,
+                "frontend",
+                "./gradlew :frontend:compileKotlinDesktop --no-daemon",
+                "c".repeat(64),
+                "A later frontend compilation failure.",
+            ),
+        )
+        assertTrue(workspace.applyIntent(intent(ENTITY_TASK, "Follow-up", projectId = 1, epicId = 2, storyId = 3)))
+        workspace.commitBatch()
+
+        assertEquals(34, workspace.entityCount)
+    }
+
     private fun intent(
         type: Int,
         title: String,

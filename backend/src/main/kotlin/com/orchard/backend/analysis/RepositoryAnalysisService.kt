@@ -301,10 +301,13 @@ class RepositoryAnalysisService(
                 externalVerificationModule(execution) != null
         }
         if (externalFailure != null) {
-            return planStore.load().lastOrNull { plan ->
+            val plans = planStore.load().filter { it.runId == runId }
+            val failedPlan = plans.lastOrNull { plan ->
                 plan.planId == externalFailure.claim.executionPlanId &&
                     plan.hash == externalFailure.claim.executionPlanHash
             }
+            val newestPlan = plans.maxByOrNull { it.revision }
+            if (failedPlan != null && newestPlan?.revision == failedPlan.revision) return failedPlan
         }
         val staticCandidates = planStore.load().filter {
             it.runId == runId &&

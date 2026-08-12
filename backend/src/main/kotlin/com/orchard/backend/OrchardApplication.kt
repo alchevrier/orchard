@@ -1460,6 +1460,28 @@ fun Application.workspaceApi(
             }
             call.respond(status, result.snapshot)
         }
+        post("/api/external-verification-bugs/{workItemId}/runs") {
+            val workItemId = call.parameters["workItemId"]?.toIntOrNull()
+            if (workItemId == null || workItemId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.startExternalVerificationCorrection(workItemId)
+            val status = when (result.status) {
+                WorkflowStartStatus.CREATED -> HttpStatusCode.Created
+                WorkflowStartStatus.WORK_ITEM_NOT_FOUND -> HttpStatusCode.NotFound
+                WorkflowStartStatus.UNSUPPORTED_ENTITY,
+                WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
+                WorkflowStartStatus.REPOSITORY_DIRTY,
+                WorkflowStartStatus.WORK_DEFINITION_NOT_READY -> HttpStatusCode.UnprocessableEntity
+                WorkflowStartStatus.ALREADY_STARTED,
+                WorkflowStartStatus.STAGED_PLAN_BLOCKED,
+                WorkflowStartStatus.DESIGN_NOT_ADMITTED,
+                WorkflowStartStatus.PROJECT_GENESIS_NOT_ADMITTED -> HttpStatusCode.Conflict
+                WorkflowStartStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result.snapshot)
+        }
         post("/api/work-items/{workItemId}/definitions") {
             val workItemId = call.parameters["workItemId"]?.toIntOrNull()
             val request = runCatching { call.receive<WorkDefinitionSubmission>() }.getOrNull()

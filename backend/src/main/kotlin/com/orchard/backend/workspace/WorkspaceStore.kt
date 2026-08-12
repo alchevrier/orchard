@@ -314,15 +314,15 @@ class WorkspaceStore(
         outputHash: String,
         summary: String,
     ): Int? {
-        check(!batchActive) { "External verification findings cannot be recorded during another workspace batch" }
         val run = workflowRuns.singleOrNull { it.runId == runId } ?: return null
         val workItem = entity(run.context.workItemId, ENTITY_TASK) ?: return null
         val story = entity(workItem.parentId, ENTITY_STORY) ?: return null
-        val marker = "$EXTERNAL_VERIFICATION_BUG_MARKER$runId\naffectedModule=$affectedModule\ncommand=$command\noutputHash=$outputHash"
+        val marker = "$EXTERNAL_VERIFICATION_BUG_MARKER$runId\naffectedModule=$affectedModule\ncommand=$command"
         entities.firstOrNull { it.type == ENTITY_BUG && it.parentId == story.id && it.content.startsWith(marker) }
             ?.let { return it.id }
 
-        beginBatch()
+        val ownsBatch = !batchActive
+        if (ownsBatch) beginBatch()
         return try {
             val title = "External verification failure in $affectedModule"
             val content = "$marker\n\n${summary.take(4_000)}"
@@ -337,15 +337,15 @@ class WorkspaceStore(
                     content = content,
                 ))
             ) {
-                rollbackBatch()
+                if (ownsBatch) rollbackBatch()
                 null
             } else {
                 val bugId = lastCreatedId
-                commitBatch()
+                if (ownsBatch) commitBatch()
                 bugId
             }
         } catch (_: Exception) {
-            if (batchActive) rollbackBatch()
+            if (ownsBatch && batchActive) rollbackBatch()
             null
         }
     }
@@ -1173,10 +1173,27 @@ class WorkspaceStore(
         return startWorkflow(workItemId, pending?.dispatchId, conversationCommand)
     }
 
+    @Synchronized
+    fun startExternalVerificationCorrection(workItemId: Int): WorkflowStartResult {
+        val bug = committedEntity(workItemId)
+        if (bug == null || bug.type != ENTITY_BUG || !bug.content.startsWith(EXTERNAL_VERIFICATION_BUG_MARKER)) {
+            return workflowFailure(
+                WorkflowStartStatus.UNSUPPORTED_ENTITY,
+                "Only recorded external-verification bugs can start an isolated correction workflow.",
+            )
+        }
+        return startWorkflow(
+            workItemId = workItemId,
+            circuitDispatchId = null,
+            allowExternalVerificationCorrection = true,
+        )
+    }
+
     private fun startWorkflow(
         workItemId: Int,
         circuitDispatchId: Long?,
         conversationCommand: ConversationCommandReference? = null,
+        allowExternalVerificationCorrection: Boolean = false,
     ): WorkflowStartResult {
         val workItem = committedEntity(workItemId)
         if (workItem == null) return workflowFailure(
@@ -1191,8 +1208,10 @@ class WorkspaceStore(
             WorkflowStartStatus.ALREADY_STARTED,
             "This work item already has an active workflow run.",
         )
-        stagedPlanBlockReason(workItem)?.let { reason ->
-            return workflowFailure(WorkflowStartStatus.STAGED_PLAN_BLOCKED, reason)
+        if (!allowExternalVerificationCorrection) {
+            stagedPlanBlockReason(workItem)?.let { reason ->
+                return workflowFailure(WorkflowStartStatus.STAGED_PLAN_BLOCKED, reason)
+            }
         }
         val workDefinition = workDefinitions.lastOrNull { it.workItemId == workItemId }
         if (workDefinition?.assessment?.status != DEFINITION_READY) return workflowFailure(
@@ -1243,7 +1262,10 @@ class WorkspaceStore(
             "The circuit dispatch authority is unavailable.",
         )
         val (executionRepository, workspaceReservation) = try {
-            if (dispatch == null) head to null else {
+            if (dispatch == null && !allowExternalVerificationCorrection) head to null
+            else if (dispatch == null) {
+                repositoryBindings.reserveWorkspace(project.id, Long.MAX_VALUE - workItem.id, head, integrationOwner = false)
+            } else {
                 repositoryBindings.reserveWorkspace(project.id, dispatch.dispatchId, head, dispatch.integrationOwner)
             }
         } catch (_: Exception) {
@@ -3689,7 +3711,7 @@ class WorkspaceStore(
     }
 
     private companion object {
-        const val MAX_ENTITIES = 32
+        const val MAX_ENTITIES = 512
         const val MAX_ATTEMPT_TEXT = 4096
         const val MAX_EVIDENCE_SUMMARY = 4096
         const val MAX_PRODUCER_LENGTH = 128

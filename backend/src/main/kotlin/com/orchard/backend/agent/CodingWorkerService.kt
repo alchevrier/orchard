@@ -965,6 +965,7 @@ class CodingWorkerService(
                     plan.hash,
                     proposalHash,
                     evidenceResult,
+                    authorizeCorrection = !evidenceResult.startsWith("External verification failed in "),
                 )
                 if (storageDiagnostic != null) return finish(
                     claim,
@@ -1024,15 +1025,25 @@ class CodingWorkerService(
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
             .filter { run ->
-                run.context.circuitDispatchId != null &&
+                (run.context.circuitDispatchId != null || externalVerificationCorrectionRun(run)) &&
                     run.context.workspaceReservation?.mode in setOf("ISOLATED", "INTEGRATION")
             }
             .filter { run ->
                 val latestPullRequest = pullRequests.lastOrNull { it.runId == run.runId }
-                candidateRunRequiresExecution(
-                    latestPullRequest,
-                    latestPullRequest?.let { dispositionService?.dispositions(it.pullRequestId)?.lastOrNull() },
-                )
+                val latestExecution = executions.lastOrNull { it.claim.runId == run.runId }
+                val currentPlan = repositoryAnalysis?.currentPlan(run.runId)
+                val latestExecutionUsesCurrentPlan = latestExecution?.claim?.let { claim ->
+                    currentPlan?.let { plan ->
+                        claim.executionPlanId == plan.planId && claim.executionPlanHash == plan.hash
+                    }
+                } == true
+                run.state == RUN_STATE_EVIDENCE_BLOCKED ||
+                    latestExecution?.result?.status == CODING_EXECUTION_FAILED ||
+                    candidateRunRequiresExecution(
+                        latestPullRequest,
+                        latestPullRequest?.let { dispositionService?.dispositions(it.pullRequestId)?.lastOrNull() },
+                        latestExecutionUsesCurrentPlan,
+                    )
             }
             .filter { run ->
                 val hasRepositoryPlan = repositoryPlans.any { it.runId == run.runId }
@@ -1199,7 +1210,7 @@ class CodingWorkerService(
                         outputHash = failed.outputHash,
                         summary = failed.summary,
                     ) ?: return "External verification failure could not be recorded as a bug ticket."
-                    continue
+                    return "External verification failed in $externalModule; correction bug $bugId was recorded."
                 }
                 if (failed != null) failed else VerificationObservation(
                     commands.last().evidenceCommand,
@@ -1783,7 +1794,12 @@ internal fun codingContextQuery(run: WorkflowRunView, executionPlan: RepositoryE
 internal fun candidateRunRequiresExecution(
     latestPullRequest: CandidatePullRequest?,
     latestDisposition: CandidatePullRequestDisposition?,
-): Boolean = latestPullRequest == null || latestDisposition?.status == CANDIDATE_DISPOSITION_REPAIR_REQUIRED
+    latestExecutionUsesCurrentPlan: Boolean = true,
+): Boolean = !latestExecutionUsesCurrentPlan ||
+    latestPullRequest == null || latestDisposition?.status == CANDIDATE_DISPOSITION_REPAIR_REQUIRED
+
+internal fun externalVerificationCorrectionRun(run: WorkflowRunView): Boolean =
+    run.context.content.startsWith("externalVerificationRunId=")
 
 internal fun codingPlanContextQuery(executionPlan: RepositoryExecutionPlan?): String = buildString {
     executionPlan?.content?.let { plan ->

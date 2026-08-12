@@ -81,6 +81,7 @@ class CodingWorkerTest {
         assertEquals(false, candidateRunRequiresExecution(candidate, reviewRequired))
         assertEquals(true, candidateRunRequiresExecution(candidate, reviewRequired.copy(status = CANDIDATE_DISPOSITION_REPAIR_REQUIRED)))
         assertEquals(true, candidateRunRequiresExecution(null, null))
+        assertEquals(true, candidateRunRequiresExecution(candidate, reviewRequired, latestExecutionUsesCurrentPlan = false))
     }
 
     @Test
