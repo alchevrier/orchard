@@ -39,6 +39,8 @@ data class ModelExecutionObservation(
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val resourceAdmission: ResourceAdmissionEvidence? = null,
     val recordedAt: String = Instant.now().toString(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val attentionFrameHash: String? = null,
 )
 
 data class ModelExecutionObservationDraft(
@@ -54,6 +56,7 @@ data class ModelExecutionObservationDraft(
     val latencyMillis: Long,
     val schemaValid: Boolean,
     val resourceAdmission: ResourceAdmissionEvidence? = null,
+    val attentionFrameHash: String? = null,
 )
 
 @Serializable
@@ -204,6 +207,9 @@ private fun validateModelExperienceEvent(
         require(execution.workflowStepId.isNotBlank() && execution.workItemId > 0) { "Execution target is invalid" }
         require(execution.envelopeHash.matches(SHA256_LOWER) && execution.promptHash.matches(SHA256_LOWER)) {
             "Execution hashes are invalid"
+        }
+        require(execution.attentionFrameHash == null || execution.attentionFrameHash.matches(SHA256_LOWER)) {
+            "Execution attention-frame hash is invalid"
         }
         require(execution.outputHash == null || execution.outputHash.matches(SHA256_LOWER)) { "Output hash is invalid" }
         require(execution.inputTokens >= 0 && execution.outputTokens >= 0 && execution.latencyMillis >= 0) {

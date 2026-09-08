@@ -939,6 +939,7 @@ class WorkspaceStore(
             workItemId = draft.workItemId,
             envelopeHash = draft.envelopeHash,
             promptHash = draft.promptHash,
+            attentionFrameHash = draft.attentionFrameHash,
             outputHash = draft.outputHash,
             inputTokens = draft.inputTokens,
             outputTokens = draft.outputTokens,

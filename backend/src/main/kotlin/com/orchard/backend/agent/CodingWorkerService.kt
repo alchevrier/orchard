@@ -11,6 +11,12 @@ import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
 import com.orchard.backend.analysis.compileExecutableWorkPackage
+import com.orchard.backend.attention.AttentionFrame
+import com.orchard.backend.attention.AttentionProposedOperation
+import com.orchard.backend.attention.attentionOperationDiagnostic
+import com.orchard.backend.attention.attentionScopeKinds
+import com.orchard.backend.attention.compileCodingAttentionFrame
+import com.orchard.backend.attention.verifyCodingAttentionFrame
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.RISK_HIGH
@@ -87,7 +93,7 @@ private data class CodingWorkerModelEnvelope(
     val currentRevision: String,
     val run: CodingWorkerRunAuthority,
     val executionPlan: RepositoryExecutionPlan? = null,
-    val workPackage: CodingWorkerWorkPackageAuthority? = null,
+    val attention: AttentionFrame? = null,
     val priorRejectedCodingDiagnostic: String? = null,
     val repositoryContext: CodingRepositoryContext,
 )
@@ -98,22 +104,6 @@ private data class CodingWorkerRunAuthority(
     val state: String,
     val title: String,
     val content: String,
-)
-
-@Serializable
-internal data class CodingWorkerWorkPackageAuthority(
-    val packageId: Long,
-    val packageHash: String,
-    val requestedOutcome: String,
-    val requiredBehavior: String,
-    val acceptanceCriteria: List<String>,
-    val ownershipPaths: List<String>,
-    val createPaths: List<String>,
-    val requiredImplementationPaths: List<String>,
-    val allowedActions: List<String>,
-    val operations: List<com.orchard.backend.analysis.WorkPackageOperation>,
-    val expectedBehavior: List<String>,
-    val checks: List<com.orchard.backend.analysis.WorkPackageCheck>,
 )
 
 class CodingWorkerService(
@@ -397,6 +387,31 @@ class CodingWorkerService(
                 diagnostic = "The executable work package is invalidated by a newer admitted design revision.",
             )
         }
+        val attention = workPackage?.let { packageAuthority ->
+            val plan = requireNotNull(executionPlan)
+            val frame = runCatching {
+                compileCodingAttentionFrame(
+                    CODING_WORKFLOW_STEP_ID,
+                    run.context.workItemId,
+                    plan,
+                    packageAuthority,
+                    attentionScopeKinds(plan),
+                )
+            }.getOrElse { error ->
+                return CodingWorkerTickResult(
+                    CodingWorkerTickStatus.PLAN_BLOCKED,
+                    diagnostic = "Attention compilation failed: ${error.message.orEmpty()}",
+                )
+            }
+            val adequacy = verifyCodingAttentionFrame(frame, plan, packageAuthority)
+            if (!adequacy.adequate) {
+                return CodingWorkerTickResult(
+                    CodingWorkerTickStatus.PLAN_BLOCKED,
+                    diagnostic = "Attention admission failed: ${adequacy.diagnostics.joinToString(" ")}",
+                )
+            }
+            frame
+        }
         val claim = try {
             requireNotNull(workerStore.appendNext { eventId, preceding ->
                 val currentExecutions = codingWorkerExecutions(preceding)
@@ -460,7 +475,7 @@ class CodingWorkerService(
             currentRevision = requireNotNull(currentRevision),
             run = codingWorkerRunProjection(run),
             executionPlan = if (workPackage == null) executionPlan?.let(::codingExecutionPlanProjection) else null,
-            workPackage = workPackage?.let(::codingWorkPackageProjection),
+            attention = attention,
             priorRejectedCodingDiagnostic = retryDiagnostic,
             repositoryContext = repositoryContext,
         )
@@ -517,7 +532,7 @@ class CodingWorkerService(
         )
         val lease = admission.lease
         if (lease == null) {
-            val execution = recordModelExecution(profile, binding, run, envelopeJson, prompt, null, 0, false, admission.evidence)
+            val execution = recordModelExecution(profile, binding, run, envelopeJson, attention?.hash, prompt, null, 0, false, admission.evidence)
             return finish(
                 claim,
                 CODING_EXECUTION_DEFERRED,
@@ -538,7 +553,7 @@ class CodingWorkerService(
             }
         } catch (exception: CancellationException) {
             val execution = recordModelExecution(
-                profile, binding, run, envelopeJson, prompt, null, elapsedMillis(startedAt), false, admission.evidence
+                profile, binding, run, envelopeJson, attention?.hash, prompt, null, elapsedMillis(startedAt), false, admission.evidence
             )
             finish(
                 claim,
@@ -550,7 +565,7 @@ class CodingWorkerService(
             throw exception
         } catch (error: Exception) {
             val execution = recordModelExecution(
-                profile, binding, run, envelopeJson, prompt, null, elapsedMillis(startedAt), false, admission.evidence
+                profile, binding, run, envelopeJson, attention?.hash, prompt, null, elapsedMillis(startedAt), false, admission.evidence
             )
             return finish(
                 claim,
@@ -577,6 +592,7 @@ class CodingWorkerService(
             binding,
             run,
             envelopeJson,
+            attention?.hash,
             prompt,
             generation,
             elapsedMillis(startedAt),
@@ -604,7 +620,13 @@ class CodingWorkerService(
             proposal?.let { strictOutputJson.encodeToString(it) }
                 ?: strictOutputJson.encodeToString(requireNotNull(toolBatch))
         )
-        val toolBatchBehaviorDiagnostic = toolBatch?.let(::boundedCodingToolBehaviorDiagnostic)
+        val toolBatchBehaviorDiagnostic = toolBatch?.let { batch ->
+            attentionOperationDiagnostic(
+                requireNotNull(attention),
+                batch.operations.map { AttentionProposedOperation(it.action, it.path) },
+            )
+                ?: boundedCodingToolBehaviorDiagnostic(batch)
+        }
         if (toolBatchBehaviorDiagnostic != null) {
             return finish(
                 claim,
@@ -1189,6 +1211,7 @@ class CodingWorkerService(
         binding: ModelBindingProfile,
         run: WorkflowRunView,
         envelopeJson: String,
+        attentionFrameHash: String?,
         prompt: String,
         generation: ModelGeneration?,
         latencyMillis: Long,
@@ -1202,6 +1225,7 @@ class CodingWorkerService(
             workItemId = run.context.workItemId,
             envelopeHash = sha256(envelopeJson),
             promptHash = sha256(prompt),
+            attentionFrameHash = attentionFrameHash,
             outputHash = generation?.text?.let(::sha256),
             inputTokens = generation?.promptTokens ?: estimateModelTokens(prompt),
             outputTokens = generation?.completionTokens ?: 0,
@@ -1513,7 +1537,7 @@ class CodingWorkerService(
             Return exactly one compact JSON object matching bounded-coding-tool-batch-v1:
             {"summary":"short implementation description","expectedRevision":"40-character current revision from the envelope","operations":[{"action":"REWRITE_FILE|CREATE_FILE|DELETE_FILE|REPLACE_LITERAL","path":"authorized relative path","content":null,"expectedLiteral":null,"replacement":null,"expectedCount":null}]}
 
-            Treat workPackage as complete intent, design, ownership, source, check, and escalation authority. Implement the required behavior without redesigning it. Use only paths inside workPackage.ownership.paths and only actions allowed by workPackage.ownership.allowedActions. REWRITE_FILE is valid only when content is a non-null complete resulting UTF-8 file; never emit a REWRITE_FILE with null content. For localized edits, prefer REPLACE_LITERAL, which requires non-null expectedLiteral, replacement, and exact expectedCount. CREATE_FILE is valid only for workPackage.ownership.createPaths. Use expectedRevision from the current repository context. Do not emit exact source anchors, commands, Markdown, approvals, evidence, Git actions, or claims that checks passed.
+            Treat attention as the authoritative correlation between the admitted objective, active slice, code owners, and verification. Every emitted operation must reverse-trace to an ACTIONABLE attention correlation with the same path; EVIDENCE_ONLY correlations never grant mutation authority. Preserve attention constraints, invariants, and non-goals. Implement the required behavior without redesigning it. Use only paths inside attention.ownershipPaths and only top-level allowedActions. REWRITE_FILE is valid only when content is a non-null complete resulting UTF-8 file; never emit a REWRITE_FILE with null content. For localized edits, prefer REPLACE_LITERAL, which requires non-null expectedLiteral, replacement, and exact expectedCount. CREATE_FILE is valid only when top-level allowedActions contains CREATE_FILE. Use expectedRevision from the current repository context. Do not emit exact source anchors, commands, Markdown, approvals, evidence, Git actions, or claims that checks passed.
             The operations array must contain only operation objects. Every array element must be an object with an action and path; never put a string, source excerpt, explanation, or nested array in operations. Do not append prose before or after the JSON object. Before responding, validate that the complete response is one parseable JSON object, that operations is an array of objects, and that every operation matches one of the allowed payload shapes.
             Keep summary short, omit optional JSON whitespace, and include no fields beyond the schema. Prefer the smallest complete set of localized replacements; do not repeat unchanged source or include explanations inside operation fields.
             When changing a test to introduce an assertion that requires an import, such as kotlin.test.assertNotNull, use one complete REWRITE_FILE for that authorized test path containing both the import and the assertion. Do not use REPLACE_LITERAL for such a change because it cannot preserve compilation by itself.
@@ -1641,22 +1665,6 @@ internal fun codingExecutionPlanProjection(plan: RepositoryExecutionPlan): Repos
         ),
     )
 }
-
-internal fun codingWorkPackageProjection(workPackage: ExecutableWorkPackage): CodingWorkerWorkPackageAuthority =
-    CodingWorkerWorkPackageAuthority(
-        packageId = workPackage.packageId,
-        packageHash = workPackage.hash,
-        requestedOutcome = workPackage.intent.requestedOutcome,
-        requiredBehavior = workPackage.intent.requiredBehavior,
-        acceptanceCriteria = workPackage.intent.acceptanceCriteria,
-        ownershipPaths = workPackage.ownership.paths,
-        createPaths = workPackage.ownership.createPaths,
-        requiredImplementationPaths = workPackage.ownership.requiredImplementationPaths,
-        allowedActions = workPackage.ownership.allowedActions,
-        operations = workPackage.operations.operations,
-        expectedBehavior = workPackage.expectedBehavior,
-        checks = workPackage.checks,
-    )
 
 internal fun codingTerminalPlanBlockRequired(result: CodingWorkerResult): Boolean =
     result.status in setOf(CODING_EXECUTION_BLOCKED, CODING_EXECUTION_INTERRUPTED) ||

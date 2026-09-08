@@ -2,16 +2,8 @@ package com.orchard.backend.agent
 
 import com.orchard.backend.analysis.AnalysisExecutionProvenance
 import com.orchard.backend.analysis.DISPOSITION_PARTIALLY_IMPLEMENTED
-import com.orchard.backend.analysis.ExecutableWorkPackage
 import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
 import com.orchard.backend.analysis.RepositoryExecutionPlan
-import com.orchard.backend.analysis.WorkPackageCheck
-import com.orchard.backend.analysis.WorkPackageDesignAuthority
-import com.orchard.backend.analysis.WorkPackageIntentAuthority
-import com.orchard.backend.analysis.WorkPackageOperation
-import com.orchard.backend.analysis.WorkPackageOperationAuthority
-import com.orchard.backend.analysis.WorkPackageOwnershipBoundary
-import com.orchard.backend.analysis.WorkPackageSource
 import com.orchard.backend.analysis.repositoryPlanRequiresRevision
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
@@ -89,39 +81,6 @@ class CodingWorkerTest {
         assertEquals(false, candidateRunRequiresExecution(candidate, reviewRequired))
         assertEquals(true, candidateRunRequiresExecution(candidate, reviewRequired.copy(status = CANDIDATE_DISPOSITION_REPAIR_REQUIRED)))
         assertEquals(true, candidateRunRequiresExecution(null, null))
-    }
-
-    @Test
-    fun `coding work package projection excludes durable prompt bloat`() {
-        val sourceContent = "x".repeat(100_000)
-        val workPackage = ExecutableWorkPackage(
-            packageId = 7,
-            revision = 1,
-            projectId = 1,
-            runId = 2,
-            repositoryRevision = "a".repeat(40),
-            intent = WorkPackageIntentAuthority(3, 1, "b".repeat(64), "Outcome", "Current", "Required", emptyList(), listOf("Accepted")),
-            design = WorkPackageDesignAuthority(4, 1, "c".repeat(64), "Design", listOf("Invariant"), listOf("Non-goal")),
-            ownership = WorkPackageOwnershipBoundary(listOf("src/Main.kt"), emptyList(), emptyList(), listOf(CODING_FILE_WRITE)),
-            operations = WorkPackageOperationAuthority(listOf(WorkPackageOperation(1, "MODIFY", "src/Main.kt", instruction = "Change it", acceptanceCriteria = listOf("Accepted")))),
-            expectedBehavior = listOf("Works"),
-            unresolvedAuthorityQuestions = listOf("Unused authority"),
-            sources = listOf(WorkPackageSource("src/Main.kt", sourceContent, "d".repeat(64))),
-            checks = listOf(WorkPackageCheck("build", "./gradlew check")),
-            escalationConditions = listOf("Unused escalation"),
-            hash = "e".repeat(64),
-        )
-
-        val projection = codingWorkPackageProjection(workPackage)
-        val serialized = Json.encodeToString(projection)
-
-        assertEquals(7, projection.packageId)
-        assertEquals(listOf("src/Main.kt"), projection.ownershipPaths)
-        assertEquals(listOf("build"), projection.checks.map { it.checkId })
-        assertTrue(sourceContent !in serialized)
-        assertTrue("Unused authority" !in serialized)
-        assertTrue("Unused escalation" !in serialized)
-        assertTrue("Invariant" !in serialized)
     }
 
     @Test
