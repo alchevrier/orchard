@@ -9,6 +9,7 @@ import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.analysis.WorkPackageCheck
 import com.orchard.backend.analysis.WorkPackageEvidenceCitation
+import com.orchard.backend.workspace.ProjectGenesisRevision
 import com.orchard.backend.workspace.stagedPlanHash
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
@@ -68,6 +69,8 @@ data class AttentionFrame(
     val workflowStepId: String,
     val workItemId: Int,
     val repositoryRevision: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val projectPurpose: AttentionAuthorityReference? = null,
     val objective: AttentionAuthorityReference,
     val executionPlanId: Long,
     val executionPlanHash: String,
@@ -103,7 +106,9 @@ fun compileCodingAttentionFrame(
     plan: RepositoryExecutionPlan,
     workPackage: ExecutableWorkPackage,
     scopeKinds: Map<Int, AttentionScopeKind>,
+    projectPurpose: ProjectGenesisRevision? = null,
 ): AttentionFrame {
+    require(projectPurpose == null || projectPurpose.admitted) { "Attention project purpose must be admitted." }
     val activeOrders = workPackage.operations.operations.map { it.order }.distinct().sorted()
     val activeOrderSet = activeOrders.toSet()
     val planOperations = plan.content.operations.associateBy { it.order }
@@ -177,6 +182,14 @@ fun compileCodingAttentionFrame(
         workflowStepId = workflowStepId,
         workItemId = workItemId,
         repositoryRevision = workPackage.repositoryRevision,
+        projectPurpose = projectPurpose?.let {
+            AttentionAuthorityReference(
+                kind = "PROJECT_PURPOSE",
+                id = it.genesisId.toString(),
+                sourceHash = it.hash,
+                text = it.productIntent,
+            )
+        },
         objective = AttentionAuthorityReference(
             kind = "WORK_DEFINITION",
             id = workPackage.intent.definitionId.toString(),
@@ -204,6 +217,7 @@ fun verifyCodingAttentionFrame(
     frame: AttentionFrame,
     plan: RepositoryExecutionPlan,
     workPackage: ExecutableWorkPackage,
+    projectPurpose: ProjectGenesisRevision? = null,
 ): AttentionAdequacyReport {
     val diagnostics = buildList {
         if (frame.formatVersion != ATTENTION_FRAME_VERSION) add("Unsupported attention-frame version ${frame.formatVersion}.")
@@ -214,6 +228,10 @@ fun verifyCodingAttentionFrame(
             add("Attention frame does not match the executable work package.")
         }
         if (frame.repositoryRevision != workPackage.repositoryRevision) add("Attention frame repository revision is stale.")
+        val expectedPurpose = projectPurpose?.let {
+            AttentionAuthorityReference("PROJECT_PURPOSE", it.genesisId.toString(), it.hash, it.productIntent)
+        }
+        if (frame.projectPurpose != expectedPurpose) add("Attention frame does not match admitted project purpose.")
         if (frame.objective != AttentionAuthorityReference(
                 kind = "WORK_DEFINITION",
                 id = workPackage.intent.definitionId.toString(),

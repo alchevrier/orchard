@@ -13,9 +13,16 @@ import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
 import com.orchard.backend.analysis.compileExecutableWorkPackage
 import com.orchard.backend.attention.AttentionFrame
 import com.orchard.backend.attention.AttentionProposedOperation
+import com.orchard.backend.attention.AttemptBasis
+import com.orchard.backend.attention.PERSISTENCE_CONTINUE
+import com.orchard.backend.attention.PersistenceAttemptObservation
+import com.orchard.backend.attention.PersistenceBudget
+import com.orchard.backend.attention.PersistenceDecision
 import com.orchard.backend.attention.attentionOperationDiagnostic
 import com.orchard.backend.attention.attentionScopeKinds
+import com.orchard.backend.attention.attemptBasisFingerprint
 import com.orchard.backend.attention.compileCodingAttentionFrame
+import com.orchard.backend.attention.evaluatePersistence
 import com.orchard.backend.attention.verifyCodingAttentionFrame
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
@@ -59,6 +66,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+private const val CODING_WORKFLOW_STEP_ID = "DELIVER_CHANGE:CODING_PATCH"
+
 enum class CodingWorkerTickStatus {
     IDLE,
     BUSY,
@@ -94,6 +103,7 @@ private data class CodingWorkerModelEnvelope(
     val run: CodingWorkerRunAuthority,
     val executionPlan: RepositoryExecutionPlan? = null,
     val attention: AttentionFrame? = null,
+    val persistence: PersistenceDecision? = null,
     val priorRejectedCodingDiagnostic: String? = null,
     val repositoryContext: CodingRepositoryContext,
 )
@@ -123,6 +133,7 @@ class CodingWorkerService(
     private val pullRequestStore: CandidatePullRequestStore = TransientCandidatePullRequestStore(),
     private val dispositionService: CandidatePullRequestDispositionService? = null,
     private val designInvalidationStore: WorkPackageDesignInvalidationStore = TransientWorkPackageDesignInvalidationStore(),
+    private val persistenceBudget: PersistenceBudget = defaultCodingPersistenceBudget(retryBudget),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -389,6 +400,10 @@ class CodingWorkerService(
         }
         val attention = workPackage?.let { packageAuthority ->
             val plan = requireNotNull(executionPlan)
+            val projectPurpose = workspace.snapshot(MESSAGE_READY).projectGenesis
+                .singleOrNull { it.projectId == run.context.projectId }
+                ?.revision
+                ?.takeIf { it.admitted }
             val frame = runCatching {
                 compileCodingAttentionFrame(
                     CODING_WORKFLOW_STEP_ID,
@@ -396,6 +411,7 @@ class CodingWorkerService(
                     plan,
                     packageAuthority,
                     attentionScopeKinds(plan),
+                    projectPurpose,
                 )
             }.getOrElse { error ->
                 return CodingWorkerTickResult(
@@ -403,7 +419,7 @@ class CodingWorkerService(
                     diagnostic = "Attention compilation failed: ${error.message.orEmpty()}",
                 )
             }
-            val adequacy = verifyCodingAttentionFrame(frame, plan, packageAuthority)
+            val adequacy = verifyCodingAttentionFrame(frame, plan, packageAuthority, projectPurpose)
             if (!adequacy.adequate) {
                 return CodingWorkerTickResult(
                     CodingWorkerTickStatus.PLAN_BLOCKED,
@@ -411,6 +427,47 @@ class CodingWorkerService(
                 )
             }
             frame
+        }
+        val persistence = if (attention != null) {
+            codingPersistenceDecision(
+                run = run,
+                plan = requireNotNull(executionPlan),
+                packageAuthority = requireNotNull(workPackage),
+                attention = attention,
+                executions = executions,
+                modelExecutions = workspace.modelExecutions(run.context.workItemId),
+                budget = persistenceBudget,
+            )
+        } else null
+        if (persistence != null && persistence.outcome != PERSISTENCE_CONTINUE) {
+            val diagnostic = "Coding persistence stopped with ${persistence.outcome}: ${persistence.diagnostic}"
+            val latestAttempt = requireNotNull(executionPlan).let { plan ->
+                attemptStore.latestAttempt(run.runId, plan.planId, plan.hash)
+            }
+            val persisted = runCatching {
+                attemptStore.appendNext { attemptId ->
+                    CodingWorkerAttempt(
+                        attemptId = attemptId,
+                        runId = run.runId,
+                        executionPlanId = executionPlan.planId,
+                        executionPlanHash = executionPlan.hash,
+                        state = CODING_ATTEMPT_BLOCKED,
+                        resultStatus = CodingWorkerTickStatus.PLAN_BLOCKED.name,
+                        diagnostic = diagnostic,
+                        proposalHash = latestAttempt?.proposalHash,
+                    )
+                }
+            }
+            if (persisted.isFailure) {
+                return CodingWorkerTickResult(
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    diagnostic = persisted.exceptionOrNull()?.message.orEmpty(),
+                )
+            }
+            return CodingWorkerTickResult(
+                CodingWorkerTickStatus.PLAN_BLOCKED,
+                diagnostic = diagnostic,
+            )
         }
         val claim = try {
             requireNotNull(workerStore.appendNext { eventId, preceding ->
@@ -476,6 +533,7 @@ class CodingWorkerService(
             run = codingWorkerRunProjection(run),
             executionPlan = if (workPackage == null) executionPlan?.let(::codingExecutionPlanProjection) else null,
             attention = attention,
+            persistence = persistence,
             priorRejectedCodingDiagnostic = retryDiagnostic,
             repositoryContext = repositoryContext,
         )
@@ -1513,7 +1571,6 @@ class CodingWorkerService(
     }
 
     private companion object {
-        const val CODING_WORKFLOW_STEP_ID = "DELIVER_CHANGE:CODING_PATCH"
         const val CODING_PROPOSAL_SCHEMA = "coding-patch-proposal-v2"
         const val BOUNDED_TOOL_BATCH_SCHEMA = "bounded-coding-tool-batch-v1"
         const val CODING_EVIDENCE_PRODUCER = "orchard-coding-worker-v1"
@@ -1601,6 +1658,92 @@ internal fun codingRunCanExecute(
 
 internal fun codingExecutionConsumesRepairBudget(status: String?): Boolean =
     status == CODING_EXECUTION_COMPLETED || status == CODING_EXECUTION_FAILED
+
+internal fun codingPersistenceDecision(
+    run: WorkflowRunView,
+    plan: RepositoryExecutionPlan,
+    packageAuthority: ExecutableWorkPackage,
+    attention: AttentionFrame,
+    executions: List<CodingWorkerExecutionView>,
+    modelExecutions: List<com.orchard.backend.workspace.ModelExecutionObservation>,
+    budget: PersistenceBudget,
+    now: Instant = Instant.now(),
+): PersistenceDecision {
+    val latestFailure = executions.asReversed().firstNotNullOfOrNull { execution ->
+        execution.takeIf { it.claim.runId == run.runId && it.claim.executionPlanId == plan.planId &&
+            it.claim.executionPlanHash == plan.hash
+        }?.result?.diagnostic
+    }
+    val basis = codingAttemptBasis(
+        run.runId,
+        plan.hash,
+        packageAuthority.repositoryRevision,
+        attention.hash,
+        latestFailure,
+    )
+    val modelById = modelExecutions.associateBy { it.executionId }
+    val previous = executions.mapNotNull { execution ->
+        val result = execution.result ?: return@mapNotNull null
+        if (execution.claim.runId != run.runId || execution.claim.executionPlanId != plan.planId ||
+            execution.claim.executionPlanHash != plan.hash
+        ) return@mapNotNull null
+        val model = result.modelExecutionId?.let(modelById::get) ?: return@mapNotNull null
+        val priorBasis = codingAttemptBasis(
+            run.runId,
+            plan.hash,
+            packageAuthority.repositoryRevision,
+            model.attentionFrameHash ?: attention.hash,
+            result.diagnostic,
+        )
+        PersistenceAttemptObservation(
+            basisFingerprint = attemptBasisFingerprint(priorBasis),
+            failureClass = priorBasis.failureClass,
+            inputTokens = model.inputTokens,
+            outputTokens = model.outputTokens,
+            inferenceMillis = model.latencyMillis,
+            producedEvidence = result.revision != null,
+        )
+    }
+    return evaluatePersistence(budget, run.createdAt, basis, previous, now)
+}
+
+private fun codingAttemptBasis(
+    runId: Long,
+    planHash: String,
+    repositoryRevision: String,
+    attentionFrameHash: String,
+    diagnostic: String?,
+): AttemptBasis {
+    val failureClass = diagnostic?.let(::codingFailureClass)
+    return AttemptBasis(
+        claimId = "coding-run-$runId",
+        authorityHash = planHash,
+        repositoryRevision = repositoryRevision,
+        attentionFrameHash = attentionFrameHash,
+        methodId = CODING_WORKFLOW_STEP_ID,
+        failureClass = failureClass,
+        hypothesis = failureClass?.let { "Repair the admitted coding slice for $it." }
+            ?: "Implement the admitted coding slice.",
+    )
+}
+
+private fun codingFailureClass(diagnostic: String): String = when {
+    diagnostic.contains("compil", ignoreCase = true) -> "COMPILE_FAILURE"
+    diagnostic.contains("test", ignoreCase = true) || diagnostic.contains("verification", ignoreCase = true) -> "VERIFICATION_FAILURE"
+    diagnostic.contains("scope", ignoreCase = true) || diagnostic.contains("outside", ignoreCase = true) -> "SCOPE_FAILURE"
+    diagnostic.contains("stale", ignoreCase = true) || diagnostic.contains("revision", ignoreCase = true) -> "STALE_AUTHORITY"
+    diagnostic.contains("schema", ignoreCase = true) || diagnostic.contains("JSON", ignoreCase = true) -> "SCHEMA_FAILURE"
+    else -> "CODING_FAILURE"
+}
+
+private fun defaultCodingPersistenceBudget(retryBudget: Int) = PersistenceBudget(
+    maxAttempts = retryBudget,
+    maxInputTokens = 240_000,
+    maxOutputTokens = 24_000,
+    maxInferenceMillis = 30 * 60 * 1_000L,
+    maxWallClockMillis = Long.MAX_VALUE,
+    maxEquivalentFailures = 2,
+)
 
 internal fun codingApplicationDiagnostic(error: String, proposal: CodingPatchProposal): String {
     val base = "The coding proposal could not be applied: $error"

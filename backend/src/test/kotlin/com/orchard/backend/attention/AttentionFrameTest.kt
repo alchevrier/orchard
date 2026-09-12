@@ -16,6 +16,9 @@ import com.orchard.backend.analysis.WorkPackageOperation
 import com.orchard.backend.analysis.WorkPackageOperationAuthority
 import com.orchard.backend.analysis.WorkPackageOwnershipBoundary
 import com.orchard.backend.analysis.WorkPackageSource
+import com.orchard.backend.workspace.ExperienceContract
+import com.orchard.backend.workspace.GENESIS_READY
+import com.orchard.backend.workspace.ProjectGenesisRevision
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -173,9 +176,41 @@ class AttentionFrameTest {
         assertEquals(AttentionScopeKind.MIGRATION, attentionScopeKind("Maintain backward compatibility during migration."))
     }
 
+    @Test
+    fun `coding attention pins admitted project purpose`() {
+        val plan = plan()
+        val workPackage = workPackage()
+        val purpose = projectPurpose("5".repeat(64))
+        val frame = compileCodingAttentionFrame(
+            "DELIVER_CHANGE:CODING_PATCH",
+            9,
+            plan,
+            workPackage,
+            scopeKinds(),
+            purpose,
+        )
+
+        assertEquals("PROJECT_PURPOSE", frame.projectPurpose?.kind)
+        assertEquals(purpose.hash, frame.projectPurpose?.sourceHash)
+        assertTrue(verifyCodingAttentionFrame(frame, plan, workPackage, purpose).adequate)
+        assertFalse(verifyCodingAttentionFrame(frame, plan, workPackage, projectPurpose("6".repeat(64))).adequate)
+    }
+
     private fun scopeKinds() = mapOf(
         0 to AttentionScopeKind.IMPLEMENTATION,
         1 to AttentionScopeKind.API,
+    )
+
+    private fun projectPurpose(hash: String) = ProjectGenesisRevision(
+        genesisId = 11,
+        projectId = 1,
+        revision = 5,
+        phase = GENESIS_READY,
+        productIntent = "Deliver governed software with justified completion.",
+        experience = ExperienceContract(productPromise = "The governed outcome is demonstrable."),
+        admitted = true,
+        actor = "owner",
+        hash = hash,
     )
 
     private fun plan(): RepositoryExecutionPlan = RepositoryExecutionPlan(
