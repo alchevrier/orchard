@@ -5,9 +5,9 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `7` |
+| Version | `8` |
 | Status | `ACTIVE` |
-| Updated | `2026-07-27` |
+| Updated | `2026-09-12` |
 | Delivered baseline | Milestone 10.1 |
 | Next milestone | `10.2.2` PR-Centered Multi-Actor Corrective Delivery |
 | Canonical path | `ROADMAP.md` |
@@ -445,6 +445,60 @@ Non-goals:
 - Silent delegation inferred from conversational language.
 - Automatic remote push, policy amendment, exception grant, escalation resolution, or broad model-budget increase.
 - Treating user feedback or learned patterns as direct acceptance, design, or promotion authority.
+
+### Milestone 10.2.5: Purpose-Driven Attention and Evidence-Bounded Completion
+
+- State: `PLANNED`
+- Depends on: `10.2.3`, `10.2.4`
+- Governing ADRs: ADR 048, ADR 049, ADR 050, and ADR 051.
+
+Goal: make admitted project purpose the root of delivery authority, compile role-specific Attention and required skills from purpose-linked claims, and let production Orchard stop, repair, or complete work only from revision-bound evidence within explicit time and resource budgets.
+
+Deliverables:
+
+1. **Durable purpose and completion authority**
+  - Persist versioned project completion contracts compiled from admitted Genesis purpose, intended outcomes, cross-cutting obligations, non-goals, and acceptance authority.
+  - Give every observable outcome claim a stable identity, required observation boundary, verification method, and invalidation dependencies.
+  - Project `DEFINED`, `PLANNED`, `IMPLEMENTED_UNVERIFIED`, `EVIDENCE_RUNNING`, `EVIDENCE_FAILED`, `EVIDENCE_PASSED`, and `ACCEPTED` separately.
+2. **Role-specific Attention compilation**
+  - Compile purpose-rooted design, planning, coding, testing, review, repair, security, and operational projections from one shared authority graph.
+  - Preserve forward claim-to-evidence coverage and reverse action-to-purpose traceability without sending every role the complete graph.
+  - Distinguish compliant evidence-only owners from actionable owners so relevant existing code is not automatically scheduled for modification.
+3. **Required skill authority**
+  - Register versioned skills with purpose-linked capability, required authoritative inputs, allowed tools, output schema, validation, evidence type, budget, and escalation behavior.
+  - Deterministically require applicable skills before model invocation and block claim acceptance when required skill execution is absent or invalid.
+  - Keep skills replaceable without allowing them to define purpose, grant permission, or self-certify evidence.
+4. **Claim-bound evidence and focused repair**
+  - Bind every evidence record to the exact claim, completion contract, observation boundary, verification method, and candidate or release revision.
+  - Compile failed observations into the smallest repair Attention frame containing the unresolved claim, failure class, responsible owner, permitted correction, and method to rerun.
+  - Prevent test source, passing unrelated checks, model summaries, or candidate claims from substituting for purpose-linked evidence.
+5. **Resource-bounded persistence and stop authority**
+  - Persist attempt bases, cumulative token and inference usage, wall-clock and queue time, model and skill identities, failure classes, evidence gain, and remaining budget.
+  - Require materially new authority, evidence, method, or falsifiable hypothesis before a successor inference is admitted.
+  - Project typed stop outcomes including resource deferral, deadline or budget exhaustion, recurrent failure, capability limit, required skill, architecture revision, human decision, policy block, and abandonment.
+6. **Orchard-executed implementation and benchmark**
+  - Use production Orchard to implement one bounded slice of this milestone from admitted purpose through candidate PR, evidence, independent review, acceptance, and local promotion.
+  - Persist a fixed Attention planning benchmark derived from Milestone 10.2.2 candidate correction lineage and run identical flattened-versus-correlated conditions across supported local model tiers.
+  - Record raw outputs, field-level deterministic normalization, graph score, model and frame fingerprints, tokens, latency, retries, stop decisions, and evidence outcomes.
+
+Exit evidence:
+
+- A project cannot become complete because code exists, tickets close, tests pass, or a model says `done`; every required purpose-linked claim has accepted evidence at the exact target state.
+- Evidence at the wrong method, claim, observation boundary, contract revision, or repository revision cannot satisfy completion.
+- A required skill cannot be skipped, widened, or replaced by model prose, and its validated execution survives restart.
+- Repeating a materially equivalent failed inference without new evidence reaches a durable stop before another model call; restart does not reset attempts, budget, or elapsed deadline.
+- A failed integration observation produces a claim-focused repair frame and does not reopen unrelated accepted claims or evidence-only owners.
+- In the fixed Milestone 10.2.2 planning benchmark, the Attention condition preserves evidence-only versus actionable authority and exact verification methods with materially fewer unrepairable graph defects than flattened context.
+- Production Orchard authors, verifies, reviews, accepts, and locally promotes one milestone slice without an external coding assistant changing source or declaring completion.
+- Full backend/frontend build, compatibility and replay coverage, user/operator projections, accepted ADRs, documentation, and committed benchmark evidence.
+
+Non-goals:
+
+- Claiming that Attention makes model output correct without external evidence.
+- One universal completion checklist for every project type.
+- Unlimited autonomous retries because inference is local.
+- Allowing skills, models, tests, or conversations to define project purpose or accept their own output.
+- Requiring every role to receive the complete project authority graph.
 
 ### Milestone 10.3: Identity, Delegation, Quorum, and Signed Decisions
 
