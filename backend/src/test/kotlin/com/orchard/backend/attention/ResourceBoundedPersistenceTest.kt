@@ -1,8 +1,10 @@
 package com.orchard.backend.attention
 
 import java.time.Instant
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class ResourceBoundedPersistenceTest {
     @Test
@@ -55,6 +57,28 @@ class ResourceBoundedPersistenceTest {
                 Instant.parse("2026-09-12T00:00:30Z"),
             ).outcome,
         )
+    }
+
+    @Test
+    fun `persistence stop survives restart and rejects duplicate basis`() {
+        val directory = createTempDirectory("orchard-persistence-stop-")
+        val store = FilePersistenceStopStore(directory)
+        val basis = basis("Same source-backed repair.", "COMPILE_FAILURE")
+        val decision = evaluatePersistence(
+            budget(maxInferenceMillis = 10_000),
+            "2026-09-12T00:00:00Z",
+            basis,
+            listOf(PersistenceAttemptObservation("e".repeat(64), "OTHER", 100, 100, 10_000, false)),
+            Instant.parse("2026-09-12T00:00:30Z"),
+        )
+        val recorded = store.appendNext { stopId ->
+            newPersistenceStopRecord(stopId, 7, basis.claimId, basis.authorityHash, decision)
+        }
+
+        assertEquals(recorded, FilePersistenceStopStore(directory).load().single())
+        assertFailsWith<IllegalArgumentException> {
+            store.appendNext { stopId -> newPersistenceStopRecord(stopId, 7, basis.claimId, basis.authorityHash, decision) }
+        }
     }
 
     private fun budget(

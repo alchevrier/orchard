@@ -37,6 +37,7 @@ import com.orchard.backend.agent.WorkspaceDesignRevisionCorrectionGateway
 import com.orchard.backend.agent.FileWorkPackageDesignInvalidationStore
 import com.orchard.backend.agent.WorkPackageDesignInvalidationService
 import com.orchard.backend.agent.WorkPackageDesignInvalidationStore
+import com.orchard.backend.attention.FilePersistenceStopStore
 import com.orchard.backend.agent.FileToolchainPolicyCatalog
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.analysis.FileRepositoryExecutionPlanStore
@@ -372,6 +373,7 @@ fun main() {
         pullRequestStore = candidatePullRequestStore,
         dispositionService = candidatePullRequestDispositions,
         designInvalidationStore = workPackageDesignInvalidations,
+        persistenceStopStore = FilePersistenceStopStore(OrchardPaths.WORKSPACE_DIR),
     )
     val companyAudit = CompanyAuditService(
         workspace,

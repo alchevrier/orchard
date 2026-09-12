@@ -4,6 +4,7 @@ import com.orchard.backend.workspace.EvidenceRecord
 import com.orchard.backend.workspace.ExperienceContract
 import com.orchard.backend.workspace.GENESIS_READY
 import com.orchard.backend.workspace.ProjectGenesisRevision
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -67,6 +68,41 @@ class PurposeCompletionTest {
     }
 
     @Test
+    fun `required skill cannot be skipped before purpose claim acceptance`() {
+        val base = contract()
+        val contract = base.copy(
+            claims = base.claims.map { it.copy(requiredSkillIds = listOf("journey-observation-v1")) },
+            hash = "",
+        ).let { it.copy(hash = projectCompletionContractHash(it)) }
+        val revision = "a".repeat(40)
+        val evidence = listOf(evidence(1, "JOURNEY", "./gradlew journeyTest", revision, passed = true))
+        val links = listOf(PurposeEvidenceLink("CLAIM-JOURNEY", contract.hash, 1, "public interface after restart"))
+        val acceptances = listOf(PurposeClaimAcceptance("CLAIM-JOURNEY", contract.hash, revision, true, "product-owner"))
+
+        val skipped = assessProjectCompletion(contract, revision, evidence, links, acceptances)
+        val executed = assessProjectCompletion(
+            contract,
+            revision,
+            evidence,
+            links,
+            acceptances,
+            skillExecutions = listOf(PurposeSkillExecution(
+                "journey-observation-v1",
+                1,
+                contract.hash,
+                "CLAIM-JOURNEY",
+                "e".repeat(64),
+                "f".repeat(64),
+                true,
+            )),
+        )
+
+        assertFalse(skipped.done)
+        assertEquals(listOf("journey-observation-v1"), skipped.claimStates.single().missingSkillIds)
+        assertTrue(executed.done)
+    }
+
+    @Test
     fun `completion compiler rejects claims outside admitted purpose outcomes`() {
         val error = runCatching {
             compileProjectCompletionContract(
@@ -76,6 +112,26 @@ class PurposeCompletionTest {
         }.exceptionOrNull()
 
         assertEquals("Project completion claim does not trace to an admitted outcome.", error?.message)
+    }
+
+    @Test
+    fun `completion authority survives restart and reconstructs accepted purpose`() {
+        val directory = createTempDirectory("orchard-purpose-completion-")
+        val service = ProjectCompletionAuthorityService(FileProjectCompletionAuthorityStore(directory))
+        val contract = service.recordContract(genesis(), contract().claims)
+        val revision = "a".repeat(40)
+        service.linkEvidence(contract.hash, "CLAIM-JOURNEY", 1, "public interface after restart")
+        service.recordAcceptance(contract.hash, "CLAIM-JOURNEY", revision, true, "product-owner")
+
+        val recovered = ProjectCompletionAuthorityService(FileProjectCompletionAuthorityStore(directory))
+        val assessment = recovered.assess(
+            contract.hash,
+            revision,
+            listOf(evidence(1, "JOURNEY", "./gradlew journeyTest", revision, passed = true)),
+        )
+
+        assertTrue(assessment.done)
+        assertEquals(3, recovered.events().size)
     }
 
     private fun contract() = compileProjectCompletionContract(

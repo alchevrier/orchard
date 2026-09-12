@@ -1,6 +1,12 @@
 package com.orchard.backend.attention
 
 import com.orchard.backend.workspace.stagedPlanHash
+import com.orchard.backend.workspace.loadRecoverableJsonl
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.time.Duration
 import java.time.Instant
 import kotlinx.serialization.Serializable
@@ -60,6 +66,112 @@ data class PersistenceDecision(
     val basisFingerprint: String,
 )
 
+@Serializable
+data class PersistenceStopRecord(
+    val stopId: Long,
+    val runId: Long,
+    val claimId: String,
+    val authorityHash: String,
+    val outcome: String,
+    val diagnostic: String,
+    val decision: PersistenceDecision,
+    val recordedAt: String = Instant.now().toString(),
+    val hash: String,
+)
+
+interface PersistenceStopStore {
+    fun load(): List<PersistenceStopRecord>
+    fun appendNext(create: (stopId: Long) -> PersistenceStopRecord): PersistenceStopRecord
+}
+
+class TransientPersistenceStopStore : PersistenceStopStore {
+    private val stops = mutableListOf<PersistenceStopRecord>()
+
+    @Synchronized
+    override fun load(): List<PersistenceStopRecord> = stops.toList()
+
+    @Synchronized
+    override fun appendNext(create: (stopId: Long) -> PersistenceStopRecord): PersistenceStopRecord {
+        val stop = create(stops.size + 1L)
+        validatePersistenceStop(stop, stops)
+        stops += stop
+        return stop
+    }
+}
+
+class FilePersistenceStopStore(private val directory: Path) : PersistenceStopStore {
+    private val path = directory.resolve("persistence-stops.jsonl")
+    private val lockPath = directory.resolve("persistence-stops.lock")
+    private val json = kotlinx.serialization.json.Json { encodeDefaults = true }
+
+    @Synchronized
+    override fun load(): List<PersistenceStopRecord> {
+        Files.createDirectories(directory)
+        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+            lock.lock().use { loadUnlocked() }
+        }
+    }
+
+    @Synchronized
+    override fun appendNext(create: (stopId: Long) -> PersistenceStopRecord): PersistenceStopRecord {
+        Files.createDirectories(directory)
+        return FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { lock ->
+            lock.lock().use {
+                val stops = loadUnlocked()
+                val stop = create(stops.size + 1L)
+                validatePersistenceStop(stop, stops)
+                val payload = json.encodeToString(PersistenceStopRecord.serializer(), stop)
+                val line = json.encodeToString(PersistenceStopEnvelope.serializer(), PersistenceStopEnvelope(value = stop, checksum = stagedPlanHash(payload))) + "\n"
+                FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND).use { channel ->
+                    val bytes = ByteBuffer.wrap(line.toByteArray(Charsets.UTF_8))
+                    while (bytes.hasRemaining()) channel.write(bytes)
+                    channel.force(true)
+                }
+                FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+                stop
+            }
+        }
+    }
+
+    private fun loadUnlocked(): List<PersistenceStopRecord> = mutableListOf<PersistenceStopRecord>().also { stops ->
+        loadRecoverableJsonl(path, "persistence-stops") { line, recordNumber ->
+            val envelope = json.decodeFromString(PersistenceStopEnvelope.serializer(), line)
+            require(envelope.version == PERSISTENCE_STOP_STORE_VERSION) { "Unsupported persistence stop format ${envelope.version}." }
+            require(envelope.checksum == stagedPlanHash(json.encodeToString(PersistenceStopRecord.serializer(), envelope.value))) {
+                "Checksum mismatch in persistence stop $recordNumber."
+            }
+            validatePersistenceStop(envelope.value, stops)
+            stops += envelope.value
+            envelope.value
+        }
+    }
+}
+
+fun newPersistenceStopRecord(
+    stopId: Long,
+    runId: Long,
+    claimId: String,
+    authorityHash: String,
+    decision: PersistenceDecision,
+): PersistenceStopRecord {
+    require(decision.outcome != PERSISTENCE_CONTINUE) { "A continuation decision cannot produce a stop record." }
+    val draft = PersistenceStopRecord(
+        stopId,
+        runId,
+        claimId,
+        authorityHash,
+        decision.outcome,
+        decision.diagnostic,
+        decision,
+        hash = "",
+    )
+    return draft.copy(hash = persistenceStopHash(draft))
+}
+
+fun persistenceStopHash(stop: PersistenceStopRecord): String = stagedPlanHash(
+    kotlinx.serialization.json.Json.encodeToString(PersistenceStopRecord.serializer(), stop.copy(hash = "")),
+)
+
 fun evaluatePersistence(
     budget: PersistenceBudget,
     workflowStartedAt: String,
@@ -116,3 +228,33 @@ fun attemptBasisFingerprint(basis: AttemptBasis): String = stagedPlanHash(
 
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val GIT_REVISION = Regex("[0-9a-f]{40}")
+private const val PERSISTENCE_STOP_STORE_VERSION = 1
+private val STOP_OUTCOMES = setOf(
+    PERSISTENCE_RESOURCE_DEFERRED,
+    PERSISTENCE_DEADLINE_BLOCKED,
+    PERSISTENCE_BUDGET_EXHAUSTED,
+    PERSISTENCE_RECURRENT_FAILURE,
+    PERSISTENCE_MODEL_CAPABILITY_LIMIT,
+    PERSISTENCE_SKILL_REQUIRED,
+    PERSISTENCE_ARCHITECTURE_REQUIRED,
+    PERSISTENCE_HUMAN_DECISION_REQUIRED,
+    PERSISTENCE_POLICY_BLOCKED,
+    PERSISTENCE_ABANDONED,
+)
+
+@Serializable
+private data class PersistenceStopEnvelope(
+    val version: Int = PERSISTENCE_STOP_STORE_VERSION,
+    val value: PersistenceStopRecord,
+    val checksum: String,
+)
+
+private fun validatePersistenceStop(stop: PersistenceStopRecord, previous: List<PersistenceStopRecord>) {
+    require(stop.stopId == previous.size + 1L && stop.runId > 0 && stop.claimId.isNotBlank() &&
+        stop.authorityHash.matches(SHA256) && stop.outcome in STOP_OUTCOMES && stop.diagnostic.isNotBlank() &&
+        stop.outcome == stop.decision.outcome && stop.hash == persistenceStopHash(stop)
+    ) { "Persistence stop authority is invalid." }
+    require(previous.none { it.runId == stop.runId && it.decision.basisFingerprint == stop.decision.basisFingerprint }) {
+        "Persistence stop was already recorded for this attempt basis."
+    }
+}

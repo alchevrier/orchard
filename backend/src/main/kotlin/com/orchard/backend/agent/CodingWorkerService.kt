@@ -18,11 +18,14 @@ import com.orchard.backend.attention.PERSISTENCE_CONTINUE
 import com.orchard.backend.attention.PersistenceAttemptObservation
 import com.orchard.backend.attention.PersistenceBudget
 import com.orchard.backend.attention.PersistenceDecision
+import com.orchard.backend.attention.PersistenceStopStore
+import com.orchard.backend.attention.TransientPersistenceStopStore
 import com.orchard.backend.attention.attentionOperationDiagnostic
 import com.orchard.backend.attention.attentionScopeKinds
 import com.orchard.backend.attention.attemptBasisFingerprint
 import com.orchard.backend.attention.compileCodingAttentionFrame
 import com.orchard.backend.attention.evaluatePersistence
+import com.orchard.backend.attention.newPersistenceStopRecord
 import com.orchard.backend.attention.verifyCodingAttentionFrame
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
@@ -134,6 +137,7 @@ class CodingWorkerService(
     private val dispositionService: CandidatePullRequestDispositionService? = null,
     private val designInvalidationStore: WorkPackageDesignInvalidationStore = TransientWorkPackageDesignInvalidationStore(),
     private val persistenceBudget: PersistenceBudget = defaultCodingPersistenceBudget(retryBudget),
+    private val persistenceStopStore: PersistenceStopStore = TransientPersistenceStopStore(),
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
     private val strictOutputJson = Json { encodeDefaults = true }
@@ -441,6 +445,23 @@ class CodingWorkerService(
         } else null
         if (persistence != null && persistence.outcome != PERSISTENCE_CONTINUE) {
             val diagnostic = "Coding persistence stopped with ${persistence.outcome}: ${persistence.diagnostic}"
+            val stop = runCatching {
+                persistenceStopStore.appendNext { stopId ->
+                    newPersistenceStopRecord(
+                        stopId,
+                        run.runId,
+                        "coding-run-${run.runId}",
+                        requireNotNull(executionPlan).hash,
+                        persistence,
+                    )
+                }
+            }
+            if (stop.isFailure) {
+                return CodingWorkerTickResult(
+                    CodingWorkerTickStatus.STORAGE_UNAVAILABLE,
+                    diagnostic = stop.exceptionOrNull()?.message.orEmpty(),
+                )
+            }
             val latestAttempt = requireNotNull(executionPlan).let { plan ->
                 attemptStore.latestAttempt(run.runId, plan.planId, plan.hash)
             }
