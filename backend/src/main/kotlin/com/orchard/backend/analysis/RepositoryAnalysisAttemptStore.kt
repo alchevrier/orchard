@@ -15,6 +15,7 @@ import kotlinx.serialization.json.Json
 
 const val ANALYSIS_ATTEMPT_BLOCKED = "BLOCKED"
 const val ANALYSIS_ATTEMPT_RETRY_AUTHORIZED = "RETRY_AUTHORIZED"
+const val ANALYSIS_ATTEMPT_RUNNING = "RUNNING"
 
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
@@ -27,6 +28,12 @@ data class RepositoryAnalysisAttempt(
     val diagnostic: String,
     val promptHash: String? = null,
     val recordedAt: String = Instant.now().toString(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val executionProfileId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val providerFingerprint: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val inputTokens: Int? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val rejectedPlan: RepositoryAnalysisPlanContent? = null,
 )
@@ -247,7 +254,7 @@ private fun validateRepositoryAnalysisAttempt(
     require(attempt.runId > 0 && attempt.baseRevision.matches(Regex("[0-9a-f]{40}"))) {
         "Repository analysis attempt identity is invalid"
     }
-    require(attempt.state in setOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED)) {
+    require(attempt.state in setOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, ANALYSIS_ATTEMPT_RUNNING)) {
         "Repository analysis attempt state is invalid"
     }
     require(attempt.resultStatus.isNotBlank() && attempt.diagnostic.isNotBlank()) {
@@ -255,6 +262,15 @@ private fun validateRepositoryAnalysisAttempt(
     }
     require(attempt.promptHash == null || attempt.promptHash.matches(Regex("[0-9a-f]{64}"))) {
         "Repository analysis attempt prompt hash is invalid"
+    }
+    require(attempt.executionProfileId == null || attempt.executionProfileId.isNotBlank()) {
+        "Repository analysis execution profile is invalid"
+    }
+    require(attempt.providerFingerprint == null || attempt.providerFingerprint.matches(Regex("[0-9a-f]{64}"))) {
+        "Repository analysis provider fingerprint is invalid"
+    }
+    require(attempt.inputTokens == null || attempt.inputTokens > 0) {
+        "Repository analysis input token estimate is invalid"
     }
     require(attempt.state == ANALYSIS_ATTEMPT_BLOCKED || attempt.rejectedPlan == null) {
         "Only blocked repository analysis attempts may retain a rejected plan"

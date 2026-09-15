@@ -6,7 +6,13 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 
 object OrchardPaths {
-    val BASE_DIR: Path = Paths.get(System.getProperty("user.home"), ".orchard")
+    fun resolveBaseDir(environment: Map<String, String> = System.getenv(), userHome: String = System.getProperty("user.home")): Path {
+        val explicitHome = environment["ORCHARD_HOME"]
+        val baseHome = explicitHome ?: environment["HOME"] ?: userHome
+        return Paths.get(baseHome, ".orchard")
+    }
+
+    val BASE_DIR: Path = resolveBaseDir()
     val RAG_SHARED_DIR: Path = BASE_DIR.resolve("rag-shared")
     val PROJECTS_DIR: Path = BASE_DIR.resolve("projects")
     val WORKSPACE_DIR: Path = PROJECTS_DIR.resolve("workspace")

@@ -198,6 +198,31 @@ class RepositoryAnalysisService(
                     ?: return@forEach
                 val latest = attempts.lastOrNull { it.runId == run.runId && it.baseRevision == baseRevision }
                     ?: return@forEach
+                if (latest.state == ANALYSIS_ATTEMPT_RUNNING) {
+                    attemptStore.appendNext { attemptId ->
+                        RepositoryAnalysisAttempt(
+                            attemptId = attemptId,
+                            runId = run.runId,
+                            baseRevision = baseRevision,
+                            state = ANALYSIS_ATTEMPT_BLOCKED,
+                            resultStatus = RepositoryAnalysisTickStatus.CANCELLED.name,
+                            diagnostic = "Repository analysis execution was interrupted while the model call was running.",
+                            promptHash = latest.promptHash,
+                        )
+                    }
+                    attemptStore.appendNext { attemptId ->
+                        RepositoryAnalysisAttempt(
+                            attemptId = attemptId,
+                            runId = run.runId,
+                            baseRevision = baseRevision,
+                            state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                            resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
+                            diagnostic = "Repository analysis resumes automatically after process interruption.",
+                            promptHash = latest.promptHash,
+                        )
+                    }
+                    return@forEach
+                }
                 if (latest.state == ANALYSIS_ATTEMPT_BLOCKED && recoverableAnalysisInterruption(latest)) {
                     attemptStore.appendNext { attemptId ->
                         RepositoryAnalysisAttempt(
@@ -643,8 +668,9 @@ class RepositoryAnalysisService(
         val envelopeJson = json.encodeToString(envelope)
         val prompt = "$systemPrompt\n\nAuthoritative repository analysis envelope:\n$envelopeJson"
         val binding = provider.bindingProfile()
+        val promptTokens = estimateRepositoryAnalysisTokens(prompt)
         val admission = resourceController.acquire(
-            provider.resourceDemand(profile, estimateRepositoryAnalysisTokens(prompt)),
+            provider.resourceDemand(profile, promptTokens),
             ModelWorkPriority.DELIVERY,
         )
         val lease = admission.lease ?: return RepositoryAnalysisTickResult(
@@ -652,6 +678,7 @@ class RepositoryAnalysisService(
             run.runId,
             diagnostic = admission.evidence.reason,
         )
+        recordRunningAttempt(run.runId, baseRevision, prompt, profile.id, binding, promptTokens)
         val startedAt = System.nanoTime()
         val generation = try {
             lease.use {
@@ -889,6 +916,30 @@ class RepositoryAnalysisService(
             resourceAdmission = admission,
         )
     )
+
+    private fun recordRunningAttempt(
+        runId: Long,
+        baseRevision: String,
+        prompt: String,
+        executionProfileId: String,
+        binding: ModelBindingProfile,
+        inputTokens: Int,
+    ): RepositoryAnalysisAttempt? = runCatching {
+        attemptStore.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = runId,
+                baseRevision = baseRevision,
+                state = ANALYSIS_ATTEMPT_RUNNING,
+                resultStatus = RepositoryAnalysisTickStatus.BUSY.name,
+                diagnostic = "Repository analysis model execution is running.",
+                promptHash = sha256(prompt),
+                executionProfileId = executionProfileId,
+                providerFingerprint = modelBindingFingerprint(binding),
+                inputTokens = inputTokens,
+            )
+        }
+    }.getOrNull()
 
     private fun blockAttempt(
         runId: Long,

@@ -17,6 +17,7 @@ import com.orchard.backend.analysis.TransientRepositoryAnalysisAttemptStore
 import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
 import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_BLOCKED
 import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
+import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_RUNNING
 import com.orchard.backend.analysis.RepositoryEvidenceCitation
 import com.orchard.backend.agent.CODING_FILE_REPLACE
 import com.orchard.backend.agent.CODING_FILE_WRITE
@@ -316,8 +317,9 @@ class CompanyCircuitTest {
         assertEquals(emptyList(), analysis.eligibleRunIds())
         assertEquals(RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED, analysis.tick(runId).status)
         assertEquals(1, model.analysisCallCount)
-        assertEquals(RepositoryAnalysisTickStatus.CANCELLED.name, attempts.load().single().resultStatus)
-        assertEquals(ANALYSIS_ATTEMPT_BLOCKED, attempts.load().single().state)
+        assertEquals(listOf(ANALYSIS_ATTEMPT_RUNNING, ANALYSIS_ATTEMPT_BLOCKED), attempts.load().map { it.state })
+        assertEquals(RepositoryAnalysisTickStatus.BUSY.name, attempts.load().first().resultStatus)
+        assertEquals(RepositoryAnalysisTickStatus.CANCELLED.name, attempts.load().last().resultStatus)
     }
 
     @Test
@@ -389,6 +391,53 @@ class CompanyCircuitTest {
         assertEquals(0, model.analysisCallCount)
         assertEquals(RepositoryAnalysisTickStatus.CANCELLED.name, attempts.load().last().resultStatus)
         assertEquals("c".repeat(64), attempts.load().last().promptHash)
+    }
+
+    @Test
+    fun `startup recovers in-flight repository analysis ownership record`() = runTest {
+        val state = createTempDirectory("orchard-company-analysis-running-state-")
+        val projects = createTempDirectory("orchard-company-analysis-running-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace)
+        val model = RejectingAnalysisModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+        val revision = requireNotNull(run.context.workspaceReservation).baseRevision
+        val attempts = TransientRepositoryAnalysisAttemptStore()
+        attempts.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = run.runId,
+                baseRevision = revision,
+                state = ANALYSIS_ATTEMPT_RUNNING,
+                resultStatus = RepositoryAnalysisTickStatus.BUSY.name,
+                diagnostic = "Repository analysis model execution is running.",
+                promptHash = "d".repeat(64),
+                executionProfileId = DefaultModelExecutionProfiles.broadRepositoryAnalysis.id,
+                providerFingerprint = "e".repeat(64),
+                inputTokens = 500,
+            )
+        }
+
+        RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            attemptStore = attempts,
+        )
+
+        assertEquals(
+            listOf(ANALYSIS_ATTEMPT_RUNNING, ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED),
+            attempts.load().map { it.state },
+        )
+        assertEquals(RepositoryAnalysisTickStatus.CANCELLED.name, attempts.load()[1].resultStatus)
+        assertEquals("d".repeat(64), attempts.load()[1].promptHash)
     }
 
     @Test

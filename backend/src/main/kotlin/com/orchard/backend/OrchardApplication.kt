@@ -171,6 +171,8 @@ import io.ktor.utils.io.core.readText
 import io.ktor.utils.io.core.remaining
 
 fun main() {
+    val runtimeHost = System.getenv()["ORCHARD_HOST"] ?: "127.0.0.1"
+    val runtimePort = System.getenv()["ORCHARD_PORT"]?.toIntOrNull() ?: 8085
     OrchardPaths.initialize()
     val repositoryBindings = FileRepositoryBindingStore(OrchardPaths.WORKSPACE_DIR)
     val workspace = WorkspaceStore(
@@ -614,7 +616,8 @@ fun main() {
             }
         }
     }
-    val workspaceServer = embeddedServer(Netty, host = "127.0.0.1", port = 8085) {
+    val workspaceServer = embeddedServer(Netty, host = runtimeHost, port = runtimePort) {
+        println("Orchard runtime bound to $runtimeHost:$runtimePort")
         workspaceApi(
             workspace,
             definitionIntelligence,

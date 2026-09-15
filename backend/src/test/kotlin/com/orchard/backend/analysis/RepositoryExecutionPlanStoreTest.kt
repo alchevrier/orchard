@@ -225,6 +225,36 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `repository analysis attempt store records in-flight model ownership`() {
+        val directory = createTempDirectory("orchard-analysis-running-attempts-")
+        val store = FileRepositoryAnalysisAttemptStore(directory)
+        val revision = "a".repeat(40)
+
+        store.appendNext { attemptId ->
+            RepositoryAnalysisAttempt(
+                attemptId = attemptId,
+                runId = 11,
+                baseRevision = revision,
+                state = ANALYSIS_ATTEMPT_RUNNING,
+                resultStatus = RepositoryAnalysisTickStatus.BUSY.name,
+                diagnostic = "Repository analysis model execution is running.",
+                promptHash = "b".repeat(64),
+                executionProfileId = "broad-repository-analysis-v1",
+                providerFingerprint = "c".repeat(64),
+                inputTokens = 1234,
+            )
+        }
+
+        val restored = FileRepositoryAnalysisAttemptStore(directory).load().single()
+        assertEquals(ANALYSIS_ATTEMPT_RUNNING, restored.state)
+        assertEquals(RepositoryAnalysisTickStatus.BUSY.name, restored.resultStatus)
+        assertEquals("broad-repository-analysis-v1", restored.executionProfileId)
+        assertEquals("c".repeat(64), restored.providerFingerprint)
+        assertEquals(1234, restored.inputTokens)
+        assertFalse(FileRepositoryAnalysisAttemptStore(directory).isBlocked(11, revision))
+    }
+
+    @Test
     fun `repository analysis retry retains the latest schema valid rejected plan`() {
         val directory = createTempDirectory("orchard-rejected-analysis-plan-")
         val store = FileRepositoryAnalysisAttemptStore(directory)
