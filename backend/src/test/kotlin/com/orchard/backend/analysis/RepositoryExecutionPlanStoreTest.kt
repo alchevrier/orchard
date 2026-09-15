@@ -1163,6 +1163,31 @@ class RepositoryExecutionPlanStoreTest {
     }
 
     @Test
+    fun `empty rejected correction paths fall back to broad repository analysis`() {
+        val rejected = plan(1, 1, "a".repeat(40)).content.copy(
+            operations = listOf(
+                ExecutionPlanOperation(
+                    order = 1,
+                    action = PLAN_OPERATION_VERIFY,
+                    path = ".",
+                    instruction = "Run verification.",
+                    acceptanceCriteria = listOf("Verification passes."),
+                ),
+            ),
+            scopeCoverage = listOf(
+                ExecutionPlanScopeCoverage(
+                    scope = "Implement the admitted change.",
+                    evidencePaths = emptyList(),
+                    operationOrders = emptyList(),
+                ),
+            ),
+        )
+
+        assertEquals(emptyList(), focusedCorrectionContextPaths(rejected))
+        assertNull(focusedCorrectionContextPathsOrNull(rejected))
+    }
+
+    @Test
     fun `implementation scope cannot be satisfied by a test mutation alone`() {
         val original = plan(1, 1, "a".repeat(40)).content
         val testOperation = original.operations.first().copy(

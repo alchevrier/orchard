@@ -541,7 +541,7 @@ class RepositoryAnalysisService(
         }
             ?.takeIf { retryAuthorized }
             ?.rejectedPlan
-            ?.let(::focusedCorrectionContextPaths)
+            ?.let(::focusedCorrectionContextPathsOrNull)
         val context = runCatching {
             if (correctionPaths == null) {
                 workspaceGateway.collectAnalysisContext(workspacePath, query, selectors)
@@ -1363,6 +1363,9 @@ internal fun focusedCorrectionContextPaths(plan: RepositoryAnalysisPlanContent):
         .takeIf { it.isNotEmpty() }
         .orEmpty()
     }
+
+internal fun focusedCorrectionContextPathsOrNull(plan: RepositoryAnalysisPlanContent): List<String>? =
+    focusedCorrectionContextPaths(plan).takeIf { it.isNotEmpty() }
 
 internal fun failedCandidateCorrectionPaths(
     baseRevision: String,

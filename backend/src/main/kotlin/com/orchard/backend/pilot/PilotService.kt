@@ -324,9 +324,7 @@ private fun currentProviderCycle(
     events: List<ModelProviderAuditEvent>,
     promptHash: String?,
 ): List<ModelProviderAuditEvent> {
-    val correlated = promptHash?.let { hash -> events.filter { it.promptHash == hash } }
-        ?.takeIf { it.isNotEmpty() }
-        ?: events
+    val correlated = if (promptHash == null) events else events.filter { it.promptHash == promptHash }
     val start = correlated.indexOfLast { it.phase == "REQUEST_STARTED" }
     return if (start < 0) emptyList() else correlated.drop(start)
 }

@@ -93,6 +93,7 @@ class PilotServiceTest {
                 model = "test-model",
                 phase = "REQUEST_STARTED",
                 elapsedMillis = 0,
+                promptHash = "c".repeat(64),
                 promptTokens = 1200,
                 contextWindowTokens = 4096,
                 maxOutputTokens = 512,
@@ -106,6 +107,7 @@ class PilotServiceTest {
                 model = "test-model",
                 phase = "RESPONSE_HEADERS_RECEIVED",
                 elapsedMillis = 300,
+                promptHash = "c".repeat(64),
                 promptTokens = 1200,
                 contextWindowTokens = 4096,
                 maxOutputTokens = 512,
@@ -161,6 +163,39 @@ class PilotServiceTest {
     }
 
     @Test
+    fun `pilot status does not attribute unrelated provider failure to analysis attempt`() {
+        val status = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run())),
+            analysisAttempts = listOf(runningAttempt()),
+            analysisPlans = emptyList(),
+            providerEvents = listOf(
+                ModelProviderAuditEvent(
+                    eventId = 1,
+                    endpointId = "local-ollama",
+                    bindingId = "ollama:other",
+                    model = "other-model",
+                    phase = "REQUEST_FAILED",
+                    elapsedMillis = 37,
+                    promptHash = "f".repeat(64),
+                    promptTokens = 500,
+                    contextWindowTokens = 4096,
+                    diagnostic = "Connection refused",
+                ),
+            ),
+            resources = null,
+            objectives = emptyList(),
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+
+        assertEquals("broad-repository-analysis-v1", status.model?.profileId)
+        assertEquals("d".repeat(64), status.model?.providerFingerprint)
+        assertEquals(1200, status.model?.promptTokens)
+        assertEquals(null, status.model?.latestPhase)
+        assertEquals(null, status.model?.model)
+        assertTrue(status.model?.providerPhases.orEmpty().isEmpty())
+    }
+
+    @Test
     fun `state atlas declares every transition endpoint`() {
         val atlas = PilotStateAtlas.domains
 
@@ -199,4 +234,51 @@ class PilotServiceTest {
         assertTrue(atlas.any { it.id == "REPOSITORY_ANALYSIS_ATTEMPT" })
         assertTrue(atlas.any { it.id == "EXTERNAL_OPERATOR_ACTION" })
     }
+
+    private fun run(): WorkflowRunView {
+        val revision = "a".repeat(40)
+        return WorkflowRunView(
+            runId = 7,
+            createdAt = "2026-09-16T00:00:00Z",
+            state = RUN_STATE_CONTEXT_READY,
+            context = ContextManifest(
+                projectId = 2,
+                epicId = 3,
+                storyId = 4,
+                workItemId = 5,
+                workItemType = ENTITY_TASK,
+                title = "Implement pilot status",
+                content = "Expose compact operator state.",
+                workflowId = "default-delivery-task",
+                workflowVersion = 4,
+                repository = RepositoryHead(2, "/repo", revision, "main", "", clean = true),
+                recalledEpisodes = emptyList(),
+                hash = "b".repeat(64),
+            ),
+            workflow = ResolvedWorkflow(
+                id = "default-delivery-task",
+                version = 4,
+                workItemType = ENTITY_TASK,
+                steps = listOf("DELIVER_CHANGE"),
+                evidenceContract = EvidenceContract("task-completion", 4, emptyList()),
+            ),
+            evidence = emptyList(),
+            attempts = emptyList(),
+            decisions = emptyList(),
+        )
+    }
+
+    private fun runningAttempt() = RepositoryAnalysisAttempt(
+        attemptId = 9,
+        runId = 7,
+        baseRevision = "a".repeat(40),
+        state = ANALYSIS_ATTEMPT_RUNNING,
+        resultStatus = RepositoryAnalysisTickStatus.BUSY.name,
+        diagnostic = "Repository analysis model execution is running.",
+        promptHash = "c".repeat(64),
+        recordedAt = "2026-09-16T00:00:01Z",
+        executionProfileId = "broad-repository-analysis-v1",
+        providerFingerprint = "d".repeat(64),
+        inputTokens = 1200,
+    )
 }
