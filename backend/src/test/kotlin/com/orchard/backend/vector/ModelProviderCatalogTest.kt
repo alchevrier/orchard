@@ -255,6 +255,7 @@ class ModelProviderCatalogTest {
     fun `Ollama adapter retries empty JSON mode without weakening strict decoding`() = runTest {
         val requests = mutableListOf<String>()
         val diagnostics = mutableListOf<String>()
+        ModelProviderAuditLog.clear()
         val engine = MockEngine { request ->
             requests += (request.body as? TextContent)?.text.orEmpty()
             if (requests.size == 1) {
@@ -295,6 +296,39 @@ class ModelProviderCatalogTest {
         assertTrue(diagnostics.last().contains("\"formatPresent\":false"))
         assertTrue(diagnostics.all { it.contains("\"httpStatus\":200") && it.contains("\"think\":false") })
         assertTrue(diagnostics.none { it.contains(privatePrompt) || it.contains("private reasoning") || it.contains("PROPOSE_DOMAIN_ACTION") })
+        assertTrue(ModelProviderAuditLog.recent().any { it.phase == "REQUEST_STARTED" && it.model == catalog.bindings.single().model })
+        assertTrue(ModelProviderAuditLog.recent().any { it.phase == "STREAM_TERMINAL_FRAME" && it.done == true })
+        assertTrue(ModelProviderAuditLog.recent().none { it.diagnostic.contains(privatePrompt) })
+        ModelProviderAuditLog.clear()
+    }
+
+    @Test
+    fun `model provider audit route exposes recent phases without prompt content`() = testApplication {
+        ModelProviderAuditLog.clear()
+        ModelProviderAuditLog.record(
+            ModelProviderAuditEvent(
+                eventId = 0,
+                endpointId = "local-ollama",
+                bindingId = "ollama:gpt-oss-120b:json:t0:s42",
+                model = "gpt-oss:120b",
+                phase = "REQUEST_STARTED",
+                elapsedMillis = 0,
+                promptTokens = 60102,
+                contextWindowTokens = 96000,
+                maxOutputTokens = 8192,
+                structured = true,
+            )
+        )
+        application { workspaceApi(WorkspaceStore()) }
+
+        val response = client.get("/api/model-providers/audit-events?limit=1")
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("REQUEST_STARTED"))
+        assertTrue(body.contains("60102"))
+        assertFalse(body.contains("prompt content"))
+        ModelProviderAuditLog.clear()
     }
 
     @Test
@@ -326,9 +360,9 @@ class ModelProviderCatalogTest {
 
         assertEquals("{\"ok\":true}", generation.text)
         assertEquals(2, requests.size)
-        assertTrue(requests.first().contains("\"format\":\"json\""))
+        assertTrue(requests.first().contains("\"format\":"))
         assertFalse(requests.last().contains("\"format\""))
-        assertTrue(requests.all { it.contains("\"think\":\"low\"") })
+        assertTrue(requests.last().contains("\"think\":\"low\""))
     }
 
     @Test

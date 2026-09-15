@@ -32,7 +32,51 @@ import kotlinx.serialization.json.put
 import java.net.HttpURLConnection
 import java.net.URI
 import java.time.Duration
+import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 import io.ktor.utils.io.readUTF8Line
+
+@Serializable
+data class ModelProviderAuditEvent(
+    val eventId: Long,
+    val endpointId: String,
+    val bindingId: String,
+    val model: String,
+    val phase: String,
+    val elapsedMillis: Long,
+    val promptTokens: Int,
+    val contextWindowTokens: Int,
+    val maxOutputTokens: Int? = null,
+    val structured: Boolean? = null,
+    val responseBodyBytes: Int? = null,
+    val streamFrames: Int? = null,
+    val promptEvalCount: Int? = null,
+    val evalCount: Int? = null,
+    val done: Boolean? = null,
+    val diagnostic: String = "",
+    val recordedAt: String = Instant.now().toString(),
+)
+
+object ModelProviderAuditLog {
+    private const val MAX_EVENTS = 256
+    private val nextEventId = AtomicLong(1)
+    private val events = ArrayDeque<ModelProviderAuditEvent>()
+
+    @Synchronized
+    fun record(event: ModelProviderAuditEvent) {
+        events += event.copy(eventId = nextEventId.getAndIncrement())
+        while (events.size > MAX_EVENTS) events.removeFirst()
+    }
+
+    @Synchronized
+    fun recent(limit: Int = 100): List<ModelProviderAuditEvent> = events.takeLast(limit.coerceIn(1, MAX_EVENTS))
+
+    @Synchronized
+    fun clear() {
+        events.clear()
+        nextEventId.set(1)
+    }
+}
 
 @Serializable
 data class ModelEndpointInspection(
@@ -229,6 +273,8 @@ class CatalogModelProvider(
         contextWindowTokens: Int,
         structured: Boolean,
     ): OllamaCatalogResponse {
+        val startedAt = nanoTime()
+        val promptTokens = estimateModelTokens(prompt)
         val think = ollamaThinkControl(structured)
         val options = OllamaCatalogOptions(
             temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
@@ -237,25 +283,91 @@ class CatalogModelProvider(
             numContext = contextWindowTokens,
             numThread = binding.cpuUnits,
         )
-        val response = client.post(url("/api/generate")) {
-            authorize()
-            header(HttpHeaders.ContentType, ContentType.Application.Json)
-            if (structured) {
-                setBody(OllamaCatalogRequest(
-                    binding.model,
-                    prompt,
-                    format = ollamaResponseFormat(prompt),
-                    think = think,
-                    options = options,
-                ))
-            } else {
-                setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options))
+        recordProviderAudit("REQUEST_STARTED", startedAt, promptTokens, contextWindowTokens, maxOutputTokens, structured)
+        val response = try {
+            client.post(url("/api/generate")) {
+                authorize()
+                header(HttpHeaders.ContentType, ContentType.Application.Json)
+                if (structured) {
+                    setBody(OllamaCatalogRequest(
+                        binding.model,
+                        prompt,
+                        format = ollamaResponseFormat(prompt),
+                        think = think,
+                        options = options,
+                    ))
+                } else {
+                    setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options))
+                }
             }
+        } catch (error: Exception) {
+            recordProviderAudit(
+                "REQUEST_FAILED",
+                startedAt,
+                promptTokens,
+                contextWindowTokens,
+                maxOutputTokens,
+                structured,
+                diagnostic = error.message.orEmpty().take(512),
+            )
+            throw error
         }
-        val body = response.bodyAsOllamaStream()
+        recordProviderAudit(
+            "RESPONSE_HEADERS_RECEIVED",
+            startedAt,
+            promptTokens,
+            contextWindowTokens,
+            maxOutputTokens,
+            structured,
+            diagnostic = "HTTP ${response.status.value}",
+        )
+        val body = response.bodyAsOllamaStream { line, frames, bytes ->
+            val decoded = runCatching { json.decodeFromString<OllamaCatalogResponse>(line) }.getOrNull()
+            recordProviderAudit(
+                if (decoded?.done == true) "STREAM_TERMINAL_FRAME" else "STREAM_FRAME",
+                startedAt,
+                promptTokens,
+                contextWindowTokens,
+                maxOutputTokens,
+                structured,
+                responseBodyBytes = bytes,
+                streamFrames = frames,
+                promptEvalCount = decoded?.promptEvalCount,
+                evalCount = decoded?.evalCount,
+                done = decoded?.done,
+            )
+        }
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
-        val streamed = reconcileOllamaStream(body, json)
+        val streamed = runCatching { reconcileOllamaStream(body, json) }.getOrElse { error ->
+            recordProviderAudit(
+                "STREAM_RECONCILE_FAILED",
+                startedAt,
+                promptTokens,
+                contextWindowTokens,
+                maxOutputTokens,
+                structured,
+                responseBodyBytes = body.encodeToByteArray().size,
+                diagnostic = error.message.orEmpty().take(512),
+            )
+            return OllamaCatalogResponse(
+                response = "",
+                done = false,
+                doneReason = error.message.orEmpty().take(512),
+            )
+        }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
+        recordProviderAudit(
+            "STREAM_RECONCILED",
+            startedAt,
+            promptTokens,
+            contextWindowTokens,
+            maxOutputTokens,
+            structured,
+            responseBodyBytes = body.encodeToByteArray().size,
+            promptEvalCount = streamed.promptEvalCount,
+            evalCount = streamed.evalCount,
+            done = true,
+        )
         return OllamaCatalogResponse(
             response = streamed.response,
             thinking = streamed.thinking,
@@ -288,6 +400,42 @@ class CatalogModelProvider(
                 )
             }
         }
+    }
+
+    private fun recordProviderAudit(
+        phase: String,
+        startedAt: Long,
+        promptTokens: Int,
+        contextWindowTokens: Int,
+        maxOutputTokens: Int?,
+        structured: Boolean,
+        responseBodyBytes: Int? = null,
+        streamFrames: Int? = null,
+        promptEvalCount: Int? = null,
+        evalCount: Int? = null,
+        done: Boolean? = null,
+        diagnostic: String = "",
+    ) {
+        ModelProviderAuditLog.record(
+            ModelProviderAuditEvent(
+                eventId = 0,
+                endpointId = endpoint.endpointId,
+                bindingId = binding.bindingId,
+                model = binding.model,
+                phase = phase,
+                elapsedMillis = (nanoTime() - startedAt) / 1_000_000,
+                promptTokens = promptTokens,
+                contextWindowTokens = contextWindowTokens,
+                maxOutputTokens = maxOutputTokens,
+                structured = structured,
+                responseBodyBytes = responseBodyBytes,
+                streamFrames = streamFrames,
+                promptEvalCount = promptEvalCount,
+                evalCount = evalCount,
+                done = done,
+                diagnostic = diagnostic,
+            )
+        )
     }
 
     private fun HttpClientConfig<*>.configure() {
@@ -569,12 +717,19 @@ private data class OllamaAttemptDiagnostic(
     val think: JsonElement,
 )
 
-private suspend fun io.ktor.client.statement.HttpResponse.bodyAsOllamaStream(): String = buildString {
+private suspend fun io.ktor.client.statement.HttpResponse.bodyAsOllamaStream(
+    onLine: (line: String, frames: Int, bytes: Int) -> Unit = { _, _, _ -> },
+): String = buildString {
     val channel = bodyAsChannel()
+    var frames = 0
+    var bytes = 0
     while (!channel.isClosedForRead) {
         channel.readUTF8Line()?.let {
+            frames++
             append(it)
             append('\n')
+            bytes += it.encodeToByteArray().size + 1
+            onLine(it, frames, bytes)
         }
     }
 }

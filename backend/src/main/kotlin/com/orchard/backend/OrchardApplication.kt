@@ -71,6 +71,7 @@ import com.orchard.backend.report.RepositoryBaselineCompiler
 import com.orchard.backend.report.projectReportRoutes
 import com.orchard.backend.vector.FileModelProviderCatalogStore
 import com.orchard.backend.vector.FileModelProfileSettingsStore
+import com.orchard.backend.vector.ModelProviderAuditLog
 import com.orchard.backend.vector.ModelProviderCatalog
 import com.orchard.backend.vector.ModelProviderRegistry
 import com.orchard.backend.vector.ModelProfileOverride
@@ -1256,6 +1257,10 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(modelProviderRegistry.inspect())
+        }
+        get("/api/model-providers/audit-events") {
+            val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 100
+            call.respond(ModelProviderAuditLog.recent(limit))
         }
         get("/api/model-setup/recommendations") {
             if (definitionIntelligence == null) {

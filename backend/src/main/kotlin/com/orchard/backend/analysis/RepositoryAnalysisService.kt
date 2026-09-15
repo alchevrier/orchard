@@ -2240,4 +2240,4 @@ private fun repositoryAnalysisTokens(value: String): Set<String> = value.lowerca
     .toSet()
 
 internal fun estimateRepositoryAnalysisTokens(value: String): Int =
-    (estimateModelTokens(value) / 4).coerceAtLeast(1)
+    estimateModelTokens(value)
