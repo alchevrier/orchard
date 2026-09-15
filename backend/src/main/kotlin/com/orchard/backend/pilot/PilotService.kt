@@ -49,6 +49,7 @@ import com.orchard.backend.conversation.OBJECTIVE_COMPLETED
 import com.orchard.backend.conversation.OBJECTIVE_PAUSED
 import com.orchard.backend.conversation.OBJECTIVE_READY
 import com.orchard.backend.conversation.OBJECTIVE_SUPERSEDED
+import com.orchard.backend.config.OrchardOperationMode
 import com.orchard.backend.resource.MachineResourceConfiguration
 import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.ResourceAdmissionDecision
@@ -158,6 +159,7 @@ data class PilotAction(
 
 @Serializable
 data class PilotStatus(
+    val operationMode: OrchardOperationMode,
     val state: String,
     val activeObjective: PilotObjectiveStatus? = null,
     val currentRun: PilotRunStatus? = null,
@@ -197,6 +199,7 @@ class PilotService(
     private val repositoryAnalysis: RepositoryAnalysisService? = null,
     private val conversationConductor: ConversationConductorService? = null,
     private val resourceController: MachineResourceController? = null,
+    private val operationMode: OrchardOperationMode = OrchardOperationMode.AUTONOMOUS,
     private val providerEvents: () -> List<ModelProviderAuditEvent> = { ModelProviderAuditLog.recent() },
     private val now: () -> Instant = Instant::now,
 ) {
@@ -207,6 +210,7 @@ class PilotService(
         providerEvents = providerEvents(),
         resources = runCatching { resourceController?.configuration() }.getOrNull(),
         objectives = activeObjectives(),
+        operationMode = operationMode,
         now = now(),
     )
 
@@ -224,6 +228,7 @@ internal fun compilePilotStatus(
     providerEvents: List<ModelProviderAuditEvent>,
     resources: MachineResourceConfiguration?,
     objectives: List<ConversationObjectiveRevision>,
+    operationMode: OrchardOperationMode = OrchardOperationMode.AUTONOMOUS,
     now: Instant,
 ): PilotStatus {
     val activeRuns = snapshot.workflowRuns.filter { it.state !in TERMINAL_RUN_STATES }
@@ -249,6 +254,7 @@ internal fun compilePilotStatus(
         else -> "ACTION_REQUIRED"
     }
     return PilotStatus(
+        operationMode = operationMode,
         state = state,
         activeObjective = objective?.let {
             PilotObjectiveStatus(it.objectiveId, it.projectId, it.title, it.state, it.priority)
@@ -396,6 +402,12 @@ private fun compileActions(
 
 object PilotStateAtlas {
     val domains: List<PilotStateDomain> = listOf(
+        domain(
+            "ORCHARD_OPERATION_MODE",
+            OrchardOperationMode.entries.map { it.name },
+            transition(null, OrchardOperationMode.AUTONOMOUS.name, "runtime.start", "PROCESS_CONFIGURATION", projection = "pilot operationMode", meaning = "Eligible background model work may dispatch under existing authority.", terminal = true),
+            transition(null, OrchardOperationMode.PILOTED.name, "runtime.start", "PROCESS_CONFIGURATION", projection = "pilot operationMode", meaning = "Model-backed work waits for an explicit pilot action.", terminal = true),
+        ),
         domain(
             "CONVERSATION_OBJECTIVE",
             listOf(OBJECTIVE_CANDIDATE, OBJECTIVE_AWAITING_ADMISSION, OBJECTIVE_READY, OBJECTIVE_ACTIVE, OBJECTIVE_PAUSED, OBJECTIVE_BLOCKED, OBJECTIVE_COMPLETED, OBJECTIVE_CANCELLED, OBJECTIVE_SUPERSEDED),

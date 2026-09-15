@@ -24,12 +24,12 @@ The pilot reads compact authority state; Orchard owns truth, admission, evidence
    For the normal local stack, prefer:
 
    ```bash
-   ./run_orchard.sh
+   ORCHARD_OPERATION_MODE=PILOTED ./run_orchard.sh
    ```
 
-   This launcher checks or starts Ollama, verifies the recommended models, and then starts Orchard. Use `./run_orchard.sh --skip-ollama` only when LM Studio or a remote provider is already running and configured.
+   This launcher checks or starts Ollama, verifies the recommended models, and then starts Orchard without autonomous background model dispatch. Use `ORCHARD_OPERATION_MODE=PILOTED ./run_orchard.sh --skip-ollama` only when LM Studio or a remote provider is already running and configured.
 
-   For a headless or isolated backend, direct `:backend:jvmRun` is allowed, but it does **not** start Ollama, LM Studio, or any remote provider. Start and verify the configured provider separately before executing model-backed actions.
+   For a headless or isolated backend, direct `:backend:jvmRun` is allowed, but it does **not** start Ollama, LM Studio, or any remote provider. Start and verify the configured provider separately, and set `ORCHARD_OPERATION_MODE=PILOTED`, before executing model-backed actions.
 
 2. Run the deterministic preflight:
 
@@ -50,6 +50,7 @@ The pilot reads compact authority state; Orchard owns truth, admission, evidence
 4. Read only these status fields first:
 
    - `state`
+   - `operationMode` (must be `PILOTED` for copilot-controlled execution)
    - `activeObjective`
    - `currentRun`
    - `currentOperation`
@@ -76,6 +77,7 @@ The pilot reads compact authority state; Orchard owns truth, admission, evidence
 
 7. Before any mutation:
 
+   - confirm `operationMode` is `PILOTED`; stop if it is `AUTONOMOUS` unless the user explicitly requested autonomous operation;
    - confirm the action appears in `authorizedActions`;
    - if its `costClass` starts with `MODEL`, confirm provider preflight passed immediately before execution;
    - use its exact HTTP method and path;

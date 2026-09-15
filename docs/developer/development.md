@@ -70,6 +70,14 @@ Run backend only:
 ./gradlew :backend:jvmRun --no-daemon
 ```
 
+Run under an external human or AI pilot without background model dispatch:
+
+```bash
+ORCHARD_OPERATION_MODE=PILOTED ./gradlew :backend:jvmRun --no-daemon
+```
+
+`ORCHARD_OPERATION_MODE` accepts `AUTONOMOUS` (the default) or `PILOTED`. Piloted mode preserves read-only projections and explicit API actions while suppressing background model-backed analysis, coding, review, audit, campaign, and pending-command execution. Direct `jvmRun` does not start a model provider.
+
 Run the desktop only after the backend is ready:
 
 ```bash

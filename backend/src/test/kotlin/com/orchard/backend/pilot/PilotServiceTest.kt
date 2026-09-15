@@ -5,6 +5,7 @@ import com.orchard.backend.analysis.RepositoryAnalysisAttempt
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.conversation.ConversationObjectiveRevision
 import com.orchard.backend.conversation.OBJECTIVE_ACTIVE
+import com.orchard.backend.config.OrchardOperationMode
 import com.orchard.backend.resource.MachineCapacitySnapshot
 import com.orchard.backend.resource.MachineResourceConfiguration
 import com.orchard.backend.resource.MachineUsagePolicy
@@ -146,10 +147,11 @@ class PilotServiceTest {
             providerEvents,
             resources,
             listOf(objective),
-            Instant.parse("2026-09-16T00:00:11Z"),
+            now = Instant.parse("2026-09-16T00:00:11Z"),
         )
 
         assertEquals("RUNNING", status.state)
+        assertEquals(OrchardOperationMode.AUTONOMOUS, status.operationMode)
         assertEquals(3, status.activeObjective?.objectiveId)
         assertEquals(7, status.currentRun?.runId)
         assertEquals(9, status.currentOperation?.attemptId)
@@ -200,6 +202,7 @@ class PilotServiceTest {
         val atlas = PilotStateAtlas.domains
 
         assertTrue(atlas.size >= 13)
+        assertTrue(atlas.any { it.id == "ORCHARD_OPERATION_MODE" })
         assertEquals(atlas.size, atlas.map { it.id }.distinct().size)
         atlas.forEach { domain ->
             assertTrue(domain.states.isNotEmpty(), domain.id)
@@ -216,7 +219,11 @@ class PilotServiceTest {
 
     @Test
     fun `pilot routes expose idle status and complete atlas without a model`() = testApplication {
-        val service = PilotService(WorkspaceStore(), now = { Instant.parse("2026-09-16T00:00:00Z") })
+        val service = PilotService(
+            WorkspaceStore(),
+            operationMode = OrchardOperationMode.PILOTED,
+            now = { Instant.parse("2026-09-16T00:00:00Z") },
+        )
         application { workspaceApi(WorkspaceStore(), pilotService = service) }
 
         val statusResponse = client.get("/api/pilot/status")
@@ -225,6 +232,7 @@ class PilotServiceTest {
         assertEquals(HttpStatusCode.OK, statusResponse.status)
         val status = Json.decodeFromString<PilotStatus>(statusResponse.bodyAsText())
         assertEquals("IDLE", status.state)
+        assertEquals(OrchardOperationMode.PILOTED, status.operationMode)
         assertNotNull(status.atlasDomains.singleOrNull { it == "WORKFLOW_RUN" })
         assertTrue(status.authorizedActions.isEmpty())
         assertFalse(statusResponse.bodyAsText().contains("prompt content"))

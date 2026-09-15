@@ -52,6 +52,7 @@ import com.orchard.backend.analysis.RepositoryBaselineAnalysisService
 import com.orchard.backend.analysis.RepositoryIntelligenceImporter
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.config.OrchardPaths
+import com.orchard.backend.config.OrchardOperationMode
 import com.orchard.backend.company.CompanyAuditService
 import com.orchard.backend.company.CompanyCircuitService
 import com.orchard.backend.company.CompanyCircuitStatus
@@ -176,7 +177,9 @@ import io.ktor.utils.io.core.remaining
 fun main() {
     val runtimeHost = System.getenv()["ORCHARD_HOST"] ?: "127.0.0.1"
     val runtimePort = System.getenv()["ORCHARD_PORT"]?.toIntOrNull() ?: 8085
+    val operationMode = OrchardOperationMode.resolve()
     OrchardPaths.initialize()
+    println("Orchard operation mode: $operationMode")
     val repositoryBindings = FileRepositoryBindingStore(OrchardPaths.WORKSPACE_DIR)
     val workspace = WorkspaceStore(
         FileWorkspaceRepository(OrchardPaths.WORKSPACE_DIR),
@@ -416,6 +419,7 @@ fun main() {
         repositoryAnalysis,
         conversationConductor,
         resourceController,
+        operationMode,
     )
     val projectReports = ProjectReportService(
         workspace,
@@ -457,11 +461,13 @@ fun main() {
     )
     val baselineCompiler = RepositoryBaselineCompiler(projectReports, repositoryBaselineAnalysis)
     val baselineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    baselineScope.launch {
-        while (isActive) {
-            delay(BASELINE_INTERVAL_MILLIS)
-            runCatching { baselineCompiler.tick() }.onFailure { error ->
-                BASELINE_LOGGER.log(Level.WARNING, "Repository baseline compilation failed", error)
+    if (operationMode.automaticModelDispatchEnabled) {
+        baselineScope.launch {
+            while (isActive) {
+                delay(BASELINE_INTERVAL_MILLIS)
+                runCatching { baselineCompiler.tick() }.onFailure { error ->
+                    BASELINE_LOGGER.log(Level.WARNING, "Repository baseline compilation failed", error)
+                }
             }
         }
     }
@@ -472,8 +478,10 @@ fun main() {
             runCatching { workspace.dispatchEligible() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable circuit dispatch tick failed", error)
             }
-            runCatching { conversationConductor.reconcilePending() }.onFailure { error ->
-                DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation command reconciliation failed", error)
+            if (operationMode.automaticModelDispatchEnabled) {
+                runCatching { conversationConductor.reconcilePending() }.onFailure { error ->
+                    DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation command reconciliation failed", error)
+                }
             }
             runCatching { candidatePullRequestReviews.reconcileCorrections() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR correction compilation failed", error)
@@ -493,31 +501,35 @@ fun main() {
             runCatching { candidatePullRequestEscalation.tick() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Candidate PR escalation dispatch failed", error)
             }
-            runCatching {
-                workPackageDesignInvalidation.tick()?.let { invalidation ->
-                    repositoryAnalysis.reconcileDesign(invalidation.runId, invalidation.admittedSuccessorDesign)
+            if (operationMode.automaticModelDispatchEnabled) {
+                runCatching {
+                    workPackageDesignInvalidation.tick()?.let { invalidation ->
+                        repositoryAnalysis.reconcileDesign(invalidation.runId, invalidation.admittedSuccessorDesign)
+                    }
+                }.onFailure { error ->
+                    DISPATCH_LOGGER.log(Level.WARNING, "Work-package design invalidation reconciliation failed", error)
                 }
-            }.onFailure { error ->
-                DISPATCH_LOGGER.log(Level.WARNING, "Work-package design invalidation reconciliation failed", error)
             }
             runCatching { candidatePullRequestLearning.reconcile() }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Candidate outcome learning reconciliation failed", error)
             }
-            runCatching { candidatePullRequestAutomatedReviews.tick() }
-                .onSuccess { result ->
-                    if (result.status != CandidateAutomatedReviewTickStatus.IDLE &&
-                        result.status != CandidateAutomatedReviewTickStatus.RECORDED &&
-                        result.status != CandidateAutomatedReviewTickStatus.BUSY
-                    ) {
-                        DISPATCH_LOGGER.warning(
-                            "Automated candidate review resolved as ${result.status} for PR ${result.pullRequestId}, " +
-                                "kind ${result.kind}: ${result.diagnostic}",
-                        )
+            if (operationMode.automaticModelDispatchEnabled) {
+                runCatching { candidatePullRequestAutomatedReviews.tick() }
+                    .onSuccess { result ->
+                        if (result.status != CandidateAutomatedReviewTickStatus.IDLE &&
+                            result.status != CandidateAutomatedReviewTickStatus.RECORDED &&
+                            result.status != CandidateAutomatedReviewTickStatus.BUSY
+                        ) {
+                            DISPATCH_LOGGER.warning(
+                                "Automated candidate review resolved as ${result.status} for PR ${result.pullRequestId}, " +
+                                    "kind ${result.kind}: ${result.diagnostic}",
+                            )
+                        }
                     }
-                }
-                .onFailure { error ->
-                    DISPATCH_LOGGER.log(Level.WARNING, "Automated candidate review reconciliation failed", error)
-                }
+                    .onFailure { error ->
+                        DISPATCH_LOGGER.log(Level.WARNING, "Automated candidate review reconciliation failed", error)
+                    }
+            }
             runCatching { conversationConductor.projectWorkspaceActivity(workspace) }.onFailure { error ->
                 DISPATCH_LOGGER.log(Level.WARNING, "Durable conversation activity projection failed", error)
             }
@@ -540,88 +552,94 @@ fun main() {
     }
     val codingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val analysisScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    analysisScope.launch {
-        while (isActive) {
-            delay(ANALYSIS_INTERVAL_MILLIS)
-            runCatching {
-                coroutineScope {
-                    conversationConductor.dispatchableRunIds(repositoryAnalysis.eligibleRunIds())
-                        .map { runId -> async { repositoryAnalysis.tick(runId) } }.awaitAll()
+    if (operationMode.automaticModelDispatchEnabled) {
+        analysisScope.launch {
+            while (isActive) {
+                delay(ANALYSIS_INTERVAL_MILLIS)
+                runCatching {
+                    coroutineScope {
+                        conversationConductor.dispatchableRunIds(repositoryAnalysis.eligibleRunIds())
+                            .map { runId -> async { repositoryAnalysis.tick(runId) } }.awaitAll()
+                    }
+                }.onFailure { error ->
+                    ANALYSIS_LOGGER.log(Level.WARNING, "Repository analysis tick failed", error)
                 }
-            }.onFailure { error ->
-                ANALYSIS_LOGGER.log(Level.WARNING, "Repository analysis tick failed", error)
             }
         }
-    }
-    codingScope.launch {
-        while (isActive) {
-            delay(CODING_INTERVAL_MILLIS)
-            runCatching {
-                coroutineScope {
-                    codingWorker.interruptedRunIds()
-                        .distinct()
-                        .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
-                    conversationConductor.dispatchableRunIds(codingWorker.eligibleRunIds())
-                        .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
+        codingScope.launch {
+            while (isActive) {
+                delay(CODING_INTERVAL_MILLIS)
+                runCatching {
+                    coroutineScope {
+                        codingWorker.interruptedRunIds()
+                            .distinct()
+                            .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
+                        conversationConductor.dispatchableRunIds(codingWorker.eligibleRunIds())
+                            .map { runId -> async { codingWorker.tick(runId) } }.awaitAll()
+                    }
+                }.onFailure { error ->
+                    CODING_LOGGER.log(Level.WARNING, "Governed coding worker tick failed", error)
                 }
-            }.onFailure { error ->
-                CODING_LOGGER.log(Level.WARNING, "Governed coding worker tick failed", error)
             }
         }
     }
     val auditScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    auditScope.launch {
-        while (isActive) {
-            delay(AUDIT_INTERVAL_MILLIS)
-            runCatching {
-                coroutineScope {
-                    conversationConductor.dispatchableRunIds(companyAudit.eligibleRunIds())
-                        .map { runId -> async { companyAudit.tick(runId) } }.awaitAll()
-                        .filter { it.status != com.orchard.backend.company.CompanyAuditTickStatus.IDLE }
-                        .forEach { result ->
-                            AUDIT_LOGGER.log(
-                                Level.INFO,
-                                "Independent company audit tick resolved as ${result.status} for run ${result.runId}: ${result.diagnostic}",
-                            )
-                            promoteAcceptedAudit(result.status, result.runId, companyControl)?.let { promotionStatus ->
+    if (operationMode.automaticModelDispatchEnabled) {
+        auditScope.launch {
+            while (isActive) {
+                delay(AUDIT_INTERVAL_MILLIS)
+                runCatching {
+                    coroutineScope {
+                        conversationConductor.dispatchableRunIds(companyAudit.eligibleRunIds())
+                            .map { runId -> async { companyAudit.tick(runId) } }.awaitAll()
+                            .filter { it.status != com.orchard.backend.company.CompanyAuditTickStatus.IDLE }
+                            .forEach { result ->
                                 AUDIT_LOGGER.log(
-                                    if (promotionStatus == CompanyMutationStatus.RECORDED) Level.INFO else Level.WARNING,
-                                    "Accepted candidate promotion resolved as $promotionStatus for run ${result.runId}.",
+                                    Level.INFO,
+                                    "Independent company audit tick resolved as ${result.status} for run ${result.runId}: ${result.diagnostic}",
                                 )
+                                promoteAcceptedAudit(result.status, result.runId, companyControl)?.let { promotionStatus ->
+                                    AUDIT_LOGGER.log(
+                                        if (promotionStatus == CompanyMutationStatus.RECORDED) Level.INFO else Level.WARNING,
+                                        "Accepted candidate promotion resolved as $promotionStatus for run ${result.runId}.",
+                                    )
+                                }
                             }
-                        }
-                    companyControl.acceptedPromotionRunIds().forEach { acceptedRunId ->
-                        val promotionStatus = companyControl.promote(acceptedRunId).status.let { status ->
-                            if (status == CompanyMutationStatus.EVIDENCE_STALE) {
-                                companyControl.recoverStalePromotion(acceptedRunId).status
-                            } else {
-                                status
+                        companyControl.acceptedPromotionRunIds().forEach { acceptedRunId ->
+                            val promotionStatus = companyControl.promote(acceptedRunId).status.let { status ->
+                                if (status == CompanyMutationStatus.EVIDENCE_STALE) {
+                                    companyControl.recoverStalePromotion(acceptedRunId).status
+                                } else {
+                                    status
+                                }
                             }
+                            AUDIT_LOGGER.log(
+                                if (promotionStatus == CompanyMutationStatus.RECORDED) Level.INFO else Level.WARNING,
+                                "Accepted candidate promotion reconciliation resolved as $promotionStatus for run $acceptedRunId.",
+                            )
                         }
-                        AUDIT_LOGGER.log(
-                            if (promotionStatus == CompanyMutationStatus.RECORDED) Level.INFO else Level.WARNING,
-                            "Accepted candidate promotion reconciliation resolved as $promotionStatus for run $acceptedRunId.",
-                        )
                     }
+                }.onFailure { error ->
+                    AUDIT_LOGGER.log(Level.WARNING, "Independent company audit tick failed", error)
                 }
-            }.onFailure { error ->
-                AUDIT_LOGGER.log(Level.WARNING, "Independent company audit tick failed", error)
             }
         }
     }
     val campaignScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    campaignScope.launch {
-        while (isActive) {
-            delay(CAMPAIGN_INTERVAL_MILLIS)
-            runCatching { remediationCampaigns.tick() }.onFailure { error ->
-                CAMPAIGN_LOGGER.log(Level.WARNING, "Remediation campaign tick failed", error)
-            }
-            runCatching {
-                campaignResolutions.reconcileCases()
-                campaignResolutions.reconcileSuccessors()
-                campaignResolutions.reconcileExceptionRequests()
-            }.onFailure { error ->
-                CAMPAIGN_LOGGER.log(Level.WARNING, "Campaign resolution reconciliation failed", error)
+    if (operationMode.automaticModelDispatchEnabled) {
+        campaignScope.launch {
+            while (isActive) {
+                delay(CAMPAIGN_INTERVAL_MILLIS)
+                runCatching { remediationCampaigns.tick() }.onFailure { error ->
+                    CAMPAIGN_LOGGER.log(Level.WARNING, "Remediation campaign tick failed", error)
+                }
+                runCatching {
+                    campaignResolutions.reconcileCases()
+                    campaignResolutions.reconcileSuccessors()
+                    campaignResolutions.reconcileExceptionRequests()
+                }.onFailure { error ->
+                    CAMPAIGN_LOGGER.log(Level.WARNING, "Campaign resolution reconciliation failed", error)
+                }
             }
         }
     }
