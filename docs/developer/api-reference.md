@@ -53,12 +53,21 @@ Work definitions may include `repositoryEvidenceSelectors`. Each selector binds 
 
 Ticket-scoped project report revisions include typed evidence for candidate PRs, independent audits, company acceptance, and local promotion. Each new governed-delivery record changes the report source hash, producing an immutable inbox revision that remains correlated with the ticket's canonical conversation thread.
 
+## AI Operator Pilot
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/pilot/status` | Compact deterministic projection of the active objective, run, operation, model phase, evidence gaps, resources, and admitted next actions |
+| `GET` | `/api/pilot/state-atlas` | Machine-readable map of Orchard states, legal transitions, authorities, evidence gates, resource predicates, and operator meanings |
+
+The pilot status does not invoke a model and does not create authority. It composes existing Orchard projections so a human or AI operator can determine what is happening and what may happen next without reading implementation code. Provider activity is correlated to repository analysis by prompt hash and excludes prompt and response content.
+
 ## Repository Analysis and Coding
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/repository-analysis/plans` | List repository execution plans |
-| `GET` | `/api/repository-analysis/attempts` | List durable terminal analysis blocks and retry authorizations |
+| `GET` | `/api/repository-analysis/attempts` | List durable running ownership, terminal analysis blocks, and retry authorizations |
 | `POST` | `/api/repository-analysis/tick` | Run one analysis reconciliation tick |
 | `POST` | `/api/repository-analysis/runs/{runId}/retry` | Authorize one successor attempt for a blocked analysis run |
 | `GET` | `/api/coding-worker/executions` | List coding execution records |

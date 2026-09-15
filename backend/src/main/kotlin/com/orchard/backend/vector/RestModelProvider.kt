@@ -31,6 +31,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.net.HttpURLConnection
 import java.net.URI
+import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
@@ -44,6 +45,7 @@ data class ModelProviderAuditEvent(
     val model: String,
     val phase: String,
     val elapsedMillis: Long,
+    val promptHash: String? = null,
     val promptTokens: Int,
     val contextWindowTokens: Int,
     val maxOutputTokens: Int? = null,
@@ -274,6 +276,7 @@ class CatalogModelProvider(
         structured: Boolean,
     ): OllamaCatalogResponse {
         val startedAt = nanoTime()
+        val promptHash = providerPromptHash(prompt)
         val promptTokens = estimateModelTokens(prompt)
         val think = ollamaThinkControl(structured)
         val options = OllamaCatalogOptions(
@@ -283,7 +286,7 @@ class CatalogModelProvider(
             numContext = contextWindowTokens,
             numThread = binding.cpuUnits,
         )
-        recordProviderAudit("REQUEST_STARTED", startedAt, promptTokens, contextWindowTokens, maxOutputTokens, structured)
+        recordProviderAudit("REQUEST_STARTED", startedAt, promptHash, promptTokens, contextWindowTokens, maxOutputTokens, structured)
         val response = try {
             client.post(url("/api/generate")) {
                 authorize()
@@ -304,6 +307,7 @@ class CatalogModelProvider(
             recordProviderAudit(
                 "REQUEST_FAILED",
                 startedAt,
+                promptHash,
                 promptTokens,
                 contextWindowTokens,
                 maxOutputTokens,
@@ -315,6 +319,7 @@ class CatalogModelProvider(
         recordProviderAudit(
             "RESPONSE_HEADERS_RECEIVED",
             startedAt,
+            promptHash,
             promptTokens,
             contextWindowTokens,
             maxOutputTokens,
@@ -326,6 +331,7 @@ class CatalogModelProvider(
             recordProviderAudit(
                 if (decoded?.done == true) "STREAM_TERMINAL_FRAME" else "STREAM_FRAME",
                 startedAt,
+                promptHash,
                 promptTokens,
                 contextWindowTokens,
                 maxOutputTokens,
@@ -342,6 +348,7 @@ class CatalogModelProvider(
             recordProviderAudit(
                 "STREAM_RECONCILE_FAILED",
                 startedAt,
+                promptHash,
                 promptTokens,
                 contextWindowTokens,
                 maxOutputTokens,
@@ -359,6 +366,7 @@ class CatalogModelProvider(
         recordProviderAudit(
             "STREAM_RECONCILED",
             startedAt,
+            promptHash,
             promptTokens,
             contextWindowTokens,
             maxOutputTokens,
@@ -405,6 +413,7 @@ class CatalogModelProvider(
     private fun recordProviderAudit(
         phase: String,
         startedAt: Long,
+        promptHash: String,
         promptTokens: Int,
         contextWindowTokens: Int,
         maxOutputTokens: Int?,
@@ -424,6 +433,7 @@ class CatalogModelProvider(
                 model = binding.model,
                 phase = phase,
                 elapsedMillis = (nanoTime() - startedAt) / 1_000_000,
+                promptHash = promptHash,
                 promptTokens = promptTokens,
                 contextWindowTokens = contextWindowTokens,
                 maxOutputTokens = maxOutputTokens,
@@ -437,6 +447,10 @@ class CatalogModelProvider(
             )
         )
     }
+
+    private fun providerPromptHash(prompt: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(prompt.toByteArray())
+        .joinToString("") { "%02x".format(it) }
 
     private fun HttpClientConfig<*>.configure() {
         install(ContentNegotiation) { json(json) }

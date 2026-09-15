@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed
+Accepted
+
+The initial backend surface is implemented by `GET /api/pilot/status` and `GET /api/pilot/state-atlas`. The status compiler is deterministic and model-free; later memory and UI projections remain incremental consequences of this decision.
 
 Extends ADR 009, ADR 016, ADR 024, ADR 028, ADR 030, ADR 044, ADR 046, ADR 049, ADR 050, and ADR 051. It preserves Orchard's workflow authority, conversation admission, model routing, resource admission, Attention, evidence, completion, and stop-authority boundaries.
 

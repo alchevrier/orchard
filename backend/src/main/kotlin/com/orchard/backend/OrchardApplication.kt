@@ -69,6 +69,8 @@ import com.orchard.backend.report.FileProjectReportStore
 import com.orchard.backend.report.ProjectReportService
 import com.orchard.backend.report.RepositoryBaselineCompiler
 import com.orchard.backend.report.projectReportRoutes
+import com.orchard.backend.pilot.PilotService
+import com.orchard.backend.pilot.pilotRoutes
 import com.orchard.backend.vector.FileModelProviderCatalogStore
 import com.orchard.backend.vector.FileModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProviderAuditLog
@@ -409,6 +411,12 @@ fun main() {
             modelProviderRegistry,
         ),
     )
+    val pilotService = PilotService(
+        workspace,
+        repositoryAnalysis,
+        conversationConductor,
+        resourceController,
+    )
     val projectReports = ProjectReportService(
         workspace,
         repositoryBindings,
@@ -648,6 +656,7 @@ fun main() {
             candidatePullRequestClarification,
             candidatePullRequestEscalation,
             candidatePullRequestAutomatedReviews,
+            pilotService,
         )
     }
     Runtime.getRuntime().addShutdownHook(Thread {
@@ -710,11 +719,13 @@ fun Application.workspaceApi(
     candidatePullRequestClarification: CandidatePullRequestAttentionService? = null,
     candidatePullRequestEscalation: CandidatePullRequestAttentionService? = null,
     candidatePullRequestAutomatedReviews: CandidatePullRequestAutomatedReviewService? = null,
+    pilotService: PilotService? = null,
 ) {
     configureJson()
     routing {
         if (conversationConductor != null) conversationRoutes(conversationConductor)
         if (projectReports != null) projectReportRoutes(projectReports)
+        if (pilotService != null) pilotRoutes(pilotService)
         get("/api/workspace") {
             call.respond(workspace.snapshot(MESSAGE_READY))
         }
