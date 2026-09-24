@@ -229,6 +229,32 @@ class RepositoryExecutionPlanStoreTest {
         val directory = createTempDirectory("orchard-analysis-running-attempts-")
         val store = FileRepositoryAnalysisAttemptStore(directory)
         val revision = "a".repeat(40)
+        val selection = RepositoryAnalysisContextSelection(
+            modelInputBudgetTokens = 16_800,
+            collectedFileCount = 2,
+            omittedFileCount = 5,
+            requiredPathCount = 1,
+            files = listOf(
+                RepositoryAnalysisContextFileSelection(
+                    rank = 1,
+                    path = "src/Owner.kt",
+                    contentHash = "d".repeat(64),
+                    excerptBytes = 128,
+                    matchedSelectorIds = listOf("owner"),
+                    requiredForModel = true,
+                    admittedToModel = true,
+                ),
+                RepositoryAnalysisContextFileSelection(
+                    rank = 2,
+                    path = "src/Consumer.kt",
+                    contentHash = "e".repeat(64),
+                    excerptBytes = 64,
+                    matchedSelectorIds = emptyList(),
+                    requiredForModel = false,
+                    admittedToModel = false,
+                ),
+            ),
+        )
 
         store.appendNext { attemptId ->
             RepositoryAnalysisAttempt(
@@ -242,6 +268,7 @@ class RepositoryExecutionPlanStoreTest {
                 executionProfileId = "broad-repository-analysis-v1",
                 providerFingerprint = "c".repeat(64),
                 inputTokens = 1234,
+                contextSelection = selection,
             )
         }
 
@@ -251,6 +278,7 @@ class RepositoryExecutionPlanStoreTest {
         assertEquals("broad-repository-analysis-v1", restored.executionProfileId)
         assertEquals("c".repeat(64), restored.providerFingerprint)
         assertEquals(1234, restored.inputTokens)
+        assertEquals(selection, restored.contextSelection)
         assertFalse(FileRepositoryAnalysisAttemptStore(directory).isBlocked(11, revision))
     }
 

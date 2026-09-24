@@ -17,6 +17,26 @@ const val ANALYSIS_ATTEMPT_BLOCKED = "BLOCKED"
 const val ANALYSIS_ATTEMPT_RETRY_AUTHORIZED = "RETRY_AUTHORIZED"
 const val ANALYSIS_ATTEMPT_RUNNING = "RUNNING"
 
+@Serializable
+data class RepositoryAnalysisContextFileSelection(
+    val rank: Int,
+    val path: String,
+    val contentHash: String,
+    val excerptBytes: Int,
+    val matchedSelectorIds: List<String>,
+    val requiredForModel: Boolean,
+    val admittedToModel: Boolean,
+)
+
+@Serializable
+data class RepositoryAnalysisContextSelection(
+    val modelInputBudgetTokens: Int,
+    val collectedFileCount: Int,
+    val omittedFileCount: Int,
+    val requiredPathCount: Int,
+    val files: List<RepositoryAnalysisContextFileSelection>,
+)
+
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class RepositoryAnalysisAttempt(
@@ -36,6 +56,8 @@ data class RepositoryAnalysisAttempt(
     val inputTokens: Int? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val rejectedPlan: RepositoryAnalysisPlanContent? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val contextSelection: RepositoryAnalysisContextSelection? = null,
 )
 
 interface RepositoryAnalysisAttemptStore {
@@ -271,6 +293,18 @@ private fun validateRepositoryAnalysisAttempt(
     }
     require(attempt.inputTokens == null || attempt.inputTokens > 0) {
         "Repository analysis input token estimate is invalid"
+    }
+    attempt.contextSelection?.let { selection ->
+        require(selection.modelInputBudgetTokens > 0 && selection.collectedFileCount >= selection.files.size &&
+            selection.omittedFileCount >= 0 && selection.requiredPathCount >= 0) {
+            "Repository analysis context selection is invalid"
+        }
+        require(selection.files.map { it.rank }.distinct().size == selection.files.size &&
+            selection.files.map { it.rank }.sorted() == (1..selection.files.size).toList() &&
+            selection.files.all { file ->
+                file.path.isNotBlank() && file.contentHash.matches(Regex("[0-9a-f]{64}")) && file.excerptBytes > 0
+            }
+        ) { "Repository analysis context selection files are invalid" }
     }
     require(attempt.state == ANALYSIS_ATTEMPT_BLOCKED || attempt.rejectedPlan == null) {
         "Only blocked repository analysis attempts may retain a rejected plan"

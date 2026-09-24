@@ -660,10 +660,17 @@ class RepositoryAnalysisService(
             contentCompactor = { content, maxBytes -> focusedContextExcerpt(content, queryTokens, maxBytes) },
         ) { candidate ->
             "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
-        } ?: return RepositoryAnalysisTickResult(
-            RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
+        } ?: return blockAttempt(
             run.runId,
-            diagnostic = "The minimum repository evidence envelope exceeds the analysis model input budget.",
+            baseRevision,
+            null,
+            RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
+            "The minimum repository evidence envelope exceeds the analysis model input budget.",
+            contextSelection = repositoryAnalysisContextSelection(
+                context,
+                analysisPaths,
+                if (correctionPaths == null) profile.inputBudgetTokens * 70 / 100 else profile.inputBudgetTokens,
+            ),
         )
         val envelope = envelopeFor(boundedContext)
         val envelopeJson = json.encodeToString(envelope)
@@ -679,7 +686,20 @@ class RepositoryAnalysisService(
             run.runId,
             diagnostic = admission.evidence.reason,
         )
-        recordRunningAttempt(run.runId, baseRevision, prompt, profile.id, binding, promptTokens)
+        recordRunningAttempt(
+            run.runId,
+            baseRevision,
+            prompt,
+            profile.id,
+            binding,
+            promptTokens,
+            repositoryAnalysisContextSelection(
+                context,
+                analysisPaths,
+                profile.inputBudgetTokens,
+                boundedContext.files.mapTo(hashSetOf()) { it.path },
+            ),
+        )
         val startedAt = System.nanoTime()
         val generation = try {
             lease.use {
@@ -929,6 +949,7 @@ class RepositoryAnalysisService(
         executionProfileId: String,
         binding: ModelBindingProfile,
         inputTokens: Int,
+        contextSelection: RepositoryAnalysisContextSelection,
     ): RepositoryAnalysisAttempt? = runCatching {
         attemptStore.appendNext { attemptId ->
             RepositoryAnalysisAttempt(
@@ -942,6 +963,7 @@ class RepositoryAnalysisService(
                 executionProfileId = executionProfileId,
                 providerFingerprint = modelBindingFingerprint(binding),
                 inputTokens = inputTokens,
+                contextSelection = contextSelection,
             )
         }
     }.getOrNull()
@@ -949,10 +971,11 @@ class RepositoryAnalysisService(
     private fun blockAttempt(
         runId: Long,
         baseRevision: String,
-        prompt: String,
+        prompt: String?,
         status: RepositoryAnalysisTickStatus,
         diagnostic: String,
         rejectedPlan: RepositoryAnalysisPlanContent? = null,
+        contextSelection: RepositoryAnalysisContextSelection? = null,
     ): RepositoryAnalysisTickResult = runCatching {
         attemptStore.appendNext { attemptId ->
             RepositoryAnalysisAttempt(
@@ -962,8 +985,9 @@ class RepositoryAnalysisService(
                 state = ANALYSIS_ATTEMPT_BLOCKED,
                 resultStatus = status.name,
                 diagnostic = diagnostic,
-                promptHash = sha256(prompt),
+                promptHash = prompt?.let(::sha256),
                 rejectedPlan = rejectedPlan,
+                contextSelection = contextSelection,
             )
         }.also { blocked ->
             if (status == RepositoryAnalysisTickStatus.INVALID_ANALYSIS &&
@@ -1024,6 +1048,29 @@ class RepositoryAnalysisService(
         }
         run.context.recalledEpisodes.forEach { appendLine("${it.problem} ${it.resolution} ${it.evidenceSummary}") }
     }
+
+    private fun repositoryAnalysisContextSelection(
+        context: CodingRepositoryContext,
+        requiredPaths: Set<String>,
+        modelInputBudgetTokens: Int,
+        admittedPaths: Set<String> = emptySet(),
+    ): RepositoryAnalysisContextSelection = RepositoryAnalysisContextSelection(
+        modelInputBudgetTokens = modelInputBudgetTokens,
+        collectedFileCount = context.files.size,
+        omittedFileCount = context.omittedFileCount,
+        requiredPathCount = requiredPaths.size,
+        files = context.files.mapIndexed { index, file ->
+            RepositoryAnalysisContextFileSelection(
+                rank = index + 1,
+                path = file.path,
+                contentHash = file.contentHash,
+                excerptBytes = file.content.encodeToByteArray().size,
+                matchedSelectorIds = file.matchedEvidenceSelectorIds,
+                requiredForModel = file.path in requiredPaths,
+                admittedToModel = file.path in admittedPaths,
+            )
+        },
+    )
 
     private fun effectiveRepositoryEvidenceSelectors(run: WorkflowRunView): List<RepositoryEvidenceSelector> {
         val definition = run.workDefinition?.definition
