@@ -520,12 +520,14 @@ class RepositoryAnalysisService(
             .singleOrNull { it.runId == runId }
             ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.IDLE, runId)
         val workspacePath = requireNotNull(run.context.workspaceReservation).path
-        val baseRevision = workspaceGateway.currentRevision(workspacePath)
+        val currentRevision = workspaceGateway.currentRevision(workspacePath)
             ?: return RepositoryAnalysisTickResult(
                 RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
                 run.runId,
                 diagnostic = "The reserved repository revision is unavailable.",
             )
+        val pinnedRevision = run.context.workspaceReservation.baseRevision.takeIf { it.isNotBlank() }
+        val baseRevision = if (repositoryIntelligenceImporter != null) pinnedRevision ?: currentRevision else currentRevision
         val intelligenceGraph = repositoryIntelligenceImporter?.compatible(run.context.projectId, baseRevision)
         if (repositoryIntelligenceImporter != null && intelligenceGraph == null) {
             return RepositoryAnalysisTickResult(
