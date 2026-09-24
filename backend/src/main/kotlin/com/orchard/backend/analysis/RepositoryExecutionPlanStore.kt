@@ -83,6 +83,10 @@ data class AnalysisExecutionProvenance(
     val contextHash: String,
     val outputHash: String,
     val modelExecutionId: Long,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val manifestKey: RepositoryIntelligenceManifestKey? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val graphContextTrace: RepositoryIntelligenceContextTrace? = null,
 )
 
 @Serializable
@@ -288,6 +292,25 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
     }
     require(listOf(plan.provenance.promptHash, plan.provenance.contextHash, plan.provenance.outputHash).all { it.matches(SHA256) }) {
         "Execution plan provenance hashes are invalid"
+    }
+    plan.provenance.manifestKey?.let { manifestKey ->
+        require(manifestKey.repositoryId == plan.projectId && manifestKey.commitHash == plan.baseRevision) {
+            "Execution plan manifest provenance is invalid"
+        }
+        require(manifestKey.extractorVersion > 0 && manifestKey.policyVersion > 0) {
+            "Execution plan manifest provenance versions are invalid"
+        }
+    }
+    plan.provenance.graphContextTrace?.let { trace ->
+        require(trace.graphQuery.isNotBlank() && trace.acceptedScope.all(String::isNotBlank)) {
+            "Execution plan graph context trace is invalid"
+        }
+        require(trace.anchorPaths.all(::validPath) && trace.selectedPaths.all(::validPath) && trace.omittedPaths.all(::validPath)) {
+            "Execution plan graph context paths are invalid"
+        }
+        require(trace.selectedNodeIds.distinct().size == trace.selectedNodeIds.size) {
+            "Execution plan graph context nodes are invalid"
+        }
     }
     require(plan.provenance.modelExecutionId > 0 && plan.hash == repositoryExecutionPlanHash(plan)) {
         "Execution plan authority hash is invalid"

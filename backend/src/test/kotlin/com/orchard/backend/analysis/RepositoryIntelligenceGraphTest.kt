@@ -15,6 +15,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import io.ktor.client.request.get
+import io.ktor.client.request.post
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.testing.testApplication
@@ -68,6 +69,60 @@ class RepositoryIntelligenceGraphTest {
     }
 
     @Test
+    fun `graph local analysis paths traverse only exact scope anchors and proven neighbors`() {
+        val graph = RepositoryIntelligenceGraph(
+            graphId = 1,
+            projectId = 1,
+            repositoryRevision = "a".repeat(40),
+            genesisRevision = 1,
+            orchardAuthorityHash = "b".repeat(64),
+            nodes = listOf(
+                RepositoryIntelligenceNode("service", INTELLIGENCE_NODE_SOURCE, "Service.kt", "src/Service.kt", unresolvedBoundaryIds = listOf("boundary:1")),
+                RepositoryIntelligenceNode("consumer", INTELLIGENCE_NODE_SOURCE, "Consumer.kt", "src/Consumer.kt"),
+                RepositoryIntelligenceNode("test", INTELLIGENCE_NODE_TEST, "ServiceTest.kt", "test/ServiceTest.kt"),
+                RepositoryIntelligenceNode("document", INTELLIGENCE_NODE_DOCUMENT, "service.md", "docs/service.md"),
+                RepositoryIntelligenceNode("unrelated", INTELLIGENCE_NODE_SOURCE, "Unrelated.kt", "src/Unrelated.kt"),
+            ),
+            edges = listOf(
+                RepositoryIntelligenceEdge("imports", INTELLIGENCE_EDGE_IMPORTS, "consumer", "service", "src/Consumer.kt", "Imports service."),
+                RepositoryIntelligenceEdge("tests", INTELLIGENCE_EDGE_TESTS, "test", "service", "test/ServiceTest.kt", "Tests service."),
+                RepositoryIntelligenceEdge("documents", INTELLIGENCE_EDGE_DOCUMENTS, "document", "service", "docs/service.md", "Documents service."),
+            ),
+            coverage = RepositoryIntelligenceCoverage(5, 5, 5, 0, 5, 3),
+            manifestKey = RepositoryIntelligenceManifestKey(1, "a".repeat(40), 1, 1),
+            unresolvedBoundaries = listOf(
+                RepositoryIntelligenceUnresolvedBoundary("boundary:1", "REFLECTION", "src/Service.kt", "Class.forName", "REQUIRE_EXPLICIT_CONTEXT", "service")
+            ),
+            hash = "c".repeat(64),
+        )
+        val selection = graphLocalRepositoryAnalysisSelection(graph, listOf("Modify `src/Service.kt` for the accepted behavior."))
+
+        assertEquals(
+            listOf("src/Service.kt", "docs/service.md", "src/Consumer.kt", "test/ServiceTest.kt"),
+            selection.selectedPaths,
+        )
+        assertEquals(listOf("boundary:1"), selection.unresolvedBoundaryIds)
+        assertEquals(REPOSITORY_INTELLIGENCE_GRAPH_LOCAL_QUERY, selection.toTrace().graphQuery)
+    }
+
+    @Test
+    fun `run scoped ensure reports missing workflow run`() {
+        val workspace = WorkspaceStore()
+        val traceStore = TransientRepositoryIntelligenceTraceStore()
+        val importer = RepositoryIntelligenceImporter(workspace, traceStore = traceStore)
+
+        testApplication {
+            application {
+                workspaceApi(workspace, repositoryIntelligenceImporter = importer)
+            }
+
+            assertEquals(HttpStatusCode.NotFound, client.post("/api/repository-intelligence/runs/1/ensure").status)
+        }
+        assertEquals(RepositoryIntelligenceRunEnsureStatus.RUN_NOT_FOUND.name, traceStore.load().single().diagnosticCode)
+        assertEquals(RepositoryIntelligenceTraceSpanKind.MANIFEST_ENSURE, traceStore.load().single().kind)
+    }
+
+    @Test
     fun `imports every tracked file and correlates repository and Orchard authority`() {
         val state = createTempDirectory("orchard-intelligence-state-")
         val repository = createTempDirectory("orchard-intelligence-repository-")
@@ -76,7 +131,13 @@ class RepositoryIntelligenceGraphTest {
             "backend/build.gradle.kts" to "plugins { kotlin(\"jvm\") }\n",
             "frontend/build.gradle.kts" to "dependencies { implementation(project(\":backend\")) }\n",
             "backend/src/main/kotlin/example/Service.kt" to "package example\nclass Service\n",
+            "backend/src/main/kotlin/example/Routes.kt" to "package example\nimport io.ktor.server.application.*\nimport example.OrderAuthority\nfun routes(authority: OrderAuthority) = Unit\n",
+            "backend/src/main/kotlin/example/Dto.kt" to "package example\n@kotlinx.serialization.Serializable\ndata class Dto(val id: String)\n",
+            "backend/src/main/kotlin/example/OrderAuthority.kt" to "package example\nimport example.OrderRepository\nimport example.OrderProjection\nclass OrderAuthority(val repository: OrderRepository, val projection: OrderProjection) { fun admit() { repository.append(); projection.toString() } }\n",
+            "backend/src/main/kotlin/example/OrderRepository.kt" to "package example\nclass OrderRepository { fun append() = Unit }\n",
+            "backend/src/main/kotlin/example/OrderProjection.kt" to "package example\nclass OrderProjection\n",
             "backend/src/main/kotlin/example/Specification.kt" to "package example\nclass Specification\n",
+            "backend/src/main/kotlin/example/WildcardConsumer.kt" to "package example\nimport example.*\nclass WildcardConsumer\n",
             "frontend/src/main/kotlin/example/App.kt" to "package example\nimport example.Service\nclass App(val service: Service)\n",
             "backend/src/test/kotlin/example/ServiceTest.kt" to "package example\nclass ServiceTest\n",
             "test/helpers.kt" to "fun helper() = Unit\n",
@@ -100,10 +161,24 @@ class RepositoryIntelligenceGraphTest {
         createProject(workspace)
         assertEquals(RepositoryBindStatus.BOUND, workspace.bindRepository(1, repository.toString()).status)
         val store = FileRepositoryIntelligenceGraphStore(state)
-        val importer = RepositoryIntelligenceImporter(workspace, store)
+        val lifecycleStore = FileRepositoryIntelligenceLifecycleStore(state)
+        val traceStore = FileRepositoryIntelligenceTraceStore(state)
+        val importer = RepositoryIntelligenceImporter(workspace, store, lifecycleStore = lifecycleStore, traceStore = traceStore)
 
-        val first = importer.import(1, repository.toString(), revision)
-        val repeated = importer.import(1, repository.toString(), revision)
+        val firstEnsure = importer.ensure(1, repository.toString(), revision)
+        val repeatedEnsure = importer.ensure(1, repository.toString(), revision)
+        val first = firstEnsure.graph
+        val repeated = repeatedEnsure.graph
+        val policyBumpedEnsure = RepositoryIntelligenceImporter(
+            workspace,
+            store,
+            policyVersion = 2,
+        ).ensure(1, repository.toString(), revision)
+        val extractorBumpedEnsure = RepositoryIntelligenceImporter(
+            workspace,
+            store,
+            extractorVersion = 2,
+        ).ensure(1, repository.toString(), revision)
 
         Files.writeString(repository.resolve("backend/src/main/kotlin/example/Service.kt"), "package changed\nclass Replacement\n")
         Files.writeString(repository.resolve("docs/latest.md"), "not committed\n")
@@ -116,15 +191,27 @@ class RepositoryIntelligenceGraphTest {
         assertEquals(files.size, first.coverage.trackedFileCount)
         assertEquals(files.size, first.coverage.contentAddressedFileCount)
         assertEquals(1, first.coverage.opaqueFileCount)
+        assertEquals(RepositoryIntelligenceManifestKey(1, revision, 1, 1), first.manifestKey)
         assertEquals(files.keys.sorted(), first.nodes.filter {
             it.path != null && it.kind !in setOf(INTELLIGENCE_NODE_MODULE, INTELLIGENCE_NODE_SYMBOL)
         }.mapNotNull { it.path }.sorted())
         assertTrue(first.nodes.any { it.kind == INTELLIGENCE_NODE_SYMBOL && it.attributes["qualifiedName"] == "example.Service" })
         assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_IMPORTS })
+        assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_IMPORTS && it.provenance.any { provenance -> provenance.ruleId == "kotlin-import-resolution" } })
         assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_TESTS && it.evidencePath?.endsWith("ServiceTest.kt") == true })
         assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_DOCUMENTS && it.evidencePath == "docs/adrs/001-service.md" })
         assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_DEPENDS_ON && it.evidencePath == "frontend/build.gradle.kts" })
         assertTrue(first.nodes.any { it.kind == INTELLIGENCE_NODE_PROJECT })
+        assertTrue(first.nodes.single { it.path == "frontend/src/main/kotlin/example/App.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL }.roles.contains(INTELLIGENCE_ROLE_UI))
+        assertTrue(first.nodes.single { it.path == "backend/src/main/kotlin/example/Routes.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL }.roles.contains(INTELLIGENCE_ROLE_TRANSPORT_SERVER))
+        assertTrue(first.nodes.single { it.path == "backend/src/main/kotlin/example/Dto.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL }.roles.contains(INTELLIGENCE_ROLE_MODEL))
+        assertTrue(first.nodes.single { it.path == "backend/src/main/kotlin/example/OrderAuthority.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL }.roles.contains(INTELLIGENCE_ROLE_AUTHORITY))
+        assertTrue(first.nodes.single { it.path == "backend/src/main/kotlin/example/OrderRepository.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL }.roles.contains(INTELLIGENCE_ROLE_PERSISTENCE))
+        assertTrue(first.nodes.single { it.path == "backend/src/main/kotlin/example/OrderProjection.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL }.roles.contains(INTELLIGENCE_ROLE_PROJECTION))
+        assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_ADMITS_COMMAND && it.evidencePath == "backend/src/main/kotlin/example/Routes.kt" })
+        assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_APPENDS_RECORD && it.evidencePath == "backend/src/main/kotlin/example/OrderAuthority.kt" })
+        assertTrue(first.edges.any { it.kind == INTELLIGENCE_EDGE_DERIVES_PROJECTION && it.evidencePath == "backend/src/main/kotlin/example/OrderAuthority.kt" })
+        assertTrue(first.unresolvedBoundaries.any { it.kind == "WILDCARD_IMPORT" && it.path == "backend/src/main/kotlin/example/WildcardConsumer.kt" })
         assertEquals(INTELLIGENCE_NODE_SOURCE, first.nodes.single {
             it.path == "backend/src/main/kotlin/example/Specification.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL
         }.kind)
@@ -134,6 +221,33 @@ class RepositoryIntelligenceGraphTest {
         assertEquals(INTELLIGENCE_NODE_TEST, first.nodes.single {
             it.path == "test/helpers.kt" && it.kind != INTELLIGENCE_NODE_SYMBOL
         }.kind)
+        assertEquals(RepositoryIntelligenceEnsureDisposition.BUILT, firstEnsure.disposition)
+        assertEquals(RepositoryIntelligenceEnsureDisposition.REUSED, repeatedEnsure.disposition)
+        assertEquals(RepositoryIntelligenceEnsureDisposition.BUILT, policyBumpedEnsure.disposition)
+        assertEquals(RepositoryIntelligenceEnsureDisposition.BUILT, extractorBumpedEnsure.disposition)
+        assertEquals(RepositoryIntelligenceManifestKey(1, revision, 1, 2), policyBumpedEnsure.graph.manifestKey)
+        assertEquals(RepositoryIntelligenceManifestKey(1, revision, 2, 1), extractorBumpedEnsure.graph.manifestKey)
+        assertTrue(lifecycleStore.load().any {
+            it.manifestKey == RepositoryIntelligenceManifestKey(1, revision, 1, 1) && it.state == RepositoryIntelligenceManifestState.ABSENT
+        })
+        assertTrue(lifecycleStore.load().any {
+            it.manifestKey == RepositoryIntelligenceManifestKey(1, revision, 1, 1) && it.state == RepositoryIntelligenceManifestState.BUILDING
+        })
+        assertTrue(lifecycleStore.load().any {
+            it.manifestKey == RepositoryIntelligenceManifestKey(1, revision, 1, 1) &&
+                it.state == RepositoryIntelligenceManifestState.READY &&
+                it.disposition == RepositoryIntelligenceEnsureDisposition.REUSED
+        })
+        assertTrue(traceStore.load().any {
+            it.kind == RepositoryIntelligenceTraceSpanKind.MANIFEST_EXTRACT &&
+                it.status == RepositoryIntelligenceEnsureDisposition.BUILT.name &&
+                it.manifestKey == RepositoryIntelligenceManifestKey(1, revision, 1, 1)
+        })
+        assertTrue(traceStore.load().any {
+            it.kind == RepositoryIntelligenceTraceSpanKind.MANIFEST_ENSURE &&
+                it.status == RepositoryIntelligenceEnsureDisposition.REUSED.name &&
+                it.manifestKey == RepositoryIntelligenceManifestKey(1, revision, 1, 1)
+        })
         assertEquals(first, repeated)
         assertEquals(first.hash, reproduced.hash)
         assertEquals(first.hash, repositoryIntelligenceGraphHash(first.copy(graphId = 999, importedAt = "later")))
@@ -145,7 +259,7 @@ class RepositoryIntelligenceGraphTest {
             first.nodes.single { it.path == "docs/latest.md" && it.kind != INTELLIGENCE_NODE_SYMBOL }.contentHash,
             reproduced.nodes.single { it.path == "docs/latest.md" && it.kind != INTELLIGENCE_NODE_SYMBOL }.contentHash,
         )
-        assertEquals(listOf(first), FileRepositoryIntelligenceGraphStore(state).load())
+        assertEquals(listOf(first, policyBumpedEnsure.graph, extractorBumpedEnsure.graph), FileRepositoryIntelligenceGraphStore(state).load())
 
         createEpic(workspace)
         val successor = importer.import(1, repository.toString(), revision)
@@ -153,7 +267,7 @@ class RepositoryIntelligenceGraphTest {
         assertNotEquals(first.orchardAuthorityHash, successor.orchardAuthorityHash)
         assertEquals(revision, successor.repositoryRevision)
         assertTrue(successor.nodes.any { it.kind == INTELLIGENCE_NODE_WORK_ITEM && it.label == "Imported intelligence" })
-        assertEquals(2, FileRepositoryIntelligenceGraphStore(state).load().size)
+        assertEquals(4, FileRepositoryIntelligenceGraphStore(state).load().size)
 
         testApplication {
             application {
@@ -164,6 +278,22 @@ class RepositoryIntelligenceGraphTest {
             val projected = Json.decodeFromString<RepositoryIntelligenceGraph>(response.bodyAsText())
             assertEquals(successor.hash, projected.hash)
             assertEquals(files.size, projected.coverage.trackedFileCount)
+
+            val lifecycleResponse = client.get("/api/projects/1/repository-intelligence/lifecycle")
+            assertEquals(HttpStatusCode.OK, lifecycleResponse.status)
+            val lifecycleProjection = Json.decodeFromString<List<RepositoryIntelligenceManifestLifecycleProjection>>(lifecycleResponse.bodyAsText())
+            assertTrue(lifecycleProjection.any {
+                it.manifestKey == RepositoryIntelligenceManifestKey(1, revision, 1, 1) &&
+                    it.latestState == RepositoryIntelligenceManifestState.READY
+            })
+
+            val traceResponse = client.get("/api/projects/1/repository-intelligence/traces")
+            assertEquals(HttpStatusCode.OK, traceResponse.status)
+            val traceProjection = Json.decodeFromString<List<RepositoryIntelligenceTraceSpan>>(traceResponse.bodyAsText())
+            assertTrue(traceProjection.any {
+                it.kind == RepositoryIntelligenceTraceSpanKind.MANIFEST_ENSURE &&
+                    it.manifestKey == RepositoryIntelligenceManifestKey(1, revision, 1, 1)
+            })
         }
     }
 

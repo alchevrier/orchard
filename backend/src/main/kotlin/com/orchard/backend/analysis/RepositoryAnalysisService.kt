@@ -68,6 +68,7 @@ enum class RepositoryAnalysisTickStatus {
     MODEL_FAILED,
     INVALID_ANALYSIS,
     STORAGE_UNAVAILABLE,
+    INTELLIGENCE_UNAVAILABLE,
     ATTEMPT_BLOCKED,
     RETRY_AUTHORIZED,
     CANCELLED,
@@ -176,6 +177,7 @@ class RepositoryAnalysisService(
     private val codingAttemptStore: CodingWorkerAttemptStore? = null,
     private val codingWorkerStore: CodingWorkerStore? = null,
     private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
+    private val repositoryIntelligenceImporter: RepositoryIntelligenceImporter? = null,
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
@@ -524,6 +526,48 @@ class RepositoryAnalysisService(
                 run.runId,
                 diagnostic = "The reserved repository revision is unavailable.",
             )
+        val intelligenceGraph = repositoryIntelligenceImporter?.compatible(run.context.projectId, baseRevision)
+        if (repositoryIntelligenceImporter != null && intelligenceGraph == null) {
+            return RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.INTELLIGENCE_UNAVAILABLE,
+                run.runId,
+                diagnostic = "No compatible repository intelligence is ready for the pinned workflow revision.",
+            )
+        }
+        val graphTraceId = intelligenceGraph?.let {
+            newRepositoryIntelligenceTraceId("graph-local-analysis", run.context.projectId, baseRevision, run.runId)
+        }
+        val graphSelectionStartedAt = System.nanoTime()
+        val graphSelection = intelligenceGraph?.let {
+            graphLocalRepositoryAnalysisSelection(it, run.workDefinition?.definition?.scope.orEmpty())
+        }
+        if (graphSelection != null && graphTraceId != null) {
+            repositoryIntelligenceImporter?.emitTrace(
+                traceId = graphTraceId,
+                kind = RepositoryIntelligenceTraceSpanKind.GRAPH_QUERY,
+                status = "SELECTED",
+                projectId = run.context.projectId,
+                repositoryRevision = baseRevision,
+                runId = run.runId,
+                manifestKey = requireNotNull(intelligenceGraph).effectiveManifestKey(),
+                graphId = intelligenceGraph.graphId,
+                graphQuery = REPOSITORY_INTELLIGENCE_GRAPH_LOCAL_QUERY,
+                acceptedScopeCount = graphSelection.acceptedScope.size,
+                anchorPathCount = graphSelection.anchorPaths.size,
+                selectedNodeCount = graphSelection.selectedNodeIds.size,
+                selectedPathCount = graphSelection.selectedPaths.size,
+                omittedPathCount = graphSelection.omittedPaths.size,
+                unresolvedBoundaryCount = graphSelection.unresolvedBoundaryIds.size,
+                elapsedMillis = (System.nanoTime() - graphSelectionStartedAt) / 1_000_000L,
+            )
+        }
+        if (intelligenceGraph != null && graphSelection?.selectedPaths.isNullOrEmpty()) {
+            return RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+                run.runId,
+                diagnostic = "Compatible repository intelligence contains no exact accepted scope anchors for this workflow run.",
+            )
+        }
         val analysisAttempts = attemptStore.load().filter {
             it.runId == run.runId && it.baseRevision == baseRevision
         }
@@ -536,15 +580,22 @@ class RepositoryAnalysisService(
             )
         }
         val query = analysisQuery(run)
-        val selectors = effectiveRepositoryEvidenceSelectors(run)
+        val configuredSelectors = effectiveRepositoryEvidenceSelectors(run)
+        val graphPaths = graphSelection?.selectedPaths
+        val selectors = graphPaths?.let { paths -> configuredSelectors.filter { selector ->
+            selector.pathGlobs.any { it in paths && it.none { character -> character in "*?[]{}" } }
+        } } ?: configuredSelectors
         val correctionPaths = analysisAttempts.lastOrNull {
             it.state == ANALYSIS_ATTEMPT_BLOCKED && it.rejectedPlan != null
         }
             ?.takeIf { retryAuthorized }
             ?.rejectedPlan
             ?.let(::focusedCorrectionContextPathsOrNull)
+        val contextCompileStartedAt = System.nanoTime()
         val context = runCatching {
-            if (correctionPaths == null) {
+            if (correctionPaths == null && graphPaths != null) {
+                graphLocalAnalysisContext(workspacePath, baseRevision, graphPaths, query, selectors)
+            } else if (correctionPaths == null) {
                 workspaceGateway.collectAnalysisContext(workspacePath, query, selectors)
             } else {
                 workspaceGateway.collectPlanContext(
@@ -556,7 +607,42 @@ class RepositoryAnalysisService(
                 )
             }
         }.getOrElse {
+            if (correctionPaths == null && graphPaths != null && graphTraceId != null) {
+                repositoryIntelligenceImporter?.emitTrace(
+                    traceId = graphTraceId,
+                    kind = RepositoryIntelligenceTraceSpanKind.CONTEXT_COMPILE,
+                    status = "FAILED",
+                    projectId = run.context.projectId,
+                    repositoryRevision = baseRevision,
+                    runId = run.runId,
+                    manifestKey = requireNotNull(intelligenceGraph).effectiveManifestKey(),
+                    graphId = intelligenceGraph.graphId,
+                    graphQuery = REPOSITORY_INTELLIGENCE_GRAPH_LOCAL_QUERY,
+                    selectedPathCount = graphPaths.size,
+                    elapsedMillis = (System.nanoTime() - contextCompileStartedAt) / 1_000_000L,
+                    diagnosticCode = RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE.name,
+                    diagnostic = it.message.orEmpty(),
+                )
+            }
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
+        }
+        if (correctionPaths == null && graphPaths != null && graphTraceId != null) {
+            repositoryIntelligenceImporter?.emitTrace(
+                traceId = graphTraceId,
+                kind = RepositoryIntelligenceTraceSpanKind.CONTEXT_COMPILE,
+                status = "COMPILED",
+                projectId = run.context.projectId,
+                repositoryRevision = baseRevision,
+                runId = run.runId,
+                manifestKey = requireNotNull(intelligenceGraph).effectiveManifestKey(),
+                graphId = intelligenceGraph.graphId,
+                graphQuery = REPOSITORY_INTELLIGENCE_GRAPH_LOCAL_QUERY,
+                selectedPathCount = graphPaths.size,
+                contextFileCount = context.files.size,
+                contextOmittedFileCount = context.omittedFileCount,
+                contextBytes = context.files.sumOf { candidate -> candidate.content.toByteArray(Charsets.UTF_8).size.toLong() },
+                elapsedMillis = (System.nanoTime() - contextCompileStartedAt) / 1_000_000L,
+            )
         }
         if (context.files.isEmpty()) {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = "No repository evidence was selected.")
@@ -567,7 +653,7 @@ class RepositoryAnalysisService(
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
         val complianceContext = runCatching {
-            collectComplianceContext(workspacePath, run, selectors, authorityContext)
+            if (graphPaths != null) authorityContext else collectComplianceContext(workspacePath, run, selectors, authorityContext)
         }.getOrElse {
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
@@ -866,6 +952,8 @@ class RepositoryAnalysisService(
                         contextHash = sha256(envelopeJson),
                         outputHash = sha256(generation.text),
                         modelExecutionId = execution.executionId,
+                        manifestKey = intelligenceGraph?.effectiveManifestKey(),
+                        graphContextTrace = graphSelection?.takeIf { correctionPaths == null && graphPaths != null }?.toTrace(),
                     ),
                     admittedDesign = admittedDesignOverride ?: run.context.acceptanceContract?.design,
                 )
@@ -1078,6 +1166,21 @@ class RepositoryAnalysisService(
             definition?.scope.orEmpty(),
             definition?.repositoryEvidenceSelectors.orEmpty(),
         )
+    }
+
+    private fun graphLocalAnalysisContext(
+        workspacePath: String,
+        repositoryRevision: String,
+        paths: List<String>,
+        query: String,
+        selectors: List<RepositoryEvidenceSelector>,
+    ): CodingRepositoryContext {
+        val context = workspaceGateway.collectPlanContext(workspacePath, repositoryRevision, paths, query)
+        return context.copy(files = context.files.map { file ->
+            file.copy(matchedEvidenceSelectorIds = selectors.filter { selector ->
+                file.path in selector.pathGlobs
+            }.map { it.selectorId })
+        })
     }
 
     private fun collectComplianceContext(

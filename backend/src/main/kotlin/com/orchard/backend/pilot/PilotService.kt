@@ -16,6 +16,7 @@ import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_RUNNING
 import com.orchard.backend.analysis.RepositoryAnalysisAttempt
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
+import com.orchard.backend.analysis.RepositoryIntelligenceImporter
 import com.orchard.backend.attention.PERSISTENCE_ABANDONED
 import com.orchard.backend.attention.PERSISTENCE_ARCHITECTURE_REQUIRED
 import com.orchard.backend.attention.PERSISTENCE_BUDGET_EXHAUSTED
@@ -199,6 +200,7 @@ class PilotService(
     private val repositoryAnalysis: RepositoryAnalysisService? = null,
     private val conversationConductor: ConversationConductorService? = null,
     private val resourceController: MachineResourceController? = null,
+    private val repositoryIntelligenceImporter: RepositoryIntelligenceImporter? = null,
     private val operationMode: OrchardOperationMode = OrchardOperationMode.AUTONOMOUS,
     private val providerEvents: () -> List<ModelProviderAuditEvent> = { ModelProviderAuditLog.recent() },
     private val now: () -> Instant = Instant::now,
@@ -211,6 +213,11 @@ class PilotService(
         resources = runCatching { resourceController?.configuration() }.getOrNull(),
         objectives = activeObjectives(),
         operationMode = operationMode,
+        intelligenceReady = { run ->
+            val reservation = run.context.workspaceReservation
+            repositoryIntelligenceImporter == null || (reservation != null &&
+                repositoryIntelligenceImporter.compatible(run.context.projectId, reservation.baseRevision) != null)
+        },
         now = now(),
     )
 
@@ -229,6 +236,7 @@ internal fun compilePilotStatus(
     resources: MachineResourceConfiguration?,
     objectives: List<ConversationObjectiveRevision>,
     operationMode: OrchardOperationMode = OrchardOperationMode.AUTONOMOUS,
+    intelligenceReady: (WorkflowRunView) -> Boolean = { true },
     now: Instant,
 ): PilotStatus {
     val activeRuns = snapshot.workflowRuns.filter { it.state !in TERMINAL_RUN_STATES }
@@ -243,7 +251,7 @@ internal fun compilePilotStatus(
     val providerCycle = currentProviderCycle(providerEvents, attempt?.promptHash)
     val operation = compileOperation(run, attempt, plan, now)
     val evidence = compileEvidence(run)
-    val actions = compileActions(run, attempt, plan)
+    val actions = compileActions(run, attempt, plan, run?.let(intelligenceReady) ?: true)
     val state = when {
         run == null -> "IDLE"
         attempt?.state == ANALYSIS_ATTEMPT_RUNNING -> "RUNNING"
@@ -260,6 +268,7 @@ internal fun compilePilotStatus(
             PilotObjectiveStatus(it.objectiveId, it.projectId, it.title, it.state, it.priority)
         },
         currentRun = run?.let {
+            val pinnedRevision = it.context.workspaceReservation?.baseRevision ?: it.context.repository.commitHash
             PilotRunStatus(
                 it.runId,
                 it.context.projectId,
@@ -267,7 +276,7 @@ internal fun compilePilotStatus(
                 it.context.title,
                 it.state,
                 it.workflow.id,
-                it.context.repository.commitHash,
+                pinnedRevision,
             )
         },
         currentOperation = operation,
@@ -370,6 +379,7 @@ private fun compileActions(
     run: WorkflowRunView?,
     attempt: RepositoryAnalysisAttempt?,
     plan: RepositoryExecutionPlan?,
+    intelligenceReady: Boolean,
 ): Pair<List<PilotAction>, List<PilotAction>> {
     if (run == null) return emptyList<PilotAction>() to emptyList()
     val authorized = when {
@@ -384,6 +394,9 @@ private fun compileActions(
         )
         plan != null -> listOf(
             PilotAction("run-coding-worker", "POST", "/api/coding-worker/runs/${run.runId}/tick", "MODEL_DELIVERY", "An admitted execution plan is ready for implementation."),
+        )
+        !intelligenceReady -> listOf(
+            PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
         )
         else -> listOf(
             PilotAction("run-repository-analysis", "POST", "/api/repository-analysis/tick", "MODEL_DELIVERY", "The workflow has no repository execution plan."),

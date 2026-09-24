@@ -11,6 +11,7 @@ import com.orchard.backend.resource.MachineResourceConfiguration
 import com.orchard.backend.resource.MachineUsagePolicy
 import com.orchard.backend.vector.ModelProviderAuditEvent
 import com.orchard.backend.workspace.ContextManifest
+import com.orchard.backend.workspace.DispatchWorkspaceReservation
 import com.orchard.backend.workspace.ENTITY_TASK
 import com.orchard.backend.workspace.EvidenceContract
 import com.orchard.backend.workspace.EvidenceRequirement
@@ -195,6 +196,51 @@ class PilotServiceTest {
         assertEquals(null, status.model?.latestPhase)
         assertEquals(null, status.model?.model)
         assertTrue(status.model?.providerPhases.orEmpty().isEmpty())
+    }
+
+    @Test
+    fun `pilot requires repository intelligence before it authorizes analysis`() {
+        val status = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run())),
+            analysisAttempts = emptyList(),
+            analysisPlans = emptyList(),
+            providerEvents = emptyList(),
+            resources = null,
+            objectives = emptyList(),
+            intelligenceReady = { false },
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+
+        assertEquals("ensure-repository-intelligence", status.authorizedActions.single().id)
+        assertEquals("/api/repository-intelligence/runs/7/ensure", status.authorizedActions.single().path)
+    }
+
+    @Test
+    fun `pilot reports pinned reservation revision when present`() {
+        val reservationRevision = "b".repeat(40)
+        val reservedRun = run().copy(
+            context = run().context.copy(
+                workspaceReservation = DispatchWorkspaceReservation(
+                    mode = "RESERVED",
+                    owner = "pilot",
+                    path = "/repo-reservation",
+                    branch = "pilot/work",
+                    baseRevision = reservationRevision,
+                )
+            )
+        )
+
+        val status = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(reservedRun)),
+            analysisAttempts = emptyList(),
+            analysisPlans = emptyList(),
+            providerEvents = emptyList(),
+            resources = null,
+            objectives = emptyList(),
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+
+        assertEquals(reservationRevision, status.currentRun?.repositoryRevision)
     }
 
     @Test

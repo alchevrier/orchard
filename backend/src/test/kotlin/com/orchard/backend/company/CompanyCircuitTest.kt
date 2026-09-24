@@ -11,6 +11,10 @@ import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
 import com.orchard.backend.analysis.RepositoryAnalysisAttempt
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
+import com.orchard.backend.analysis.FileRepositoryIntelligenceGraphStore
+import com.orchard.backend.analysis.RepositoryIntelligenceImporter
+import com.orchard.backend.analysis.RepositoryIntelligenceTraceSpanKind
+import com.orchard.backend.analysis.TransientRepositoryIntelligenceTraceStore
 import com.orchard.backend.analysis.compactRepositoryContextToBudget
 import com.orchard.backend.analysis.TransientRepositoryExecutionPlanStore
 import com.orchard.backend.analysis.TransientRepositoryAnalysisAttemptStore
@@ -224,6 +228,80 @@ class CompanyCircuitTest {
             listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, ANALYSIS_ATTEMPT_BLOCKED),
             attempts.load().map { it.state },
         )
+    }
+
+    @Test
+    fun `repository analysis requires compatible intelligence before model dispatch`() = runTest {
+        val state = createTempDirectory("orchard-company-analysis-intelligence-state-")
+        val projects = createTempDirectory("orchard-company-analysis-intelligence-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace, repositoryPath = "build.gradle.kts")
+        val model = RejectingAnalysisModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val traceStore = TransientRepositoryIntelligenceTraceStore()
+        val importer = RepositoryIntelligenceImporter(
+            workspace,
+            FileRepositoryIntelligenceGraphStore(state),
+            traceStore = traceStore,
+        )
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            repositoryIntelligenceImporter = importer,
+        )
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+        val reservation = requireNotNull(run.context.workspaceReservation)
+
+        assertEquals(RepositoryAnalysisTickStatus.INTELLIGENCE_UNAVAILABLE, analysis.tick(run.runId).status)
+        assertEquals(0, model.analysisCallCount)
+
+        importer.ensure(run.context.projectId, reservation.path, reservation.baseRevision)
+
+        assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, analysis.tick(run.runId).status)
+        assertEquals(1, model.analysisCallCount)
+        assertTrue(traceStore.load().any {
+            it.kind == RepositoryIntelligenceTraceSpanKind.GRAPH_QUERY && it.runId == run.runId && it.status == "SELECTED"
+        })
+        assertTrue(traceStore.load().any {
+            it.kind == RepositoryIntelligenceTraceSpanKind.CONTEXT_COMPILE && it.runId == run.runId && it.status == "COMPILED"
+        })
+    }
+
+    @Test
+    fun `repository analysis blocks graph-enabled work without exact scope anchors`() = runTest {
+        val state = createTempDirectory("orchard-company-analysis-unanchored-state-")
+        val projects = createTempDirectory("orchard-company-analysis-unanchored-projects-")
+        val bindings = FileRepositoryBindingStore(state)
+        val workspace = workspace(state, bindings)
+        createProjectAndEpic(workspace)
+        admitGenesis(workspace)
+        val model = RejectingAnalysisModel()
+        val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+        val circuit = CompanyCircuitService(workspace, company, projects)
+        assertEquals(CompanyCircuitStatus.STARTED, circuit.start(1).status)
+        val importer = RepositoryIntelligenceImporter(workspace, FileRepositoryIntelligenceGraphStore(state))
+        val analysis = RepositoryAnalysisService(
+            workspace,
+            listOf(model),
+            TransientRepositoryExecutionPlanStore(),
+            LocalCodingWorkspaceGateway(),
+            companyControl = company,
+            repositoryIntelligenceImporter = importer,
+        )
+        val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+        val reservation = requireNotNull(run.context.workspaceReservation)
+
+        importer.ensure(run.context.projectId, reservation.path, reservation.baseRevision)
+
+        assertEquals(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, analysis.tick(run.runId).status)
+        assertEquals(0, model.analysisCallCount)
     }
 
     @Test
@@ -811,7 +889,7 @@ class CompanyCircuitTest {
         workspace.commitBatch()
     }
 
-    private fun admitGenesis(workspace: WorkspaceStore) {
+    private fun admitGenesis(workspace: WorkspaceStore, repositoryPath: String = "src") {
         assertEquals(
             ProjectGenesisStatus.RECORDED,
             workspace.advanceProjectGenesis(
@@ -854,7 +932,7 @@ class CompanyCircuitTest {
                             componentId = "app",
                             name = "Application",
                             responsibility = "Deliver the admitted primary journey.",
-                            repositoryPaths = listOf("src"),
+                            repositoryPaths = listOf(repositoryPath),
                         )
                     ),
                     decisions = listOf(

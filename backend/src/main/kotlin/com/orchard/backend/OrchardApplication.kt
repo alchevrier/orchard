@@ -45,11 +45,15 @@ import com.orchard.backend.analysis.FileExecutableWorkPackageStore
 import com.orchard.backend.analysis.FileRepositoryAnalysisAttemptStore
 import com.orchard.backend.analysis.FileRepositoryBaselineAnalysisStore
 import com.orchard.backend.analysis.FileRepositoryIntelligenceGraphStore
+import com.orchard.backend.analysis.FileRepositoryIntelligenceLifecycleStore
+import com.orchard.backend.analysis.FileRepositoryIntelligenceTraceStore
 import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.analysis.RepositoryBaselineAnalysisService
 import com.orchard.backend.analysis.RepositoryIntelligenceImporter
+import com.orchard.backend.analysis.RepositoryIntelligenceRunEnsureStatus
+import com.orchard.backend.analysis.RepositoryIntelligenceService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.config.OrchardPaths
 import com.orchard.backend.config.OrchardOperationMode
@@ -228,6 +232,8 @@ fun main() {
     val repositoryIntelligenceImporter = RepositoryIntelligenceImporter(
         workspace,
         FileRepositoryIntelligenceGraphStore(OrchardPaths.WORKSPACE_DIR),
+        lifecycleStore = FileRepositoryIntelligenceLifecycleStore(OrchardPaths.WORKSPACE_DIR),
+        traceStore = FileRepositoryIntelligenceTraceStore(OrchardPaths.WORKSPACE_DIR),
     )
     val genesisIntelligence = GenesisIntelligenceService(
         workspace,
@@ -331,6 +337,7 @@ fun main() {
         codingAttemptStore = codingWorkerAttemptStore,
         codingWorkerStore = codingWorkerStore,
         profileSettingsStore = modelProfileSettingsStore,
+        repositoryIntelligenceImporter = repositoryIntelligenceImporter,
     )
     val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
     val standardsPolicy = StandardsPolicyService(
@@ -419,6 +426,7 @@ fun main() {
         repositoryAnalysis,
         conversationConductor,
         resourceController,
+        repositoryIntelligenceImporter,
         operationMode,
     )
     val projectReports = ProjectReportService(
@@ -778,6 +786,45 @@ fun Application.workspaceApi(
             if (graph == null) call.respond(HttpStatusCode.NotFound)
             else call.respond(graph)
         }
+        get("/api/projects/{projectId}/repository-intelligence/lifecycle") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@get
+            }
+            if (repositoryIntelligenceImporter == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val repositoryRevision = call.request.queryParameters["repositoryRevision"]
+            val lifecycle = runCatching {
+                repositoryIntelligenceImporter.lifecycle(projectId, repositoryRevision)
+            }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(lifecycle)
+        }
+        get("/api/projects/{projectId}/repository-intelligence/traces") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            if (projectId == null || projectId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@get
+            }
+            if (repositoryIntelligenceImporter == null) {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            val repositoryRevision = call.request.queryParameters["repositoryRevision"]
+            val runId = call.request.queryParameters["runId"]?.toLongOrNull()
+            val traces = runCatching {
+                repositoryIntelligenceImporter.traces(projectId, repositoryRevision, runId)
+            }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@get
+            }
+            call.respond(traces)
+        }
         get("/api/company/state") {
             if (companyControl == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable)
@@ -805,6 +852,25 @@ fun Application.workspaceApi(
                 return@get
             }
             call.respond(repositoryAnalysis.attempts())
+        }
+        post("/api/repository-intelligence/runs/{runId}/ensure") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (repositoryIntelligenceImporter == null || runId == null || runId <= 0) {
+                call.respond(if (runId == null || runId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = RepositoryIntelligenceService(workspace, repositoryIntelligenceImporter).ensure(runId)
+            val status = when (result.status) {
+                RepositoryIntelligenceRunEnsureStatus.READY -> when (result.ensure?.disposition) {
+                    com.orchard.backend.analysis.RepositoryIntelligenceEnsureDisposition.BUILT -> HttpStatusCode.Created
+                    com.orchard.backend.analysis.RepositoryIntelligenceEnsureDisposition.REUSED -> HttpStatusCode.OK
+                    null -> HttpStatusCode.ServiceUnavailable
+                }
+                RepositoryIntelligenceRunEnsureStatus.RUN_NOT_FOUND -> HttpStatusCode.NotFound
+                RepositoryIntelligenceRunEnsureStatus.REPOSITORY_UNAVAILABLE -> HttpStatusCode.Conflict
+                RepositoryIntelligenceRunEnsureStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
         }
         post("/api/repository-analysis/runs/{runId}/retry") {
             val runId = call.parameters["runId"]?.toLongOrNull()
@@ -838,7 +904,8 @@ fun Application.workspaceApi(
                 RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED,
                 RepositoryAnalysisTickStatus.CANCELLED,
                 RepositoryAnalysisTickStatus.PLAN_STALE,
-                RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED -> HttpStatusCode.Conflict
+                RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED,
+                RepositoryAnalysisTickStatus.INTELLIGENCE_UNAVAILABLE -> HttpStatusCode.Conflict
                 RepositoryAnalysisTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
                 RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
                 RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED -> HttpStatusCode.UnprocessableEntity

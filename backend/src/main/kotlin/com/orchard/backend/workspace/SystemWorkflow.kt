@@ -73,7 +73,7 @@ internal fun compileScopePathEvidenceSelectors(
 }
 
 private val EXACT_REPOSITORY_PATH = Regex(
-    "(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)+\\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_.-])",
+    "(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)*\\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_.-])",
 )
 
 @Serializable

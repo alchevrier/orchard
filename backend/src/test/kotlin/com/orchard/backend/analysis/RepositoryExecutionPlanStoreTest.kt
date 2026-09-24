@@ -1650,6 +1650,30 @@ class RepositoryExecutionPlanStoreTest {
         assertEquals(listOf(1), compiled.scopeCoverage[1].operationOrders)
     }
 
+    @Test
+    fun `execution plan provenance can persist manifest identity and graph-local trace`() {
+        val baseRevision = "a".repeat(40)
+        val original = plan(1, 1, baseRevision)
+        val traced = original.copy(
+            provenance = original.provenance.copy(
+                manifestKey = RepositoryIntelligenceManifestKey(1, baseRevision, 1, 2),
+                graphContextTrace = RepositoryIntelligenceContextTrace(
+                    graphQuery = REPOSITORY_INTELLIGENCE_GRAPH_LOCAL_QUERY,
+                    acceptedScope = listOf("Modify `src/Main.kt` for the accepted behavior."),
+                    anchorPaths = listOf("src/Main.kt"),
+                    selectedNodeIds = listOf("file:main"),
+                    selectedPaths = listOf("src/Main.kt", "src/MainTest.kt"),
+                    omittedPaths = listOf("docs/Manual.md"),
+                    unresolvedBoundaryIds = listOf("boundary:reflection"),
+                ),
+            )
+        )
+
+        assertEquals(RepositoryIntelligenceManifestKey(1, baseRevision, 1, 2), traced.provenance.manifestKey)
+        assertEquals(listOf("src/Main.kt", "src/MainTest.kt"), traced.provenance.graphContextTrace?.selectedPaths)
+        assertTrue(repositoryExecutionPlanHash(traced).matches(Regex("[0-9a-f]{64}")))
+    }
+
     private fun plan(planId: Long, revision: Int, baseRevision: String): RepositoryExecutionPlan =
         newRepositoryExecutionPlan(
             planId = planId,
