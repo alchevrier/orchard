@@ -386,17 +386,17 @@ private fun compileActions(
         attempt?.state == ANALYSIS_ATTEMPT_RUNNING -> listOf(
             PilotAction("inspect-provider-progress", "GET", "/api/model-providers/audit-events?limit=20", "READ_ONLY", "A model call owns this run; inspect progress without starting another inference."),
         )
+        !intelligenceReady -> listOf(
+            PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
+        )
         attempt?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED -> listOf(
-            PilotAction("retry-repository-analysis", "POST", "/api/repository-analysis/tick", "MODEL_DELIVERY", attempt.diagnostic),
+            PilotAction("retry-repository-analysis", "POST", "/api/repository-analysis/runs/${run.runId}/tick", "MODEL_DELIVERY", attempt.diagnostic),
         )
         attempt?.state == ANALYSIS_ATTEMPT_BLOCKED -> listOf(
             PilotAction("authorize-repository-analysis-retry", "POST", "/api/repository-analysis/runs/${run.runId}/retry", "HUMAN_AUTHORITY", "The blocked attempt requires explicit retry authority or a different intervention."),
         )
         plan != null -> listOf(
             PilotAction("run-coding-worker", "POST", "/api/coding-worker/runs/${run.runId}/tick", "MODEL_DELIVERY", "An admitted execution plan is ready for implementation."),
-        )
-        !intelligenceReady -> listOf(
-            PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
         )
         else -> listOf(
             PilotAction("run-repository-analysis", "POST", "/api/repository-analysis/tick", "MODEL_DELIVERY", "The workflow has no repository execution plan."),

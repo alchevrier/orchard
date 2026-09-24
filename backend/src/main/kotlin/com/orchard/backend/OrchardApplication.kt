@@ -888,6 +888,36 @@ fun Application.workspaceApi(
             }
             call.respond(status, result)
         }
+        post("/api/repository-analysis/runs/{runId}/tick") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (repositoryAnalysis == null || runId == null || runId <= 0) {
+                call.respond(if (runId == null || runId <= 0) HttpStatusCode.BadRequest else HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val result = runCatching { repositoryAnalysis.tick(runId) }.getOrElse {
+                call.respond(HttpStatusCode.ServiceUnavailable)
+                return@post
+            }
+            val status = when (result.status) {
+                RepositoryAnalysisTickStatus.PLAN_CREATED -> HttpStatusCode.Created
+                RepositoryAnalysisTickStatus.IDLE -> HttpStatusCode.OK
+                RepositoryAnalysisTickStatus.BUSY,
+                RepositoryAnalysisTickStatus.ATTEMPT_BLOCKED,
+                RepositoryAnalysisTickStatus.CANCELLED,
+                RepositoryAnalysisTickStatus.PLAN_STALE,
+                RepositoryAnalysisTickStatus.ARCHITECT_DECISION_REQUIRED,
+                RepositoryAnalysisTickStatus.INTELLIGENCE_UNAVAILABLE -> HttpStatusCode.Conflict
+                RepositoryAnalysisTickStatus.RETRY_AUTHORIZED -> HttpStatusCode.Accepted
+                RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
+                RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED -> HttpStatusCode.UnprocessableEntity
+                RepositoryAnalysisTickStatus.RESOURCE_BLOCKED -> HttpStatusCode.TooManyRequests
+                RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+                RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL,
+                RepositoryAnalysisTickStatus.MODEL_FAILED,
+                RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
         post("/api/repository-analysis/tick") {
             if (repositoryAnalysis == null) {
                 call.respond(HttpStatusCode.ServiceUnavailable)

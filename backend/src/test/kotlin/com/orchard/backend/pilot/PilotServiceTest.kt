@@ -1,5 +1,6 @@
 package com.orchard.backend.pilot
 
+import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_BLOCKED
 import com.orchard.backend.analysis.ANALYSIS_ATTEMPT_RUNNING
 import com.orchard.backend.analysis.RepositoryAnalysisAttempt
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
@@ -213,6 +214,40 @@ class PilotServiceTest {
 
         assertEquals("ensure-repository-intelligence", status.authorizedActions.single().id)
         assertEquals("/api/repository-intelligence/runs/7/ensure", status.authorizedActions.single().path)
+    }
+
+    @Test
+    fun `pilot requires repository intelligence before it authorizes blocked analysis retry`() {
+        val blocked = runningAttempt().copy(state = ANALYSIS_ATTEMPT_BLOCKED, diagnostic = "Prior attempt exceeded context budget.")
+        val status = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run())),
+            analysisAttempts = listOf(blocked),
+            analysisPlans = emptyList(),
+            providerEvents = emptyList(),
+            resources = null,
+            objectives = emptyList(),
+            intelligenceReady = { false },
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+
+        assertEquals("ensure-repository-intelligence", status.authorizedActions.single().id)
+    }
+
+    @Test
+    fun `pilot directs an authorized analysis retry to its run scoped tick`() {
+        val retryAuthorized = runningAttempt().copy(state = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name)
+        val status = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run())),
+            analysisAttempts = listOf(retryAuthorized),
+            analysisPlans = emptyList(),
+            providerEvents = emptyList(),
+            resources = null,
+            objectives = emptyList(),
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+
+        assertEquals("retry-repository-analysis", status.authorizedActions.single().id)
+        assertEquals("/api/repository-analysis/runs/7/tick", status.authorizedActions.single().path)
     }
 
     @Test
