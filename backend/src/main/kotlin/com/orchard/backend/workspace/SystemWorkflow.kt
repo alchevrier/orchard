@@ -53,6 +53,29 @@ data class RepositoryEvidenceSelector(
     val affinitySelectorId: String = "",
 )
 
+internal fun compileScopePathEvidenceSelectors(
+    scope: List<String>,
+    selectors: List<RepositoryEvidenceSelector>,
+): List<RepositoryEvidenceSelector> {
+    val selectorIds = selectors.mapTo(linkedSetOf()) { it.selectorId }
+    val anchors = scope.flatMapIndexed { scopeIndex, clause ->
+        EXACT_REPOSITORY_PATH.findAll(clause).mapIndexed { pathIndex, match ->
+            var selectorId = "scope-path-$scopeIndex-$pathIndex"
+            while (!selectorIds.add(selectorId)) selectorId += "-anchor"
+            RepositoryEvidenceSelector(
+                selectorId = selectorId,
+                scopeIndexes = listOf(scopeIndex),
+                pathGlobs = listOf(match.groupValues[1]),
+            )
+        }.toList()
+    }
+    return selectors + anchors
+}
+
+private val EXACT_REPOSITORY_PATH = Regex(
+    "(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)+\\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_.-])",
+)
+
 @Serializable
 data class AcceptanceCriterion(
     val description: String,

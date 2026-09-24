@@ -1,5 +1,6 @@
 package com.orchard.backend.agent
 
+import com.orchard.backend.workspace.compileScopePathEvidenceSelectors
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -58,6 +59,36 @@ class CodingWorkspaceGatewayTest {
         assertTrue(context.files.size <= 6)
         assertTrue(context.files.sumOf { it.content.encodeToByteArray().size } <= 4 * 1024)
         assertTrue(context.omittedFileCount >= 6)
+    }
+
+    @Test
+    fun `analysis context pins exact repository scope paths before ranked distractors`() {
+        val repository = createTempDirectory("orchard-scope-anchor-context-")
+        git(repository, "init")
+        Files.createDirectories(repository.resolve("src"))
+        repeat(110) { index ->
+            Files.writeString(
+                repository.resolve("src/AAADistractor$index.kt"),
+                "fun distractingRepositoryAnalysis$index() = Unit\n",
+            )
+        }
+        val ownerPath = "src/ZScopedOwner.kt"
+        Files.writeString(repository.resolve(ownerPath), "class ScopedOwner\n")
+        git(repository, "add", ".")
+
+        val selectors = compileScopePathEvidenceSelectors(
+            listOf("Modify `$ownerPath` to compile accepted Attention anchors."),
+            emptyList(),
+        )
+        val context = LocalCodingWorkspaceGateway().collectAnalysisContext(
+            repository.toString(),
+            "distracting repository analysis",
+            selectors,
+        )
+
+        val anchor = context.files.single { it.path == ownerPath }
+        assertEquals(listOf("scope-path-0-0"), anchor.matchedEvidenceSelectorIds)
+        assertTrue(anchor.contentHash.matches(Regex("[0-9a-f]{64}")))
     }
 
     @Test

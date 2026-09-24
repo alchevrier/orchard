@@ -39,6 +39,7 @@ import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.compileScopePathEvidenceSelectors
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -345,7 +346,7 @@ class RepositoryAnalysisService(
         if (staticCandidates.any { it.baseRevision == currentRevision }) {
             return staticCandidates.asReversed().firstOrNull { it.baseRevision == currentRevision }
         }
-        val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
+        val selectors = effectiveRepositoryEvidenceSelectors(run)
         val context = runCatching { workspaceGateway.collectAnalysisContext(workspacePath, analysisQuery(run), selectors) }.getOrNull() ?: return null
         val complianceContext = runCatching { collectComplianceContext(workspacePath, run, selectors, context) }.getOrNull() ?: return null
         return staticCandidates.asReversed().firstOrNull {
@@ -387,14 +388,14 @@ class RepositoryAnalysisService(
                 if (currentRevision != null && failedCandidateExternalVerificationModule(currentRevision, codingWorkerEvents) != null) {
                     return@filter false
                 }
+                val selectors = effectiveRepositoryEvidenceSelectors(candidate)
                 val context = runCatching {
                     workspaceGateway.collectAnalysisContext(
                         workspacePath,
                         analysisQuery(candidate),
-                        candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+                        selectors,
                     )
                 }.getOrNull() ?: return@filter false
-                val selectors = candidate.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
                 val complianceContext = runCatching {
                     collectComplianceContext(workspacePath, candidate, selectors, context)
                 }.getOrNull() ?: return@filter false
@@ -535,7 +536,7 @@ class RepositoryAnalysisService(
             )
         }
         val query = analysisQuery(run)
-        val selectors = run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty()
+        val selectors = effectiveRepositoryEvidenceSelectors(run)
         val correctionPaths = analysisAttempts.lastOrNull {
             it.state == ANALYSIS_ATTEMPT_BLOCKED && it.rejectedPlan != null
         }
@@ -571,7 +572,7 @@ class RepositoryAnalysisService(
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
         }
         repositoryEvidenceSelectionDiagnostic(
-            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+            selectors,
             authorityContext,
         )?.let { diagnostic ->
             return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = diagnostic)
@@ -640,7 +641,7 @@ class RepositoryAnalysisService(
             requiredRepositoryEvidencePathGroups(selectors, authorityContext),
             requiredRepositoryScopeEvidencePathGroupIds(
                 run.workDefinition?.definition?.scope.orEmpty(),
-                run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+                selectors,
             ),
             repositoryForbiddenLiteralFacts(
                 run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
@@ -865,9 +866,13 @@ class RepositoryAnalysisService(
         rejectedCodingPlanDiagnostic: String?,
     ): String? {
         repositoryImplementationOwnerDiagnostic(context, output)?.let { return it }
+        val definition = run.workDefinition?.definition
         repositoryScopeAuthorityDiagnostic(
-            run.workDefinition?.definition?.scope.orEmpty(),
-            run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
+            definition?.scope.orEmpty(),
+            compileScopePathEvidenceSelectors(
+                definition?.scope.orEmpty(),
+                definition?.repositoryEvidenceSelectors.orEmpty(),
+            ),
             context,
             output,
         )?.let { return it }
@@ -1018,6 +1023,14 @@ class RepositoryAnalysisService(
             }
         }
         run.context.recalledEpisodes.forEach { appendLine("${it.problem} ${it.resolution} ${it.evidenceSummary}") }
+    }
+
+    private fun effectiveRepositoryEvidenceSelectors(run: WorkflowRunView): List<RepositoryEvidenceSelector> {
+        val definition = run.workDefinition?.definition
+        return compileScopePathEvidenceSelectors(
+            definition?.scope.orEmpty(),
+            definition?.repositoryEvidenceSelectors.orEmpty(),
+        )
     }
 
     private fun collectComplianceContext(
@@ -1453,19 +1466,23 @@ private fun RepositoryExecutionPlan.coversAcceptedScope(
     run: WorkflowRunView,
     context: CodingRepositoryContext,
     complianceContext: CodingRepositoryContext = context,
-): Boolean = coversAcceptedScope(run) && repositoryUniversalScopeCoverageDiagnostic(
-    run.workDefinition?.definition?.scope.orEmpty(),
-    run.workDefinition?.definition?.repositoryEvidenceSelectors.orEmpty(),
-    context,
-    content,
-) == null && repositoryImplementationOwnerDiagnostic(
-    context,
-    content,
-) == null && repositoryForbiddenLiteralComplianceDiagnostic(
-    run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
-    complianceContext,
-    content,
-) == null
+): Boolean {
+    val definition = run.workDefinition?.definition
+    val scope = definition?.scope.orEmpty()
+    return coversAcceptedScope(run) && repositoryUniversalScopeCoverageDiagnostic(
+        scope,
+        compileScopePathEvidenceSelectors(scope, definition?.repositoryEvidenceSelectors.orEmpty()),
+        context,
+        content,
+    ) == null && repositoryImplementationOwnerDiagnostic(
+        context,
+        content,
+    ) == null && repositoryForbiddenLiteralComplianceDiagnostic(
+        definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
+        complianceContext,
+        content,
+    ) == null
+}
 
 internal fun repositoryScopeCoverageDiagnostic(
     acceptedScope: List<String>,

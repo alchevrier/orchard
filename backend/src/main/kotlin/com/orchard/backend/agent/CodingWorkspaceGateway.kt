@@ -452,7 +452,8 @@ class LocalCodingWorkspaceGateway(
 
         var bytesUsed = 0
         val selected = mutableListOf<CodingContextFile>()
-        ranked.forEach { rankedFile ->
+        val mandatory = ranked.filter { it.file.matchedEvidenceSelectorIds.isNotEmpty() }
+        (mandatory + ranked.filter { it.file.matchedEvidenceSelectorIds.isEmpty() }).forEach { rankedFile ->
             val bytes = rankedFile.file.content.encodeToByteArray().size +
                 rankedFile.file.matchedDeclarations.sumOf { it.encodeToByteArray().size }
             if (selected.size < maxFiles && bytesUsed + bytes <= maxBytes) {
