@@ -40,6 +40,8 @@ data class WorkDefinitionSubmission(
     val regressionCriterion: String = "",
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val repositoryEvidenceSelectors: List<RepositoryEvidenceSelector> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val repositoryCoordinates: List<RepositoryCoordinate> = emptyList(),
 )
 
 @Serializable
@@ -52,6 +54,16 @@ data class RepositoryEvidenceSelector(
     val selection: String = REPOSITORY_EVIDENCE_ALL_MATCHES,
     val affinitySelectorId: String = "",
 )
+
+@Serializable
+data class RepositoryCoordinate(
+    val coordinateId: String,
+    val path: String,
+    val scopeIndexes: List<Int>,
+)
+
+internal fun exactRepositoryCoordinatePaths(definition: WorkDefinitionSubmission?): List<String> =
+    definition?.repositoryCoordinates.orEmpty().map { it.path }.distinct()
 
 internal fun compileScopePathEvidenceSelectors(
     scope: List<String>,

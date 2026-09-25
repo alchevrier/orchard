@@ -81,7 +81,7 @@ import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceSnapshot
 import com.orchard.backend.workspace.WorkspaceStore
-import com.orchard.backend.workspace.exactRepositoryScopePaths
+import com.orchard.backend.workspace.exactRepositoryCoordinatePaths
 import java.time.Duration
 import java.time.Instant
 import kotlinx.serialization.Serializable
@@ -227,7 +227,7 @@ class PilotService(
                 val graph = reservation?.let {
                     repositoryIntelligenceImporter.compatible(run.context.projectId, it.baseRevision)
                 }
-                val coordinates = exactRepositoryScopePaths(run.workDefinition?.definition?.scope.orEmpty())
+                val coordinates = exactRepositoryCoordinatePaths(run.workDefinition?.definition)
                 graph != null && coordinates.isNotEmpty() && coordinates.all { coordinate ->
                     graph.nodes.any { it.path == coordinate }
                 }

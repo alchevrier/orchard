@@ -3051,6 +3051,12 @@ class WorkspaceStore(
                 affinitySelectorId = selector.affinitySelectorId.trim(),
             )
         },
+        repositoryCoordinates = submission.repositoryCoordinates.map { coordinate ->
+            coordinate.copy(
+                coordinateId = coordinate.coordinateId.trim(),
+                path = coordinate.path.trim(),
+            )
+        },
     )
 
     private fun validDefinitionSize(definition: WorkDefinitionSubmission): Boolean {
@@ -3073,7 +3079,7 @@ class WorkspaceStore(
             definition.acceptanceCriteria.size <= MAX_DEFINITION_ENTRIES &&
             definition.acceptanceCriteria.all {
                 it.description.length <= MAX_DEFINITION_TEXT && it.verification.length <= MAX_DEFINITION_TEXT
-            } && validRepositoryEvidenceSelectors(definition)
+            } && validRepositoryEvidenceSelectors(definition) && validRepositoryCoordinates(definition)
     }
 
     private fun validRepositoryEvidenceSelectors(definition: WorkDefinitionSubmission): Boolean {
@@ -3099,6 +3105,21 @@ class WorkspaceStore(
         }
     }
 
+    private fun validRepositoryCoordinates(definition: WorkDefinitionSubmission): Boolean {
+        val coordinates = definition.repositoryCoordinates
+        return coordinates.size <= MAX_DEFINITION_ENTRIES &&
+            coordinates.map { it.coordinateId }.distinct().size == coordinates.size &&
+            coordinates.all { coordinate ->
+                coordinate.coordinateId.isNotBlank() && coordinate.coordinateId.length <= MAX_SELECTOR_ID &&
+                    coordinate.path.isNotBlank() && coordinate.path.length <= MAX_SELECTOR_GLOB &&
+                    validRepositoryGlob(coordinate.path) &&
+                    coordinate.path.none { it in "*?[]{}" } &&
+                    coordinate.scopeIndexes.isNotEmpty() &&
+                    coordinate.scopeIndexes.distinct().size == coordinate.scopeIndexes.size &&
+                    coordinate.scopeIndexes.all { it in definition.scope.indices }
+            }
+    }
+
     private fun validRepositoryGlob(value: String): Boolean {
         val segments = value.replace('\\', '/').split('/')
         return value.isNotBlank() && value.length <= MAX_SELECTOR_GLOB && !value.startsWith('/') &&
@@ -3120,6 +3141,7 @@ class WorkspaceStore(
             before.reproduction != after.reproduction,
             before.regressionCriterion != after.regressionCriterion,
             before.repositoryEvidenceSelectors != after.repositoryEvidenceSelectors,
+            before.repositoryCoordinates != after.repositoryCoordinates,
         ).count { it }
 
     private fun circuitRevisionFields(before: StagedDeliveryPlanSubmission, after: StagedDeliveryPlan): Int {

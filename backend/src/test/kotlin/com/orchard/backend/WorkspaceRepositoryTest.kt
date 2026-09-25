@@ -29,6 +29,7 @@ import com.orchard.backend.workspace.WorkDefinitionSubmission
 import com.orchard.backend.workspace.WorkDefinitionStatus
 import com.orchard.backend.workspace.AcceptanceCriterion
 import com.orchard.backend.workspace.RepositoryEvidenceSelector
+import com.orchard.backend.workspace.RepositoryCoordinate
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.DEFINITION_READY
 import com.orchard.backend.workspace.COLLABORATOR_LOCAL_LLM
@@ -651,6 +652,41 @@ class WorkspaceRepositoryTest {
         ).snapshot(0)
         assertEquals(listOf(owner, test), recovered.workDefinitions.single().definition.repositoryEvidenceSelectors)
         assertTrue("repositoryEvidenceSelectors" !in Json.encodeToString(readyDefinition()))
+    }
+
+    @Test
+    fun repositoryCoordinatesAreValidatedAndPersisted() = withTempDirectory { directory ->
+        val store = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            definitionStore = FileWorkDefinitionStore(directory),
+            collaborationStore = FileDefinitionCollaborationStore(directory),
+        )
+        store.beginBatch()
+        assertTrue(store.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(store.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(store.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(store.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        store.commitBatch()
+        val coordinate = RepositoryCoordinate("desktop-client", "frontend/src/DesktopNetworkClient.kt", listOf(0))
+
+        assertEquals(
+            WorkDefinitionStatus.INVALID_DEFINITION,
+            store.submitWorkDefinition(4, readyDefinition().copy(
+                repositoryCoordinates = listOf(coordinate.copy(path = "frontend/**/*.kt")),
+            )).status,
+        )
+
+        val recorded = store.submitWorkDefinition(4, readyDefinition().copy(repositoryCoordinates = listOf(coordinate)))
+
+        assertEquals(WorkDefinitionStatus.RECORDED, recorded.status)
+        assertEquals(listOf(coordinate), recorded.snapshot.workDefinitions.single().definition.repositoryCoordinates)
+        val recovered = WorkspaceStore(
+            repository = FileWorkspaceRepository(directory),
+            definitionStore = FileWorkDefinitionStore(directory),
+            collaborationStore = FileDefinitionCollaborationStore(directory),
+        ).snapshot(0)
+        assertEquals(listOf(coordinate), recovered.workDefinitions.single().definition.repositoryCoordinates)
+        assertTrue("repositoryCoordinates" !in Json.encodeToString(readyDefinition()))
     }
 
     @Test
