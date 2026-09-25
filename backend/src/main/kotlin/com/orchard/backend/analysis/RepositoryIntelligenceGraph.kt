@@ -5,7 +5,7 @@ package com.orchard.backend.analysis
 import com.orchard.backend.agent.sha256Content
 import com.orchard.backend.workspace.ProjectGenesisView
 import com.orchard.backend.workspace.MESSAGE_READY
-import com.orchard.backend.workspace.compileScopePathEvidenceSelectors
+import com.orchard.backend.workspace.exactRepositoryScopePaths
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceStore
@@ -143,9 +143,7 @@ internal fun graphLocalRepositoryAnalysisSelection(
     maxPaths: Int = 24,
 ): RepositoryGraphLocalSelection {
     require(maxPaths > 0) { "Graph-local analysis path limit must be positive" }
-    val anchors = compileScopePathEvidenceSelectors(acceptedScope, emptyList())
-        .flatMap { it.pathGlobs }
-        .filterNot { it.any { character -> character in "*?[]{}" } }
+    val anchors = exactRepositoryScopePaths(acceptedScope)
         .toCollection(linkedSetOf())
     val nodesById = graph.nodes.associateBy { it.nodeId }
     val anchorNodeIds = graph.nodes.filter { it.path in anchors }.mapTo(linkedSetOf()) { it.nodeId }

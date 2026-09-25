@@ -251,6 +251,25 @@ class PilotServiceTest {
     }
 
     @Test
+    fun `pilot requires exact scope coordinates before it authorizes analysis retry`() {
+        val retryAuthorized = runningAttempt().copy(state = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name)
+        val status = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run())),
+            analysisAttempts = listOf(retryAuthorized),
+            analysisPlans = emptyList(),
+            providerEvents = emptyList(),
+            resources = null,
+            objectives = emptyList(),
+            intelligenceReady = { true },
+            coordinatesReady = { false },
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+
+        assertEquals("inspect-work-definition-coordinates", status.authorizedActions.single().id)
+        assertEquals("READ_ONLY", status.authorizedActions.single().costClass)
+    }
+
+    @Test
     fun `pilot reports pinned reservation revision when present`() {
         val reservationRevision = "b".repeat(40)
         val reservedRun = run().copy(

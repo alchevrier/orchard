@@ -81,6 +81,7 @@ import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_PENDING
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceSnapshot
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.exactRepositoryScopePaths
 import java.time.Duration
 import java.time.Instant
 import kotlinx.serialization.Serializable
@@ -218,6 +219,10 @@ class PilotService(
             repositoryIntelligenceImporter == null || (reservation != null &&
                 repositoryIntelligenceImporter.compatible(run.context.projectId, reservation.baseRevision) != null)
         },
+        coordinatesReady = { run ->
+            repositoryIntelligenceImporter == null ||
+                exactRepositoryScopePaths(run.workDefinition?.definition?.scope.orEmpty()).isNotEmpty()
+        },
         now = now(),
     )
 
@@ -237,6 +242,7 @@ internal fun compilePilotStatus(
     objectives: List<ConversationObjectiveRevision>,
     operationMode: OrchardOperationMode = OrchardOperationMode.AUTONOMOUS,
     intelligenceReady: (WorkflowRunView) -> Boolean = { true },
+    coordinatesReady: (WorkflowRunView) -> Boolean = { true },
     now: Instant,
 ): PilotStatus {
     val activeRuns = snapshot.workflowRuns.filter { it.state !in TERMINAL_RUN_STATES }
@@ -251,7 +257,13 @@ internal fun compilePilotStatus(
     val providerCycle = currentProviderCycle(providerEvents, attempt?.promptHash)
     val operation = compileOperation(run, attempt, plan, now)
     val evidence = compileEvidence(run)
-    val actions = compileActions(run, attempt, plan, run?.let(intelligenceReady) ?: true)
+    val actions = compileActions(
+        run,
+        attempt,
+        plan,
+        run?.let(intelligenceReady) ?: true,
+        run?.let(coordinatesReady) ?: true,
+    )
     val state = when {
         run == null -> "IDLE"
         attempt?.state == ANALYSIS_ATTEMPT_RUNNING -> "RUNNING"
@@ -380,6 +392,7 @@ private fun compileActions(
     attempt: RepositoryAnalysisAttempt?,
     plan: RepositoryExecutionPlan?,
     intelligenceReady: Boolean,
+    coordinatesReady: Boolean,
 ): Pair<List<PilotAction>, List<PilotAction>> {
     if (run == null) return emptyList<PilotAction>() to emptyList()
     val authorized = when {
@@ -388,6 +401,9 @@ private fun compileActions(
         )
         !intelligenceReady -> listOf(
             PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
+        )
+        !coordinatesReady -> listOf(
+            PilotAction("inspect-work-definition-coordinates", "GET", "/api/workspace", "READ_ONLY", "Repository analysis requires exact repository-relative scope paths in a successor work definition before model admission."),
         )
         attempt?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED -> listOf(
             PilotAction("retry-repository-analysis", "POST", "/api/repository-analysis/runs/${run.runId}/tick", "MODEL_DELIVERY", attempt.diagnostic),

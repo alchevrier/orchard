@@ -72,6 +72,12 @@ internal fun compileScopePathEvidenceSelectors(
     return selectors + anchors
 }
 
+internal fun exactRepositoryScopePaths(scope: List<String>): List<String> =
+    compileScopePathEvidenceSelectors(scope, emptyList())
+        .flatMap { it.pathGlobs }
+        .filterNot { path -> path.any { character -> character in "*?[]{}" } }
+        .distinct()
+
 private val EXACT_REPOSITORY_PATH = Regex(
     "(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)*\\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_.-])",
 )
