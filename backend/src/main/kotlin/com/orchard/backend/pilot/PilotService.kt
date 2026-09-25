@@ -220,8 +220,18 @@ class PilotService(
                 repositoryIntelligenceImporter.compatible(run.context.projectId, reservation.baseRevision) != null)
         },
         coordinatesReady = { run ->
-            repositoryIntelligenceImporter == null ||
-                exactRepositoryScopePaths(run.workDefinition?.definition?.scope.orEmpty()).isNotEmpty()
+            if (repositoryIntelligenceImporter == null) {
+                true
+            } else {
+                val reservation = run.context.workspaceReservation
+                val graph = reservation?.let {
+                    repositoryIntelligenceImporter.compatible(run.context.projectId, it.baseRevision)
+                }
+                val coordinates = exactRepositoryScopePaths(run.workDefinition?.definition?.scope.orEmpty())
+                graph != null && coordinates.isNotEmpty() && coordinates.all { coordinate ->
+                    graph.nodes.any { it.path == coordinate }
+                }
+            }
         },
         now = now(),
     )
