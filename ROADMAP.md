@@ -5,9 +5,9 @@
 | Field | Value |
 | --- | --- |
 | Roadmap ID | `ORCHARD-ROADMAP` |
-| Version | `8` |
+| Version | `9` |
 | Status | `ACTIVE` |
-| Updated | `2026-09-12` |
+| Updated | `2026-09-25` |
 | Delivered baseline | Milestone 10.1 |
 | Next milestone | `10.2.2` PR-Centered Multi-Actor Corrective Delivery |
 | Canonical path | `ROADMAP.md` |
@@ -630,10 +630,20 @@ Deliverables:
 - Complete content-addressed import of every Git-tracked artifact with explicit coverage and a durable project graph projection. **Implemented foundation.**
 - Correlation of repository modules, declarations, imports, tests, ADR path references, build dependencies, and current Orchard project/work/design/workflow/evidence authority. **Implemented deterministic foundation.**
 - Typed diagnoses for partial, conflicting, and missing repository evidence, with revision-pinned governed remediation prompts for architecture, decisions, tests and test methodology, and delivery evidence. **Implemented baseline workflow.**
+- Immutable repository intelligence manifests keyed by repository, commit, extractor version, and policy version, with compatibility checks against current Orchard authority. **Implemented by ADR 054.**
+- Durable manifest lifecycle and trace projections covering extraction, ensure/reuse, graph query, and bounded context compilation. **Implemented by ADR 054.**
+- Graph-local repository-analysis context compiled from exact accepted scope anchors and pinned source bytes; missing anchors fail closed rather than widening to selector-wide model context. **Implemented by ADR 054.**
+- Pilot-visible deterministic manifest ensure and run-scoped analysis retry actions, so an operator can build required intelligence and diagnose admission without guessing from broad logs. **Implemented by ADRs 052, 053, and 054.**
 - Language-server or parser-backed symbols, definitions, references, modules, tests, and configuration relationships.
 - Content-addressed evidence nodes tied to exact repository revisions.
 - Deterministic fallback for unsupported languages.
 - Retrieval explanations showing why every file or symbol entered model context.
+
+Implementation evidence recorded on 2026-09-24:
+
+- The self-hosting Inbox delivery run exposed a context-budget failure caused by broad selector-derived repository context. The resulting commit-pinned manifest (`READY` only), graph-local query, provenance, lifecycle, and trace mechanisms are committed and tested.
+- A live piloted run confirmed that Orchard builds or reuses intelligence for the exact reserved commit before model admission. When the work definition lacks exact path anchors, it returns an inspectable deterministic `CONTEXT_UNAVAILABLE` result without dispatching model inference or admitting irrelevant files.
+- This advances Milestone 12.0 but does not complete it: the current extractor remains conservative and file-oriented for supported constructs; parser/language-server-backed symbols, complete source relationships, and the remaining retrieval work are still open.
 
 ### Milestone 12.1: Source-Bound Semantic Retrieval
 
@@ -807,6 +817,7 @@ Update this file in the same change that alters roadmap intent.
 
 | Date | Version | Change |
 | --- | --- | --- |
+| 2026-09-25 | 9 | Recorded the delivered commit-pinned repository intelligence manifest, lifecycle/tracing, graph-local context compilation, and pilot admission controls under Milestone 12.0. Preserved 10.2.2 as the sole `NEXT` milestone and left 12.0 `IN_PROGRESS` pending parser-backed symbols and remaining retrieval capabilities. |
 | 2026-07-21 | 5 | Reprioritized Milestone 10.2 around repository-first onboarding, an inbox-style report and ticket interface, and the Jira-like project overview; sequenced live visual correlation, conversational ADRs and documentation, and generalized self-healing as later product multipliers. |
 | 2026-07-19 | 4 | Expanded Milestone 13.2 from remote Architect access into a self-hosted organizational control plane with authenticated multi-client use, organization-managed runners, source custody, recovery, and authority export. |
 | 2026-07-18 | 3 | Prioritized a durable multi-objective conversational conductor as Milestone 10.2 and moved identity and later policy work behind the workflow-replacement proof. |
