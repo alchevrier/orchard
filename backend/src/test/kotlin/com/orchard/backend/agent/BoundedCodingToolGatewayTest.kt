@@ -74,7 +74,7 @@ class BoundedCodingToolGatewayTest {
                 ))), 2,
             )
         }
-        assertEquals("REPLACE_LITERAL src/Main.kt found 2 occurrences; expected 1", cardinality.message)
+        assertTrue(cardinality.message.orEmpty().contains("REPLACE_LITERAL src/Main.kt found 2 occurrences at lines [1, 2]; expected 1"))
         val unauthorized = assertFailsWith<IllegalArgumentException> {
             gateway.applyBoundedToolBatch(
                 repository.toString(), packageAuthority,

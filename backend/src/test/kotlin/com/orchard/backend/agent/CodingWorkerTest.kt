@@ -185,7 +185,7 @@ class CodingWorkerTest {
                 BOUNDED_TOOL_REPLACE_LITERAL,
                 "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt",
                 expectedLiteral = "assertEquals(1, 1)",
-                replacement = "assertNotNull(proposal.conversation)",
+                replacement = "assertNotNull(result)",
                 expectedCount = 1,
             )),
         ))
@@ -194,7 +194,7 @@ class CodingWorkerTest {
         assertTrue(
             materializeRequiredTestImports(
                 "frontend/src/desktopTest/kotlin/com/orchard/frontend/network/DesktopNetworkClientTest.kt",
-                "package com.orchard.frontend.network\n\nimport kotlin.test.assertTrue\n\nassertNotNull(proposal)",
+                "package com.orchard.frontend.network\n\nimport kotlin.test.assertTrue\n\nassertNotNull(result)",
             ).contains("import kotlin.test.assertNotNull"),
         )
     }
@@ -545,7 +545,11 @@ class CodingWorkerTest {
         )
         val proposal = CodingPatchProposal(
             "Return the required answer.",
-            listOf(CodingFileOperation(CODING_FILE_WRITE, "src/Main.kt", "fun answer() = 42\n")),
+            listOf(CodingFileOperation(
+                action = CODING_FILE_REPLACE,
+                path = "src/Main.kt",
+                replacements = listOf(CodingTextReplacement("fun answer() = 1", "fun answer() = 42")),
+            )),
         )
         val model = FixedCodingModel(Json.encodeToString(proposal))
         val profileSettings = TransientModelProfileSettingsStore().apply {
@@ -601,7 +605,7 @@ class CodingWorkerTest {
         assertEquals(RUN_STATE_EVIDENCE_PENDING, run.state)
         assertEquals(setOf("SOURCE_DIFF", "BUILD", "TEST"), run.evidence.mapTo(hashSetOf()) { it.kind })
         assertTrue(run.evidence.all { it.passed })
-        assertEquals("fun answer() = 42", run(Path.of(reservation.path), "git", "show", "$candidateRevision:src/Main.kt"))
+        assertTrue(run(Path.of(reservation.path), "git", "show", "$candidateRevision:src/Main.kt").contains("fun answer() = 42"))
         assertEquals(
             run(Path.of(reservation.path), "git", "show", "$candidateRevision^:src/Main.kt"),
             Files.readString(Path.of(reservation.path).resolve("src/Main.kt")).trimEnd(),

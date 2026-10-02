@@ -198,7 +198,18 @@ class LocalCodingWorkspaceGateway(
             )
             return CodingRepositoryContext(
             files = sources.mapIndexed { index, (relative, source) ->
-                val content = focusedContextExcerpt(source, queryTokens, budgets[index])
+                val focused = focusedContextExcerpt(source, queryTokens, budgets[index])
+                val content = if ((focused.encodeToByteArray().size < MIN_PLAN_CONTEXT_FILE_BYTES ||
+                    source.lineSequence().any { line ->
+                        contextTokens(line).any(SOURCE_OWNER_DECLARATION_TOKENS::contains)
+                    } && !focused.lineSequence().any { line ->
+                        contextTokens(line).any(SOURCE_OWNER_DECLARATION_TOKENS::contains)
+                    }) && source.encodeToByteArray().size >= MIN_PLAN_CONTEXT_FILE_BYTES
+                ) {
+                    source.encodeToByteArray().copyOf(minOf(budgets[index], source.encodeToByteArray().size)).decodeToString()
+                } else {
+                    focused
+                }
                 CodingContextFile(
                     path = relative,
                     content = content,
@@ -980,14 +991,21 @@ private enum class KotlinLexicalState { CODE, STRING, CHARACTER, RAW_STRING, BLO
 internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, maxBytes: Int): String {
     require(maxBytes > 0)
     if (content.encodeToByteArray().size <= maxBytes) return content
-    val boundedQueryTokens = queryTokens.asSequence().sorted().take(MAX_LEXICAL_SUMMARY_TOKENS).toSet()
+    val contentTokens = contextTokens(content)
+    val boundedQueryTokens = queryTokens.asSequence()
+        .sortedWith(compareBy<String> { it.lowercase() !in contentTokens }.thenBy(String::lowercase))
+        .take(MAX_LEXICAL_SUMMARY_TOKENS)
+        .toSet()
     val lexicalSummary = lexicalMatchSummary(content, boundedQueryTokens, maxBytes / 4)
     val excerptBudget = maxBytes - lexicalSummary.encodeToByteArray().size
     if (excerptBudget <= 0) return lexicalSummary
     val lines = content.split('\n')
     val matches = lines.indices.mapNotNull { index ->
         val lineTokens = contextTokens(lines[index])
-        val matchedTokens = boundedQueryTokens.filterTo(mutableSetOf(), lineTokens::contains)
+        val normalizedLine = lines[index].lowercase()
+        val matchedTokens = boundedQueryTokens.filterTo(mutableSetOf()) { token ->
+            token in lineTokens || token.lowercase() in normalizedLine
+        }
         matchedTokens.size.takeIf { it > 0 }?.let { tokenScore ->
             val declaration = lineTokens.any(SOURCE_DECLARATION_TOKENS::contains)
             ExcerptMatch(
@@ -1003,20 +1021,26 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
         .flatMap(ExcerptMatch::matchedTokens)
         .groupingBy(String::lowercase)
         .eachCount()
-    val reservedDeclarations = declarationTokenFrequency.keys
+    val reservedDeclarations = declarationMatches.sortedWith(
+        compareBy<ExcerptMatch> { match ->
+            match.matchedTokens.minOfOrNull { token -> declarationTokenFrequency.getValue(token.lowercase()) } ?: Int.MAX_VALUE
+        }.thenByDescending { it.score }.thenBy { it.index }
+    ).distinctBy(ExcerptMatch::index)
+    val tokenReservedDeclarations = declarationTokenFrequency.keys
         .sortedWith(compareBy<String> { declarationTokenFrequency.getValue(it) }.thenBy(String::lowercase))
         .mapNotNull { token ->
             declarationMatches.filter { token in it.matchedTokens }
                 .maxWithOrNull(compareBy<ExcerptMatch> { it.score }.thenByDescending { it.index })
         }
         .distinctBy(ExcerptMatch::index)
-    val rankedMatches = (reservedDeclarations + matches.sortedWith(
+    val rankedMatches = (tokenReservedDeclarations + reservedDeclarations + matches.sortedWith(
         compareByDescending<ExcerptMatch> { it.score }.thenBy { it.index }
     )).distinctBy(ExcerptMatch::index)
         .take(MAX_EXCERPT_WINDOWS)
     var selectedBytes = 0
     val windows = rankedMatches.map { match ->
-        (match.index - EXCERPT_CONTEXT_LINES).coerceAtLeast(0)..(match.index + EXCERPT_CONTEXT_LINES).coerceAtMost(lines.lastIndex)
+        val contextLines = if (match.declaration) 0 else EXCERPT_CONTEXT_LINES
+        (match.index - contextLines).coerceAtLeast(0)..(match.index + contextLines).coerceAtMost(lines.lastIndex)
     }.fold(mutableListOf<IntRange>()) { selected, window ->
         if (selected.none { existing -> window.first <= existing.last && existing.first <= window.last }) {
             val sectionBytes = excerptSection(lines, window).encodeToByteArray().size
@@ -1143,7 +1167,9 @@ internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>
         val lower = line.lowercase()
         val lineTokens = contextTokens(lower)
         if (lineTokens.none(SOURCE_DECLARATION_TOKENS::contains)) return@mapIndexedNotNull null
-        val matchedTokens = queryTokens.filterTo(mutableSetOf(), lineTokens::contains)
+        val matchedTokens = queryTokens.filterTo(mutableSetOf()) { token ->
+            token in lineTokens || token.lowercase() in lower
+        }
         matchedTokens.size.takeIf { it > 0 }?.let {
             SourceDeclarationMatch(index, line.trim().take(MAX_DECLARATION_CHARS), matchedTokens)
         }
@@ -1151,13 +1177,18 @@ internal fun matchedSourceDeclarations(content: String, queryTokens: Set<String>
     val tokenFrequency = matches.flatMap(SourceDeclarationMatch::matchedTokens)
         .groupingBy(String::lowercase)
         .eachCount()
-    val reserved = tokenFrequency.keys
+    val reservedByToken = tokenFrequency.keys
         .sortedWith(compareBy<String> { tokenFrequency.getValue(it) }.thenBy(String::lowercase))
         .mapNotNull { token ->
             matches.filter { token in it.matchedTokens }
                 .maxWithOrNull(compareBy<SourceDeclarationMatch> { it.matchedTokens.size }.thenByDescending { it.index })
         }
-    return (reserved + matches.sortedWith(
+    val reservedDeclarations = matches.sortedWith(
+        compareBy<SourceDeclarationMatch> { match ->
+            match.matchedTokens.minOfOrNull { token -> tokenFrequency.getValue(token.lowercase()) } ?: Int.MAX_VALUE
+        }.thenByDescending { it.matchedTokens.size }.thenBy { it.index }
+    )
+    return (reservedByToken + reservedDeclarations + matches.sortedWith(
         compareByDescending<SourceDeclarationMatch> { it.matchedTokens.size }.thenBy { it.index }
     )).distinctBy(SourceDeclarationMatch::index)
         .take(MAX_MATCHED_DECLARATIONS)
@@ -1178,6 +1209,7 @@ private const val MAX_DECLARATION_CHARS = 512
 private const val MAX_AMBIGUOUS_ANCHOR_CONTEXT_LINES = 3
 private const val MAX_AMBIGUOUS_ANCHOR_SUGGESTIONS = 8
 private val SOURCE_DECLARATION_TOKENS = setOf("class", "interface", "object", "fun", "val", "var", "typealias")
+private val SOURCE_OWNER_DECLARATION_TOKENS = setOf("class", "interface", "object", "fun", "typealias")
 private data class ExcerptMatch(
     val index: Int,
     val score: Int,

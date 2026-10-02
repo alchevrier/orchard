@@ -10,6 +10,8 @@ import com.orchard.backend.workspace.ENTITY_EPIC
 import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.FileRepositoryBindingStore
 import com.orchard.backend.workspace.RepositoryBindStatus
+import com.orchard.backend.workspace.RepositoryCoordinate
+import com.orchard.backend.workspace.RepositoryCoordinateAdmissionStatus
 import com.orchard.backend.workspace.WorkspaceStore
 import java.nio.file.Files
 import java.nio.file.Path
@@ -103,6 +105,70 @@ class RepositoryIntelligenceGraphTest {
         )
         assertEquals(listOf("boundary:1"), selection.unresolvedBoundaryIds)
         assertEquals(REPOSITORY_INTELLIGENCE_GRAPH_LOCAL_QUERY, selection.toTrace().graphQuery)
+    }
+
+    @Test
+    fun `resolves typed coordinates to manifest node and source evidence`() {
+        val graph = RepositoryIntelligenceGraph(
+            graphId = 1,
+            projectId = 1,
+            repositoryRevision = "a".repeat(40),
+            genesisRevision = 1,
+            orchardAuthorityHash = "b".repeat(64),
+            nodes = listOf(
+                RepositoryIntelligenceNode("source", INTELLIGENCE_NODE_SOURCE, "Service.kt", "src/Service.kt", "c".repeat(64)),
+            ),
+            edges = emptyList(),
+            coverage = RepositoryIntelligenceCoverage(1, 1, 1, 0, 1, 0),
+            manifestKey = RepositoryIntelligenceManifestKey(1, "a".repeat(40), 1, 1),
+            hash = "d".repeat(64),
+        )
+
+        val resolutions = requireNotNull(resolveRepositoryCoordinates(
+            graph,
+            listOf(RepositoryCoordinate("service", "src/Service.kt", listOf(0))),
+        ))
+
+        assertEquals(listOf(RepositoryCoordinateResolution("service", "src/Service.kt", "source", "c".repeat(64))), resolutions)
+        assertEquals(null, resolveRepositoryCoordinates(graph, listOf(RepositoryCoordinate("missing", "src/Missing.kt", listOf(0)))))
+    }
+
+    @Test
+    fun `coordinate admission records manifest resolution at the pinned revision`() {
+        val state = createTempDirectory("orchard-coordinate-admission-state-")
+        val repository = createTempDirectory("orchard-coordinate-admission-repository-")
+        Files.createDirectories(repository.resolve("src"))
+        Files.writeString(repository.resolve("src/Main.kt"), "fun main() = Unit\n")
+        git(repository, "init")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        val revision = git(repository, "rev-parse", "HEAD")
+        val workspace = WorkspaceStore(repositoryBindings = FileRepositoryBindingStore(state))
+        createProject(workspace)
+        assertEquals(RepositoryBindStatus.BOUND, workspace.bindRepository(1, repository.toString()).status)
+        val importer = RepositoryIntelligenceImporter(workspace, FileRepositoryIntelligenceGraphStore(state))
+        val admission = RepositoryIntelligenceCoordinateAdmission(
+            importer,
+        )
+
+        val missing = admission.assess(1, repository.toString(), revision, emptyList())
+        val ready = admission.assess(
+            1,
+            repository.toString(),
+            revision,
+            listOf(RepositoryCoordinate("main", "src/Main.kt", listOf(0))),
+        )
+
+        assertEquals(RepositoryCoordinateAdmissionStatus.MISSING_COORDINATES, missing.status)
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, ready.status)
+        assertEquals(revision, ready.repositoryRevision)
+        assertEquals(listOf("main"), ready.resolutions.map { it.coordinateId })
+        assertEquals(64, ready.resolutions.single().sourceHash.length)
+        assertTrue(coordinateAdmissionMatchesGraph(ready, importer.ensure(1, repository.toString(), revision).graph))
+        assertTrue(!coordinateAdmissionMatchesGraph(
+            ready.copy(resolutions = ready.resolutions.map { it.copy(sourceHash = "0".repeat(64)) }),
+            importer.ensure(1, repository.toString(), revision).graph,
+        ))
     }
 
     @Test

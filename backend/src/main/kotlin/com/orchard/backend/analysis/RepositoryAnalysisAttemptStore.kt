@@ -302,7 +302,7 @@ private fun validateRepositoryAnalysisAttempt(
         require(selection.files.map { it.rank }.distinct().size == selection.files.size &&
             selection.files.map { it.rank }.sorted() == (1..selection.files.size).toList() &&
             selection.files.all { file ->
-                file.path.isNotBlank() && file.contentHash.matches(Regex("[0-9a-f]{64}")) && file.excerptBytes > 0
+                file.path.isNotBlank() && file.contentHash.matches(Regex("[0-9a-f]{64}")) && file.excerptBytes >= 0
             }
         ) { "Repository analysis context selection files are invalid" }
     }

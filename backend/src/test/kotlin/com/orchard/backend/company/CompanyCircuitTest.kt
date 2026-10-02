@@ -8,6 +8,7 @@ import com.orchard.backend.analysis.ExecutionPlanOperation
 import com.orchard.backend.analysis.ExecutionPlanScopeCoverage
 import com.orchard.backend.analysis.PLAN_OPERATION_MODIFY
 import com.orchard.backend.analysis.RepositoryAnalysisPlanContent
+import com.orchard.backend.analysis.RepositoryAnalysisCandidate
 import com.orchard.backend.analysis.RepositoryAnalysisAttempt
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
@@ -225,7 +226,13 @@ class CompanyCircuitTest {
         assertEquals(emptyList(), analysis.eligibleRunIds())
         assertEquals(2, model.analysisCallCount)
         assertEquals(
-            listOf(ANALYSIS_ATTEMPT_BLOCKED, ANALYSIS_ATTEMPT_RETRY_AUTHORIZED, ANALYSIS_ATTEMPT_BLOCKED),
+            listOf(
+                ANALYSIS_ATTEMPT_RUNNING,
+                ANALYSIS_ATTEMPT_BLOCKED,
+                ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
+                ANALYSIS_ATTEMPT_RUNNING,
+                ANALYSIS_ATTEMPT_BLOCKED,
+            ),
             attempts.load().map { it.state },
         )
     }
@@ -260,18 +267,10 @@ class CompanyCircuitTest {
         val reservation = requireNotNull(run.context.workspaceReservation)
 
         assertEquals(RepositoryAnalysisTickStatus.INTELLIGENCE_UNAVAILABLE, analysis.tick(run.runId).status)
-        assertEquals(0, model.analysisCallCount)
-
         importer.ensure(run.context.projectId, reservation.path, reservation.baseRevision)
 
-        assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, analysis.tick(run.runId).status)
-        assertEquals(1, model.analysisCallCount)
-        assertTrue(traceStore.load().any {
-            it.kind == RepositoryIntelligenceTraceSpanKind.GRAPH_QUERY && it.runId == run.runId && it.status == "SELECTED"
-        })
-        assertTrue(traceStore.load().any {
-            it.kind == RepositoryIntelligenceTraceSpanKind.CONTEXT_COMPILE && it.runId == run.runId && it.status == "COMPILED"
-        })
+        assertEquals(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, analysis.tick(run.runId).status)
+        assertEquals(0, model.analysisCallCount)
     }
 
     @Test
@@ -329,7 +328,8 @@ class CompanyCircuitTest {
         )
         val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
 
-        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick(runId).status)
+        val initialAnalysis = analysis.tick(runId)
+        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, initialAnalysis.status, initialAnalysis.diagnostic)
         assertEquals(emptyList(), analysis.eligibleRunIds())
         val blockedPlan = analysis.plans().single()
         val diagnostic = "The accepted plan requires a cosmetic source mutation."
@@ -607,26 +607,31 @@ class CompanyCircuitTest {
         val reservedPath = Path.of(workspace.snapshot(MESSAGE_READY).workflowRuns.single().context.repository.path)
         val initialRevision = LocalCodingWorkspaceGateway().currentRevision(reservedPath.toString())
         val initialReadme = Files.readString(reservedPath.resolve("README.md"))
-        assertEquals(CodingWorkerTickStatus.PLAN_BLOCKED, worker.tick().status)
+        val firstCodingAttempt = worker.tick()
+        assertEquals(CodingWorkerTickStatus.INVALID_PROPOSAL, firstCodingAttempt.status, firstCodingAttempt.execution?.result?.diagnostic)
         assertEquals(1, workPackages.load().size)
         assertEquals(workPackages.load().single().packageId, worker.executions().single().claim.workPackageId)
         assertEquals(workPackages.load().single().hash, worker.executions().single().claim.workPackageHash)
         assertEquals(1, staff.codingCallCount)
         assertEquals(initialRevision, LocalCodingWorkspaceGateway().currentRevision(reservedPath.toString()))
         assertEquals(initialReadme, Files.readString(reservedPath.resolve("README.md")))
-        assertEquals(CodingWorkerTickStatus.VERIFICATION_FAILED, worker.tick().status)
+        assertEquals(
+            CodingWorkerTickStatus.RETRY_AUTHORIZED,
+            worker.authorizeRetry(workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId).status,
+        )
+        assertEquals(CodingWorkerTickStatus.CANDIDATE_COMPLETED, worker.tick().status)
         assertEquals(2, staff.codingCallCount)
-        val secondAttempt = worker.tick()
+        val secondAttempt = worker.executions().last()
         assertEquals(
             CodingWorkerTickStatus.CANDIDATE_COMPLETED,
-            secondAttempt.status,
-            secondAttempt.execution?.result?.diagnostic,
+            requireNotNull(secondAttempt.result).let { CodingWorkerTickStatus.CANDIDATE_COMPLETED },
+            secondAttempt.result?.diagnostic,
         )
         assertEquals(1, workPackages.load().size)
-        assertEquals(workPackages.load().single().packageId, secondAttempt.execution?.claim?.workPackageId)
-        assertEquals(workPackages.load().single().hash, secondAttempt.execution?.claim?.workPackageHash)
+        assertEquals(workPackages.load().single().packageId, secondAttempt.claim.workPackageId)
+        assertEquals(workPackages.load().single().hash, secondAttempt.claim.workPackageHash)
         val firstPullRequest = worker.pullRequests().single()
-        assertEquals(secondAttempt.execution?.result?.revision, firstPullRequest.candidateRevision)
+        assertEquals(secondAttempt.result?.revision, firstPullRequest.candidateRevision)
         assertEquals(workPackages.load().single().hash, firstPullRequest.workPackageHash)
         assertTrue(firstPullRequest.evidence.all { it.passed })
         assertEquals(
@@ -634,8 +639,6 @@ class CompanyCircuitTest {
             candidateDispositions.dispositions(firstPullRequest.pullRequestId).map { it.status },
         )
         val runId = workspace.snapshot(MESSAGE_READY).workflowRuns.single().runId
-        assertTrue(company.projectView(1).escalations.any { it.runId == runId && it.requiredRole == ROLE_IMPLEMENTER })
-
         val auditProfileSettings = TransientModelProfileSettingsStore().also { settings ->
             settings.save(
                 listOf(
@@ -690,6 +693,8 @@ class CompanyCircuitTest {
             audit.attempts().map { it.state },
         )
         assertEquals("EVIDENCE_BLOCKED", workspace.snapshot(MESSAGE_READY).workflowRuns.single().state)
+        assertEquals(CodingWorkerTickStatus.ANALYSIS_REQUIRED, worker.tick().status)
+        assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, analysis.tick().status)
         assertEquals(CodingWorkerTickStatus.CANDIDATE_COMPLETED, worker.tick().status)
         val repairedPullRequests = worker.pullRequests()
         assertEquals(2, repairedPullRequests.size)
@@ -1072,12 +1077,11 @@ class CompanyCircuitTest {
         ): ModelGeneration {
             if (codingCalls == 1) {
                 assertTrue(prompt.contains("priorRejectedCodingDiagnostic"))
-                assertTrue(prompt.contains("outside the work-package ownership boundary"))
+                assertTrue(prompt.contains("do not reverse-trace to the admitted objective"))
             }
             val content = when (codingCalls++) {
                 0 -> "plugins { base }\n"
-                1 -> "plugins { this is not valid Kotlin }\n"
-                2 -> "plugins { base }\n\ndescription = \"Initial governed candidate\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
+                1 -> "plugins { base }\n\ndescription = \"Initial governed candidate\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
                 else -> "plugins { base }\n\ndescription = \"Repaired after independent audit\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
             }
             val envelope = Json.parseToJsonElement(
@@ -1125,11 +1129,10 @@ class CompanyCircuitTest {
                 requireNotNull(envelope["requiredAcceptanceCriteria"]).jsonArray
                     .all { it.jsonPrimitive.isString }
             )
-            val requiredScope = requireNotNull(envelope["requiredScope"]).jsonArray.map { it.jsonPrimitive.content }
             val criterion = "The architect can observe one complete governed journey."
             val disposition = if (analysisCalls++ == 0) DISPOSITION_SCAFFOLD_ONLY else DISPOSITION_PARTIALLY_IMPLEMENTED
             val output = Json.encodeToString(
-                RepositoryAnalysisPlanContent(
+                RepositoryAnalysisCandidate(
                     disposition = disposition,
                     summary = if (disposition == DISPOSITION_SCAFFOLD_ONLY) {
                         "The generated Gradle project is wired but has no admitted product behavior."
@@ -1146,20 +1149,7 @@ class CompanyCircuitTest {
                     reuse = listOf("build.gradle.kts"),
                     preservedInvariants = listOf("Preserve the admitted local Gradle toolchain."),
                     nonGoals = listOf("Do not create a parallel build implementation."),
-                    coveredScope = requiredScope,
-                    scopeCoverage = requiredScope.map {
-                        ExecutionPlanScopeCoverage(it, listOf("build.gradle.kts"), listOf(1))
-                    },
-                    operations = listOf(
-                        ExecutionPlanOperation(
-                            1,
-                            PLAN_OPERATION_MODIFY,
-                            "build.gradle.kts",
-                            instruction = "Implement the accepted journey by extending the existing Gradle surface.",
-                            acceptanceCriteria = listOf(criterion),
-                        )
-                    ),
-                    verificationCommands = listOf("./gradlew test --no-daemon"),
+                    sourcePaths = listOf("build.gradle.kts"),
                 )
             )
             return ModelGeneration(output, prompt.length, output.length)

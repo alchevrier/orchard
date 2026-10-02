@@ -89,6 +89,7 @@ enum class WorkflowStartStatus {
     REPOSITORY_DIRTY,
     ALREADY_STARTED,
     WORK_DEFINITION_NOT_READY,
+    COORDINATE_ADMISSION_BLOCKED,
     STAGED_PLAN_BLOCKED,
     DESIGN_NOT_ADMITTED,
     PROJECT_GENESIS_NOT_ADMITTED,
@@ -144,6 +145,7 @@ class WorkspaceStore(
     private val designGovernanceStore: DesignGovernanceStore = TransientDesignGovernanceStore(),
     private val projectGenesisStore: ProjectGenesisStore = TransientProjectGenesisStore(),
     private val enforceProjectGenesis: Boolean = false,
+    private var repositoryCoordinateAdmission: RepositoryCoordinateAdmission? = null,
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -695,6 +697,11 @@ class WorkspaceStore(
             return definitionFailureFromCollaboration(proposal)
         }
         return acceptDefinitionProposal(proposal.proposal.proposalId)
+    }
+
+    @Synchronized
+    fun configureRepositoryCoordinateAdmission(admission: RepositoryCoordinateAdmission?) {
+        repositoryCoordinateAdmission = admission
     }
 
     private fun persistWorkDefinition(
@@ -1256,6 +1263,18 @@ class WorkspaceStore(
             WorkflowStartStatus.REPOSITORY_DIRTY,
             "Commit or discard existing repository changes before pinning workflow context.",
         )
+        val coordinateAdmission = repositoryCoordinateAdmission?.assess(
+            project.id,
+            head.path,
+            head.commitHash,
+            workDefinition.definition.repositoryCoordinates,
+        )
+        if (coordinateAdmission != null && coordinateAdmission.status != RepositoryCoordinateAdmissionStatus.READY) {
+            return workflowFailure(
+                WorkflowStartStatus.COORDINATE_ADMISSION_BLOCKED,
+                coordinateAdmission.diagnostic ?: "Repository coordinates are not admitted for the pinned revision.",
+            )
+        }
         val dispatch = circuitDispatchId?.let { id -> circuitDispatches.singleOrNull { it.dispatchId == id } }
         if (circuitDispatchId != null && dispatch == null) return workflowFailure(
             WorkflowStartStatus.STORAGE_UNAVAILABLE,
@@ -1274,7 +1293,6 @@ class WorkspaceStore(
                 "The isolated dispatch workspace could not be reserved.",
             )
         }
-
         val workflow = DefaultDeliveryWorkflow.resolve(workItem.type, workDefinition, acceptanceContract)
         val deliveryStep = workflow.stepDefinitions.single()
         check(
@@ -1309,6 +1327,7 @@ class WorkspaceStore(
             circuitDispatchId = circuitDispatchId,
             workspaceReservation = workspaceReservation,
             acceptanceContract = acceptanceContract,
+            repositoryCoordinateAdmission = coordinateAdmission,
         )
         check(
             WorkflowStepEngine.hasRequiredContext(

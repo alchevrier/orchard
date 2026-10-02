@@ -113,6 +113,8 @@ data class ContextManifest(
     val workspaceReservation: DispatchWorkspaceReservation? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val acceptanceContract: AcceptanceContract? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val repositoryCoordinateAdmission: RepositoryCoordinateAdmissionEvidence? = null,
 )
 
 @Serializable

@@ -51,6 +51,7 @@ import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryAnalysisTickStatus
 import com.orchard.backend.analysis.RepositoryBaselineAnalysisService
+import com.orchard.backend.analysis.RepositoryIntelligenceCoordinateAdmission
 import com.orchard.backend.analysis.RepositoryIntelligenceImporter
 import com.orchard.backend.analysis.RepositoryIntelligenceRunEnsureStatus
 import com.orchard.backend.analysis.RepositoryIntelligenceService
@@ -234,6 +235,9 @@ fun main() {
         FileRepositoryIntelligenceGraphStore(OrchardPaths.WORKSPACE_DIR),
         lifecycleStore = FileRepositoryIntelligenceLifecycleStore(OrchardPaths.WORKSPACE_DIR),
         traceStore = FileRepositoryIntelligenceTraceStore(OrchardPaths.WORKSPACE_DIR),
+    )
+    workspace.configureRepositoryCoordinateAdmission(
+        RepositoryIntelligenceCoordinateAdmission(repositoryIntelligenceImporter),
     )
     val genesisIntelligence = GenesisIntelligenceService(
         workspace,
@@ -1585,7 +1589,8 @@ fun Application.workspaceApi(
                 WorkflowStartStatus.UNSUPPORTED_ENTITY,
                 WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
                 WorkflowStartStatus.REPOSITORY_DIRTY,
-                WorkflowStartStatus.WORK_DEFINITION_NOT_READY -> HttpStatusCode.UnprocessableEntity
+                WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
+                WorkflowStartStatus.COORDINATE_ADMISSION_BLOCKED -> HttpStatusCode.UnprocessableEntity
                 WorkflowStartStatus.STAGED_PLAN_BLOCKED,
                 WorkflowStartStatus.DESIGN_NOT_ADMITTED,
                 WorkflowStartStatus.PROJECT_GENESIS_NOT_ADMITTED -> HttpStatusCode.Conflict
@@ -1607,7 +1612,8 @@ fun Application.workspaceApi(
                 WorkflowStartStatus.UNSUPPORTED_ENTITY,
                 WorkflowStartStatus.REPOSITORY_UNAVAILABLE,
                 WorkflowStartStatus.REPOSITORY_DIRTY,
-                WorkflowStartStatus.WORK_DEFINITION_NOT_READY -> HttpStatusCode.UnprocessableEntity
+                WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
+                WorkflowStartStatus.COORDINATE_ADMISSION_BLOCKED -> HttpStatusCode.UnprocessableEntity
                 WorkflowStartStatus.ALREADY_STARTED,
                 WorkflowStartStatus.STAGED_PLAN_BLOCKED,
                 WorkflowStartStatus.DESIGN_NOT_ADMITTED,

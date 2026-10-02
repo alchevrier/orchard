@@ -6,6 +6,11 @@ import com.orchard.backend.agent.sha256Content
 import com.orchard.backend.workspace.ProjectGenesisView
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.exactRepositoryScopePaths
+import com.orchard.backend.workspace.RepositoryCoordinate
+import com.orchard.backend.workspace.RepositoryCoordinateAdmission
+import com.orchard.backend.workspace.RepositoryCoordinateAdmissionEvidence
+import com.orchard.backend.workspace.RepositoryCoordinateAdmissionStatus
+import com.orchard.backend.workspace.RepositoryCoordinateResolutionEvidence
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceStore
@@ -141,9 +146,10 @@ internal fun graphLocalRepositoryAnalysisSelection(
     graph: RepositoryIntelligenceGraph,
     acceptedScope: List<String>,
     maxPaths: Int = 24,
+    coordinatePaths: List<String> = exactRepositoryScopePaths(acceptedScope),
 ): RepositoryGraphLocalSelection {
     require(maxPaths > 0) { "Graph-local analysis path limit must be positive" }
-    val anchors = exactRepositoryScopePaths(acceptedScope)
+    val anchors = coordinatePaths
         .toCollection(linkedSetOf())
     val nodesById = graph.nodes.associateBy { it.nodeId }
     val anchorNodeIds = graph.nodes.filter { it.path in anchors }.mapTo(linkedSetOf()) { it.nodeId }
@@ -176,6 +182,124 @@ internal fun graphLocalRepositoryAnalysisSelection(
         selectedPaths = selectedPaths,
         omittedPaths = omittedPaths,
         unresolvedBoundaryIds = unresolvedBoundaryIds,
+    )
+}
+
+@Serializable
+data class RepositoryCoordinateResolution(
+    val coordinateId: String,
+    val path: String,
+    val nodeId: String,
+    val contentHash: String,
+)
+
+internal fun resolveRepositoryCoordinates(
+    graph: RepositoryIntelligenceGraph,
+    coordinates: List<RepositoryCoordinate>,
+): List<RepositoryCoordinateResolution>? = coordinates.map { coordinate ->
+    graph.nodes.singleOrNull { node ->
+        node.kind != INTELLIGENCE_NODE_SYMBOL && node.path == coordinate.path && node.contentHash != null
+    }
+        ?.let { node -> RepositoryCoordinateResolution(coordinate.coordinateId, coordinate.path, node.nodeId, requireNotNull(node.contentHash)) }
+        ?: return null
+}
+
+internal fun coordinateAdmissionMatchesGraph(
+    admission: RepositoryCoordinateAdmissionEvidence?,
+    graph: RepositoryIntelligenceGraph,
+): Boolean {
+    val manifestKey = graph.effectiveManifestKey()
+    return admission?.status == RepositoryCoordinateAdmissionStatus.READY &&
+        admission.repositoryId == graph.projectId &&
+        admission.repositoryRevision == graph.repositoryRevision &&
+        admission.extractorVersion == manifestKey.extractorVersion &&
+        admission.policyVersion == manifestKey.policyVersion &&
+        admission.resolutions.isNotEmpty() &&
+        admission.resolutions.map { it.coordinateId }.distinct().size == admission.resolutions.size &&
+        admission.resolutions.all { resolution ->
+            graph.nodes.any { node ->
+                node.kind != INTELLIGENCE_NODE_SYMBOL && node.nodeId == resolution.nodeId &&
+                    node.path == resolution.path && node.contentHash == resolution.sourceHash
+            }
+        }
+}
+
+class RepositoryIntelligenceCoordinateAdmission(
+    private val importer: RepositoryIntelligenceImporter,
+) : RepositoryCoordinateAdmission {
+    override fun assess(
+        projectId: Int,
+        repositoryPath: String,
+        repositoryRevision: String,
+        coordinates: List<RepositoryCoordinate>,
+    ): RepositoryCoordinateAdmissionEvidence {
+        if (coordinates.isEmpty()) return admission(
+            RepositoryCoordinateAdmissionStatus.MISSING_COORDINATES,
+            projectId,
+            repositoryRevision,
+            diagnostic = "Repository analysis requires one or more exact repository coordinates.",
+        )
+        val graph = runCatching { importer.ensure(projectId, repositoryPath, repositoryRevision).graph }.getOrElse {
+            return admission(
+                RepositoryCoordinateAdmissionStatus.INTELLIGENCE_UNAVAILABLE,
+                projectId,
+                repositoryRevision,
+                diagnostic = "Compatible repository intelligence could not be prepared for the pinned revision.",
+            )
+        }
+        val nodesByPath = graph.nodes
+            .filter { it.kind != INTELLIGENCE_NODE_SYMBOL && it.path != null && it.contentHash != null }
+            .groupBy { requireNotNull(it.path) }
+        if (coordinates.any { coordinate -> nodesByPath[coordinate.path].orEmpty().size > 1 }) {
+            return admission(
+                RepositoryCoordinateAdmissionStatus.AMBIGUOUS_COORDINATE,
+                projectId,
+                repositoryRevision,
+                graph,
+                "A repository coordinate resolves to more than one manifest node.",
+            )
+        }
+        val resolutions = resolveRepositoryCoordinates(graph, coordinates)
+            ?: return admission(
+                RepositoryCoordinateAdmissionStatus.UNRESOLVED_COORDINATE,
+                projectId,
+                repositoryRevision,
+                graph,
+                "A repository coordinate does not resolve to an exact content-addressed manifest node.",
+            )
+        if (resolutions.any { resolution -> graph.unresolvedBoundaries.any { it.nodeId == resolution.nodeId } }) {
+            return admission(
+                RepositoryCoordinateAdmissionStatus.UNRESOLVED_BOUNDARY,
+                projectId,
+                repositoryRevision,
+                graph,
+                "A repository coordinate resolves through an unsupported manifest boundary.",
+            )
+        }
+        return admission(
+            RepositoryCoordinateAdmissionStatus.READY,
+            projectId,
+            repositoryRevision,
+            graph,
+            resolutions = resolutions.map { RepositoryCoordinateResolutionEvidence(it.coordinateId, it.path, it.nodeId, it.contentHash) },
+        )
+    }
+
+    private fun admission(
+        status: RepositoryCoordinateAdmissionStatus,
+        projectId: Int,
+        repositoryRevision: String,
+        graph: RepositoryIntelligenceGraph? = null,
+        diagnostic: String? = null,
+        resolutions: List<RepositoryCoordinateResolutionEvidence> = emptyList(),
+    ) = RepositoryCoordinateAdmissionEvidence(
+        status = status,
+        repositoryId = projectId,
+        repositoryRevision = repositoryRevision,
+        extractorVersion = graph?.effectiveManifestKey()?.extractorVersion ?: 0,
+        policyVersion = graph?.effectiveManifestKey()?.policyVersion ?: 0,
+        resolutions = resolutions,
+        diagnostic = diagnostic,
     )
 }
 

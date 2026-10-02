@@ -1666,11 +1666,15 @@ class RepositoryExecutionPlanStoreTest {
                     omittedPaths = listOf("docs/Manual.md"),
                     unresolvedBoundaryIds = listOf("boundary:reflection"),
                 ),
+                coordinateResolutions = listOf(
+                    RepositoryCoordinateResolution("main-source", "src/Main.kt", "file:main", "c".repeat(64)),
+                ),
             )
         )
 
         assertEquals(RepositoryIntelligenceManifestKey(1, baseRevision, 1, 2), traced.provenance.manifestKey)
         assertEquals(listOf("src/Main.kt", "src/MainTest.kt"), traced.provenance.graphContextTrace?.selectedPaths)
+        assertEquals(listOf("main-source"), traced.provenance.coordinateResolutions.map { it.coordinateId })
         assertTrue(repositoryExecutionPlanHash(traced).matches(Regex("[0-9a-f]{64}")))
     }
 

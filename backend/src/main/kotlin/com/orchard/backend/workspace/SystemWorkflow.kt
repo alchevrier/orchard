@@ -62,6 +62,49 @@ data class RepositoryCoordinate(
     val scopeIndexes: List<Int>,
 )
 
+@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+enum class RepositoryCoordinateAdmissionStatus {
+    READY,
+    MISSING_COORDINATES,
+    UNRESOLVED_COORDINATE,
+    AMBIGUOUS_COORDINATE,
+    UNRESOLVED_BOUNDARY,
+    INTELLIGENCE_UNAVAILABLE,
+}
+
+@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+data class RepositoryCoordinateResolutionEvidence(
+    val coordinateId: String,
+    val path: String,
+    val nodeId: String,
+    val sourceHash: String,
+)
+
+@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+data class RepositoryCoordinateAdmissionEvidence(
+    val status: RepositoryCoordinateAdmissionStatus,
+    val repositoryId: Int,
+    val repositoryRevision: String,
+    val extractorVersion: Int = 0,
+    val policyVersion: Int = 0,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val resolutions: List<RepositoryCoordinateResolutionEvidence> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val diagnostic: String? = null,
+)
+
+interface RepositoryCoordinateAdmission {
+    fun assess(
+        projectId: Int,
+        repositoryPath: String,
+        repositoryRevision: String,
+        coordinates: List<RepositoryCoordinate>,
+    ): RepositoryCoordinateAdmissionEvidence
+}
+
 internal fun exactRepositoryCoordinatePaths(definition: WorkDefinitionSubmission?): List<String> =
     definition?.repositoryCoordinates.orEmpty().map { it.path }.distinct()
 

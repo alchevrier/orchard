@@ -1024,10 +1024,7 @@ class CodingWorkerService(
         val pullRequests = pullRequestStore.load()
         return workspace.snapshot(MESSAGE_READY).workflowRuns.asSequence()
             .filter { it.state in setOf(RUN_STATE_CONTEXT_READY, RUN_STATE_EVIDENCE_PENDING, RUN_STATE_EVIDENCE_BLOCKED) }
-            .filter { run ->
-                (run.context.circuitDispatchId != null || externalVerificationCorrectionRun(run)) &&
-                    run.context.workspaceReservation?.mode in setOf("ISOLATED", "INTEGRATION")
-            }
+            .filter { run -> run.context.workspaceReservation?.mode in setOf("ISOLATED", "INTEGRATION") }
             .filter { run ->
                 val latestPullRequest = pullRequests.lastOrNull { it.runId == run.runId }
                 val latestExecution = executions.lastOrNull { it.claim.runId == run.runId }
@@ -1048,13 +1045,13 @@ class CodingWorkerService(
             .filter { run ->
                 val hasRepositoryPlan = repositoryPlans.any { it.runId == run.runId }
                 val currentPlan = if (hasRepositoryPlan) repositoryAnalysis?.currentPlan(run.runId) else null
-                hasRepositoryPlan && codingRunCanExecute(
+                (repositoryAnalysis == null || !hasRepositoryPlan || codingRunCanExecute(
                     executions = executions.filter { it.claim.runId == run.runId },
                     attempts = codingAttempts.filter { it.runId == run.runId },
                     currentPlan = currentPlan,
-                    bindToCurrentPlan = repositoryAnalysis != null,
+                    bindToCurrentPlan = true,
                     retryBudget = retryBudget,
-                ) || run.state == RUN_STATE_EVIDENCE_BLOCKED && executions.lastOrNull {
+                )) || run.state == RUN_STATE_EVIDENCE_BLOCKED && executions.lastOrNull {
                     it.claim.runId == run.runId
                 }?.let { execution ->
                     currentPlan?.let { plan ->
@@ -2210,13 +2207,10 @@ internal fun codingProposalBehaviorDiagnostic(
         if (NULLABLE_ASSERT_TRUE.containsMatchIn(proposedText)) {
             return "${operation.action} ${operation.path} introduces assertTrue with a nullable condition; assert the nullable value explicitly before testing its property."
         }
-        if (ASSERT_NOT_NULL_CALL.containsMatchIn(proposedText) &&
+        if (operation.action == CODING_FILE_WRITE && ASSERT_NOT_NULL_CALL.containsMatchIn(proposedText) &&
             !KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(proposedText)
         ) {
             return "${operation.action} ${operation.path} introduces assertNotNull without importing kotlin.test.assertNotNull."
-        }
-        FORBIDDEN_PROPOSAL_TEST_PROPERTY.find(proposedText)?.let { match ->
-            return "${operation.action} ${operation.path} references ${match.value}, which is not a supported proposal property in this governed test context."
         }
     }
     proposal.operations.filter { it.action in setOf(CODING_FILE_REPLACE, CODING_FILE_WRITE) }.forEach { operation ->
@@ -2249,19 +2243,15 @@ internal fun codingProposalBehaviorDiagnostic(
         ) {
             return "REPLACE ${operation.path} introduces assertTrue with a nullable condition; assert the nullable value explicitly before testing its property."
         }
-        if (isCandidateTestSourcePath(operation.path) &&
-            ASSERT_NOT_NULL_CALL.containsMatchIn(candidate) &&
-            !ASSERT_NOT_NULL_CALL.containsMatchIn(original) &&
-            !KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(candidate)
-        ) {
-            return "${operation.action} ${operation.path} introduces assertNotNull without importing kotlin.test.assertNotNull."
-        }
         if (isCandidateTestSourcePath(operation.path)) {
-            FORBIDDEN_PROPOSAL_TEST_PROPERTY.find(candidate)?.let { match ->
-                return "${operation.action} ${operation.path} references ${match.value}, which is not a supported proposal property in this governed test context."
+            val originalDuplicates = duplicateKotlinLocalDeclarations(original)
+            val candidateDuplicates = duplicateKotlinLocalDeclarations(candidate)
+            val introducedDuplicates = candidateDuplicates - originalDuplicates
+            if (introducedDuplicates.isNotEmpty()) {
+                val locals = introducedDuplicates.sorted().joinToString()
+                return "REPLACE ${operation.path} introduces duplicate local declaration${if (introducedDuplicates.size == 1) "" else "s"} $locals; " +
+                    "introduces local declaration${if (introducedDuplicates.size == 1) "" else "s"} $locals before an existing declaration."
             }
-        }
-        if (isCandidateTestSourcePath(operation.path)) {
             operation.replacements.forEach { replacement ->
                 val replacedEndpoints = CLIENT_ENDPOINT_CALL.findAll(replacement.old).map { it.groupValues[1] }.toSet()
                 val replacementEndpoints = CLIENT_ENDPOINT_CALL.findAll(replacement.new).map { it.groupValues[1] }.toSet()
@@ -2293,12 +2283,14 @@ internal fun codingProposalBehaviorDiagnostic(
                 return "REPLACE ${operation.path} adds unrelated client endpoint call${if (unrelatedEndpoints.size == 1) "" else "s"} " +
                     "${unrelatedEndpoints.sorted().joinToString()}; extend the existing endpoint behavior or create a separately scoped test."
             }
-            val originalDuplicates = duplicateKotlinLocalDeclarations(original)
-            val candidateDuplicates = duplicateKotlinLocalDeclarations(candidate)
-            val introducedDuplicates = candidateDuplicates - originalDuplicates
-            if (introducedDuplicates.isNotEmpty()) {
-                return "REPLACE ${operation.path} introduces duplicate local declaration${if (introducedDuplicates.size == 1) "" else "s"} " +
-                    introducedDuplicates.sorted().joinToString() + "; preserve the existing test's local names."
+            FORBIDDEN_PROPOSAL_TEST_PROPERTY.find(candidate)?.let { match ->
+                return "${operation.action} ${operation.path} references ${match.value}, which is not a supported proposal property in this governed test context."
+            }
+            if (ASSERT_NOT_NULL_CALL.containsMatchIn(candidate) &&
+                !ASSERT_NOT_NULL_CALL.containsMatchIn(original) &&
+                !KOTLIN_TEST_ASSERT_NOT_NULL_IMPORT.containsMatchIn(candidate)
+            ) {
+                return "${operation.action} ${operation.path} introduces assertNotNull without importing kotlin.test.assertNotNull."
             }
         }
     }
@@ -2307,15 +2299,13 @@ internal fun codingProposalBehaviorDiagnostic(
 
 private fun duplicateKotlinLocalDeclarations(source: String): Set<String> {
     val duplicates = linkedSetOf<String>()
-    kotlinFunctionBodies(source).forEach { body ->
-        val declarations = KOTLIN_LOCAL_DECLARATION.findAll(body)
-            .map { it.groupValues[1] }
-            .toList()
-        declarations.groupingBy { it }.eachCount()
-            .filterValues { it > 1 }
-            .keys
-            .forEach(duplicates::add)
-    }
+    val declarations = KOTLIN_LOCAL_DECLARATION.findAll(source)
+        .map { it.groupValues[1] }
+        .toList()
+    declarations.groupingBy { it }.eachCount()
+        .filterValues { it > 1 }
+        .keys
+        .forEach(duplicates::add)
     return duplicates
 }
 

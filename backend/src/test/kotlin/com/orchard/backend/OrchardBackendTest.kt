@@ -39,6 +39,11 @@ import com.orchard.backend.workspace.RepositoryHead
 import com.orchard.backend.workspace.RevisionValidation
 import com.orchard.backend.workspace.DefaultSystemWorkflow
 import com.orchard.backend.workspace.WorkDefinitionSubmission
+import com.orchard.backend.workspace.RepositoryCoordinate
+import com.orchard.backend.workspace.RepositoryCoordinateAdmission
+import com.orchard.backend.workspace.RepositoryCoordinateAdmissionEvidence
+import com.orchard.backend.workspace.RepositoryCoordinateAdmissionStatus
+import com.orchard.backend.workspace.RepositoryCoordinateResolutionEvidence
 import com.orchard.backend.workspace.AcceptanceCriterion
 import com.orchard.backend.workspace.DEFINITION_NEEDS_CLARIFICATION
 import com.orchard.backend.workspace.DEFINITION_NEEDS_INVESTIGATION
@@ -2399,6 +2404,49 @@ class WorkspaceApiTest {
         assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
         assertFalse(body.contains("CONTEXT_READY"))
         assertTrue(body.contains("status=0"))
+    }
+
+    @Test
+    fun workflowRunRouteRequiresCoordinateAdmissionAndPersistsItsEvidence() = testApplication {
+        val bindings = object : RepositoryBindingStore {
+            override fun bind(projectId: Int, requestedPath: String) = Unit
+            override fun views(projectIds: Set<Int>): Map<Int, RepositoryView> = emptyMap()
+            override fun resolveHead(projectId: Int) = RepositoryHead(
+                projectId, "/repository", "a".repeat(40), "main", "", clean = true,
+            )
+        }
+        var admitted = false
+        val workspace = WorkspaceStore(repositoryBindings = bindings)
+        workspace.configureRepositoryCoordinateAdmission(object : RepositoryCoordinateAdmission {
+            override fun assess(projectId: Int, repositoryPath: String, repositoryRevision: String, coordinates: List<RepositoryCoordinate>) =
+                if (!admitted) RepositoryCoordinateAdmissionEvidence(
+                    RepositoryCoordinateAdmissionStatus.MISSING_COORDINATES,
+                    projectId,
+                    repositoryRevision,
+                    diagnostic = "Repository analysis requires one or more exact repository coordinates.",
+                ) else RepositoryCoordinateAdmissionEvidence(
+                    RepositoryCoordinateAdmissionStatus.READY,
+                    projectId,
+                    repositoryRevision,
+                    extractorVersion = 1,
+                    policyVersion = 1,
+                    resolutions = listOf(
+                        RepositoryCoordinateResolutionEvidence("main", "src/Main.kt", "file:main", "b".repeat(64)),
+                    ),
+                )
+        })
+        createTaskHierarchy(workspace)
+        workspace.submitWorkDefinition(4, definition().copy(
+            repositoryCoordinates = listOf(RepositoryCoordinate("main", "src/Main.kt", listOf(0))),
+        ))
+        application { workspaceApi(workspace) }
+
+        assertEquals(HttpStatusCode.UnprocessableEntity, client.post("/api/work-items/4/runs").status)
+        admitted = true
+        assertEquals(HttpStatusCode.Created, client.post("/api/work-items/4/runs").status)
+        val admission = workspace.snapshot(MESSAGE_READY).workflowRuns.single().context.repositoryCoordinateAdmission
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, admission?.status)
+        assertEquals("file:main", admission?.resolutions?.single()?.nodeId)
     }
 
     @Test

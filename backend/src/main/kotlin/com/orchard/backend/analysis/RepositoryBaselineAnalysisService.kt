@@ -200,7 +200,7 @@ class RepositoryBaselineAnalysisService(
             repositoryContext = candidate,
             requiredOutputSchema = OUTPUT_SCHEMA,
         )
-        val boundedContext = compactRepositoryContextToBudget(
+        val boundedContext = if (context.files.isEmpty()) context else compactRepositoryContextToBudget(
             context,
             profile.inputBudgetTokens,
         ) { candidate ->

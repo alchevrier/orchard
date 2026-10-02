@@ -40,6 +40,7 @@ import com.orchard.backend.workspace.RepositoryEvidenceSelector
 import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_AFFINE_TEST
 import com.orchard.backend.workspace.WorkspaceStore
 import com.orchard.backend.workspace.compileScopePathEvidenceSelectors
+import com.orchard.backend.workspace.RepositoryCoordinateAdmissionStatus
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -226,27 +227,6 @@ class RepositoryAnalysisService(
                     }
                     return@forEach
                 }
-                if (latest.state == ANALYSIS_ATTEMPT_BLOCKED && recoverableAnalysisInterruption(latest)) {
-                    attemptStore.appendNext { attemptId ->
-                        RepositoryAnalysisAttempt(
-                            attemptId = attemptId,
-                            runId = run.runId,
-                            baseRevision = baseRevision,
-                            state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
-                            resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
-                            diagnostic = "Repository analysis resumes automatically after process interruption.",
-                            promptHash = latest.promptHash,
-                        )
-                    }
-                    return@forEach
-                }
-                if (latest.state == ANALYSIS_ATTEMPT_BLOCKED &&
-                    latest.resultStatus == RepositoryAnalysisTickStatus.INVALID_ANALYSIS.name &&
-                    automaticCorrectionCount(run.runId, baseRevision) < MAX_AUTOMATIC_ANALYSIS_CORRECTIONS
-                ) {
-                    authorizeAutomaticCorrection(run.runId, baseRevision, latest.promptHash)
-                    return@forEach
-                }
                 val authorization = latest.takeIf { it.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED }
                     ?: return@forEach
                 val interrupted = workspace.modelExecutions(run.context.workItemId)
@@ -265,17 +245,6 @@ class RepositoryAnalysisService(
                         state = ANALYSIS_ATTEMPT_BLOCKED,
                         resultStatus = RepositoryAnalysisTickStatus.CANCELLED.name,
                         diagnostic = "Repository analysis execution was interrupted before producing an admissible plan.",
-                        promptHash = interrupted.promptHash,
-                    )
-                }
-                attemptStore.appendNext { attemptId ->
-                    RepositoryAnalysisAttempt(
-                        attemptId = attemptId,
-                        runId = run.runId,
-                        baseRevision = baseRevision,
-                        state = ANALYSIS_ATTEMPT_RETRY_AUTHORIZED,
-                        resultStatus = RepositoryAnalysisTickStatus.RETRY_AUTHORIZED.name,
-                        diagnostic = "Repository analysis resumes automatically after process interruption.",
                         promptHash = interrupted.promptHash,
                     )
                 }
@@ -407,6 +376,13 @@ class RepositoryAnalysisService(
                         it.coversAcceptedScope(candidate) &&
                         !it.adoptsExternalVerificationFailure(currentRevision, codingWorkerEvents)
                 }
+                if (currentRevision != null && attemptStore.isBlocked(candidate.runId, currentRevision) &&
+                    analysisAttempts.lastOrNull {
+                        it.runId == candidate.runId && it.baseRevision == currentRevision
+                    }?.state != ANALYSIS_ATTEMPT_RETRY_AUTHORIZED
+                ) {
+                    return@filter false
+                }
                 val latestCandidate = staticCandidates.maxByOrNull { it.revision }
                 if (latestCandidate != null && (
                         failedCandidatePlanRequiresRevision(latestCandidate, codingWorkerEvents) ||
@@ -414,9 +390,6 @@ class RepositoryAnalysisService(
                     )
                 ) {
                     return@filter true
-                }
-                if (currentRevision != null && attemptStore.isBlocked(candidate.runId, currentRevision)) {
-                    return@filter false
                 }
                 if (analysisAttempts.lastOrNull {
                         it.runId == candidate.runId && it.baseRevision == currentRevision
@@ -536,12 +509,28 @@ class RepositoryAnalysisService(
                 diagnostic = "No compatible repository intelligence is ready for the pinned workflow revision.",
             )
         }
+        val coordinateAdmission = run.context.repositoryCoordinateAdmission
+        if (intelligenceGraph != null && !coordinateAdmissionMatchesGraph(coordinateAdmission, intelligenceGraph)) {
+            return RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+                run.runId,
+                diagnostic = coordinateAdmission?.diagnostic
+                    ?: "Repository coordinate admission evidence is unavailable or incompatible with the pinned manifest.",
+            )
+        }
+        val coordinateResolutions = coordinateAdmission?.resolutions.orEmpty().map {
+            RepositoryCoordinateResolution(it.coordinateId, it.path, it.nodeId, it.sourceHash)
+        }
         val graphTraceId = intelligenceGraph?.let {
             newRepositoryIntelligenceTraceId("graph-local-analysis", run.context.projectId, baseRevision, run.runId)
         }
         val graphSelectionStartedAt = System.nanoTime()
         val graphSelection = intelligenceGraph?.let {
-            graphLocalRepositoryAnalysisSelection(it, run.workDefinition?.definition?.scope.orEmpty())
+            graphLocalRepositoryAnalysisSelection(
+                it,
+                run.workDefinition?.definition?.scope.orEmpty(),
+                coordinatePaths = coordinateResolutions.map { it.path },
+            )
         }
         if (graphSelection != null && graphTraceId != null) {
             repositoryIntelligenceImporter?.emitTrace(
@@ -774,7 +763,7 @@ class RepositoryAnalysisService(
             run.runId,
             diagnostic = admission.evidence.reason,
         )
-        recordRunningAttempt(
+        if (recordRunningAttempt(
             run.runId,
             baseRevision,
             prompt,
@@ -787,7 +776,13 @@ class RepositoryAnalysisService(
                 profile.inputBudgetTokens,
                 boundedContext.files.mapTo(hashSetOf()) { it.path },
             ),
-        )
+        ) == null) {
+            return RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE,
+                run.runId,
+                diagnostic = "The repository analysis execution could not record its durable running attempt.",
+            )
+        }
         val startedAt = System.nanoTime()
         val generation = try {
             lease.use {
@@ -956,6 +951,7 @@ class RepositoryAnalysisService(
                         modelExecutionId = execution.executionId,
                         manifestKey = intelligenceGraph?.effectiveManifestKey(),
                         graphContextTrace = graphSelection?.takeIf { correctionPaths == null && graphPaths != null }?.toTrace(),
+                        coordinateResolutions = coordinateResolutions,
                     ),
                     admittedDesign = admittedDesignOverride ?: run.context.acceptanceContract?.design,
                 )
@@ -1079,12 +1075,6 @@ class RepositoryAnalysisService(
                 rejectedPlan = rejectedPlan,
                 contextSelection = contextSelection,
             )
-        }.also { blocked ->
-            if (status == RepositoryAnalysisTickStatus.INVALID_ANALYSIS &&
-                automaticCorrectionCount(runId, baseRevision) < MAX_AUTOMATIC_ANALYSIS_CORRECTIONS
-            ) {
-                authorizeAutomaticCorrection(runId, baseRevision, blocked.promptHash)
-            }
         }
     }.fold(
         onSuccess = { RepositoryAnalysisTickResult(status, runId, diagnostic = diagnostic) },
@@ -1395,7 +1385,7 @@ internal fun compileRepositoryAnalysisCandidate(
     verificationCommands: List<String>,
 ): RepositoryAnalysisPlanContent {
     val observedPaths = context.files.mapTo(hashSetOf()) { it.path }
-    val authorizedPaths = requiredRepositoryEvidencePaths(selectors, context).toSet()
+    val authorizedPaths = requiredRepositoryEvidencePaths(selectors, context).toSet().ifEmpty { observedPaths }
     val candidateSourcePaths = candidate.sourcePaths
         .filter { it in authorizedPaths }
         .distinct()
@@ -1446,7 +1436,7 @@ internal fun compileRepositoryAnalysisCandidate(
         reuse = candidate.reuse,
         preservedInvariants = candidate.preservedInvariants,
         nonGoals = candidate.nonGoals,
-        scopeCoverage = acceptedScope.map { scope -> ExecutionPlanScopeCoverage(scope, emptyList()) },
+        scopeCoverage = acceptedScope.map { scope -> ExecutionPlanScopeCoverage(scope, sourcePaths) },
         operations = operations,
         verificationCommands = verificationCommands,
         unresolvedQuestions = candidate.unresolvedQuestions,
@@ -2095,8 +2085,9 @@ internal fun compileRepositoryScopeAuthority(
         .flatMap { scopeSelectedPaths(it, acceptedScope[it]).asSequence() }
         .filter(::isTestSourcePath)
         .toSet()
+    val evidencePaths = output.evidence.mapTo(hashSetOf()) { it.path }
     val sourceOperations = output.operations.filter {
-        it.action != PLAN_OPERATION_VERIFY && it.path in requiredPaths
+        it.action != PLAN_OPERATION_VERIFY && (it.path in requiredPaths || it.path in evidencePaths)
     }
     val operationTemplate = sourceOperations.firstOrNull() ?: output.operations.firstOrNull()
     val synthesizedTestOperations = selectedTestPaths
@@ -2162,7 +2153,9 @@ internal fun compileRepositoryScopeAuthority(
         scopeCoverage = acceptedScope.mapIndexed { index, scope ->
             val coverage = coverageByScope[canonicalAuthorityText(scope)]
                 ?: ExecutionPlanScopeCoverage(scope = scope, evidencePaths = emptyList())
-            val selectedEvidencePaths = scopeSelectedPaths(index, scope).sorted()
+            val selectedEvidencePaths = scopeSelectedPaths(index, scope)
+                .ifEmpty { coverage.evidencePaths }
+                .sorted()
             val evidencePaths = selectedEvidencePaths
             val sourceOperationOrders = compiledOperations.asSequence()
                 .filter { operation ->

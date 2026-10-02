@@ -87,6 +87,8 @@ data class AnalysisExecutionProvenance(
     val manifestKey: RepositoryIntelligenceManifestKey? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val graphContextTrace: RepositoryIntelligenceContextTrace? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val coordinateResolutions: List<RepositoryCoordinateResolution> = emptyList(),
 )
 
 @Serializable
@@ -311,6 +313,18 @@ private fun validateRepositoryExecutionPlan(plan: RepositoryExecutionPlan, previ
         require(trace.selectedNodeIds.distinct().size == trace.selectedNodeIds.size) {
             "Execution plan graph context nodes are invalid"
         }
+    }
+    require(plan.provenance.coordinateResolutions.map { it.coordinateId }.distinct().size == plan.provenance.coordinateResolutions.size) {
+        "Execution plan coordinate provenance is ambiguous"
+    }
+    require(plan.provenance.coordinateResolutions.all { coordinate ->
+        coordinate.coordinateId.isNotBlank() && validPath(coordinate.path) && coordinate.nodeId.isNotBlank() && coordinate.contentHash.matches(SHA256)
+    }) { "Execution plan coordinate provenance is invalid" }
+    if (plan.provenance.coordinateResolutions.isNotEmpty()) {
+        val trace = requireNotNull(plan.provenance.graphContextTrace) { "Execution plan coordinate provenance requires graph context" }
+        require(plan.provenance.manifestKey != null && plan.provenance.coordinateResolutions.all { coordinate ->
+            coordinate.path in trace.anchorPaths && coordinate.nodeId in trace.selectedNodeIds
+        }) { "Execution plan coordinate provenance is inconsistent" }
     }
     require(plan.provenance.modelExecutionId > 0 && plan.hash == repositoryExecutionPlanHash(plan)) {
         "Execution plan authority hash is invalid"
