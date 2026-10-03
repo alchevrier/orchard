@@ -12,7 +12,7 @@ const val REPOSITORY_EVIDENCE_ALL_MATCHES = "ALL_MATCHES"
 const val REPOSITORY_EVIDENCE_AFFINE_TEST = "AFFINE_TEST"
 const val REPOSITORY_EVIDENCE_MATCH_ANY = "ANY"
 const val REPOSITORY_EVIDENCE_MATCH_ALL = "ALL"
-const val REPOSITORY_COORDINATE_REPAIR_VERSION = 6
+const val REPOSITORY_COORDINATE_REPAIR_VERSION = 7
 
 @Serializable
 @OptIn(ExperimentalSerializationApi::class)
@@ -148,7 +148,7 @@ internal fun exactRepositoryScopePaths(scope: List<String>): List<String> =
         .distinct()
 
 private val EXACT_REPOSITORY_PATH = Regex(
-    "(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)*\\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_.-])",
+    "(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)*\\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])",
 )
 
 @Serializable

@@ -30,6 +30,18 @@ import kotlinx.serialization.json.Json
 
 class RepositoryIntelligenceGraphTest {
     @Test
+    fun `scope paths preserve filename owners followed by punctuation`() {
+        assertEquals(
+            listOf("src/Main.kt", "Consumer.kt", "ProjectInboxWorkspace.kt", "File.name.kt"),
+            com.orchard.backend.workspace.exactRepositoryScopePaths(listOf(
+                "Update src/Main.kt, Consumer.kt, and ProjectInboxWorkspace.kt.",
+                "Check (File.name.kt).",
+                "Do not truncate Invalid.extensionlongerthanten.",
+            )),
+        )
+    }
+
+    @Test
     fun `coordinate admission preserves explicit import uncertainty and rejects dynamic boundaries`() {
         val state = createTempDirectory("orchard-coordinate-import-state-")
         val repository = createTempDirectory("orchard-coordinate-import-repository-")
@@ -288,7 +300,7 @@ class RepositoryIntelligenceGraphTest {
         assertEquals(null, unsupported.evidence)
         assertTrue(unsupported.diagnostic.orEmpty().contains("no supported pinned source matches"))
         val anchored = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition.copy(
-            scope = listOf("Update Main.kt"),
+            scope = listOf("Update Main.kt."),
             repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map { it.copy(contentLiterals = emptyList()) },
         ))
         assertEquals(listOf("src/Main.kt"), anchored.definition.repositoryCoordinates.map { it.path })
