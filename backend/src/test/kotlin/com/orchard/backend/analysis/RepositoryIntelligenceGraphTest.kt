@@ -120,6 +120,15 @@ class RepositoryIntelligenceGraphTest {
         assertEquals(before.stagedPlans, result.snapshot.stagedPlans)
         assertEquals(before.workflowRuns, result.snapshot.workflowRuns)
         assertEquals(proposal, workspace.prepareCoordinateSuccessor(original.runId).proposal)
+        assertEquals(com.orchard.backend.workspace.WorkflowStartStatus.STAGED_PLAN_BLOCKED, workspace.startWorkflow(proposal.workItemId).status)
+        workspace.acceptDefinitionProposal(proposal.proposalId)
+        assertEquals(com.orchard.backend.workspace.WorkflowStartStatus.CREATED, workspace.startWorkflow(proposal.workItemId).status)
+        val after = workspace.snapshot(0)
+        val correction = after.workflowRuns.single { it.context.workItemId == proposal.workItemId }
+        requireNotNull(correction.context.workspaceReservation)
+        assertTrue(correction.context.repository.path != repository.toString())
+        assertEquals(before.stagedPlans, after.stagedPlans)
+        assertEquals(original, after.workflowRuns.single { it.runId == original.runId })
     }
 
     @Test

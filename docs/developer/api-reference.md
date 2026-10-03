@@ -62,7 +62,7 @@ Unresolved imports marked `REQUIRE_EXPLICIT_CONTEXT` do not make a content-addre
 
 Ticket-scoped project report revisions include typed evidence for candidate PRs, independent audits, company acceptance, and local promotion. Each new governed-delivery record changes the report source hash, producing an immutable inbox revision that remains correlated with the ticket's canonical conversation thread.
 
-When the source task belongs to a started staged plan, coordinate recovery creates a corrective bug under the same story rather than adding an ordinary task to the frozen plan. The bug records the blocked-run reproduction, original regression outcome, and successor lineage. The admitted plan and source run remain unchanged; the correction still requires definition acceptance and its own delivery admission.
+When the source task belongs to a started staged plan, coordinate recovery creates a corrective bug under the same story rather than adding an ordinary task to the frozen plan. The bug records the blocked-run reproduction, original regression outcome, and successor lineage. The admitted plan and source run remain unchanged; the correction still requires definition acceptance and its own delivery admission. An accepted source-pinned correction bug with ready coordinate evidence may start outside the frozen circuit in an isolated non-integration-owner workspace. Ordinary tasks and bugs remain circuit-gated; project genesis, design, current repository, and coordinate admission checks still apply to corrections.
 
 ## AI Operator Pilot
 

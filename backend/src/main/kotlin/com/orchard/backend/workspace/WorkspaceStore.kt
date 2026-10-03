@@ -1265,7 +1265,19 @@ class WorkspaceStore(
             dispatch.workItemId == workItemId && dispatchRun(dispatch) == null &&
                 activeStagedPlan(dispatch.scopeId)?.planId == dispatch.planId
         }
-        return startWorkflow(workItemId, pending?.dispatchId, conversationCommand)
+        val definition = workDefinitions.lastOrNull { it.workItemId == workItemId }
+        val proposal = definition?.sourceProposal?.let { reference ->
+            collaborationEvents.mapNotNull { it.proposal }.singleOrNull {
+                it.proposalId == reference.proposalId && it.hash == reference.proposalHash
+            }
+        }
+        val original = proposal?.content?.successorOfRunId?.let { sourceRunId -> workflowRuns.singleOrNull { it.runId == sourceRunId } }
+        val coordinateCorrection = committedEntity(workItemId)?.let { workItem ->
+            workItem.type == ENTITY_BUG && original?.context?.storyId == workItem.parentId &&
+                original.context.workItemId != workItemId && proposal.workItemId == workItemId &&
+                proposal.content.coordinateRepairEvidence?.status == RepositoryCoordinateAdmissionStatus.READY
+        } == true
+        return startWorkflow(workItemId, pending?.dispatchId, conversationCommand, allowIsolatedCorrection = coordinateCorrection)
     }
 
     @Synchronized
@@ -1280,7 +1292,7 @@ class WorkspaceStore(
         return startWorkflow(
             workItemId = workItemId,
             circuitDispatchId = null,
-            allowExternalVerificationCorrection = true,
+            allowIsolatedCorrection = true,
         )
     }
 
@@ -1288,7 +1300,7 @@ class WorkspaceStore(
         workItemId: Int,
         circuitDispatchId: Long?,
         conversationCommand: ConversationCommandReference? = null,
-        allowExternalVerificationCorrection: Boolean = false,
+        allowIsolatedCorrection: Boolean = false,
     ): WorkflowStartResult {
         val workItem = committedEntity(workItemId)
         if (workItem == null) return workflowFailure(
@@ -1303,7 +1315,7 @@ class WorkspaceStore(
             WorkflowStartStatus.ALREADY_STARTED,
             "This work item already has an active workflow run.",
         )
-        if (!allowExternalVerificationCorrection) {
+        if (!allowIsolatedCorrection) {
             stagedPlanBlockReason(workItem)?.let { reason ->
                 return workflowFailure(WorkflowStartStatus.STAGED_PLAN_BLOCKED, reason)
             }
@@ -1371,7 +1383,7 @@ class WorkspaceStore(
             "The circuit dispatch authority is unavailable.",
         )
         val (executionRepository, workspaceReservation) = try {
-            if (dispatch == null && !allowExternalVerificationCorrection) head to null
+            if (dispatch == null && !allowIsolatedCorrection) head to null
             else if (dispatch == null) {
                 repositoryBindings.reserveWorkspace(project.id, Long.MAX_VALUE - workItem.id, head, integrationOwner = false)
             } else {
