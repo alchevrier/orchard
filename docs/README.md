@@ -29,6 +29,7 @@ Start with the [Developer Documentation](developer/README.md) when you want to b
 ### Understand Decisions and Direction
 
 - [Architecture Decision Records](adrs/): accepted decisions and their consequences.
+- [Context Quality ADR](adrs/056-quality-governed-model-context-compilation.md): proposed rules for relevant evidence, honest budget accounting, and explainable model-context compilation.
 - [Roadmap](../ROADMAP.md): dependency-ordered product intent, milestone states, and exit evidence.
 - [README](../README.md): current status, quick start, and delivered milestone history.
 
