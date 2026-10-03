@@ -26,6 +26,8 @@ data class WorkDefinitionManifest(
     val hash: String,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val sourceProposal: DefinitionProposalReference? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val assessmentPolicyVersion: Int = 1,
 )
 
 interface WorkDefinitionStore {
@@ -100,6 +102,7 @@ fun newWorkDefinitionManifest(
     definition: WorkDefinitionSubmission,
     assessment: DefinitionAssessment,
     sourceProposal: DefinitionProposalReference? = null,
+    assessmentPolicyVersion: Int = 2,
 ): WorkDefinitionManifest {
     val unsigned = WorkDefinitionManifest(
         definitionId = definitionId,
@@ -111,6 +114,7 @@ fun newWorkDefinitionManifest(
         assessment = assessment,
         hash = "",
         sourceProposal = sourceProposal,
+        assessmentPolicyVersion = assessmentPolicyVersion,
     )
     return unsigned.copy(hash = workDefinitionHash(unsigned))
 }

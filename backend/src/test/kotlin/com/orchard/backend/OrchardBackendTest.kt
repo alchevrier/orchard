@@ -2270,6 +2270,12 @@ class WorkspaceApiTest {
             definition(proposedSplitTitles = listOf("Add import", "Add export")),
         )
         val readyTask = DefaultSystemWorkflow.assess(ENTITY_TASK, definition())
+        val wildcardTask = DefaultSystemWorkflow.assess(
+            ENTITY_TASK,
+            definition().copy(repositoryEvidenceSelectors = listOf(
+                com.orchard.backend.workspace.RepositoryEvidenceSelector("owners", listOf(0), listOf("src/**/*.kt")),
+            )),
+        )
         val definitionStep = DefaultSystemWorkflow.resolve(ENTITY_TASK).stepDefinitions.single()
 
         assertEquals(DEFINITION_NEEDS_INVESTIGATION, incompleteBug.status)
@@ -2277,6 +2283,8 @@ class WorkspaceApiTest {
         assertEquals(DEFINITION_NEEDS_CLARIFICATION, ambiguousTask.status)
         assertEquals(DEFINITION_NEEDS_SPLIT, oversizedTask.status)
         assertEquals(DEFINITION_READY, readyTask.status)
+        assertEquals(DEFINITION_NEEDS_INVESTIGATION, wildcardTask.status)
+        assertEquals(listOf("repositoryEvidenceSelectors.owners.exactRepositoryCoordinates"), wildcardTask.missingFields)
         assertFalse(WorkflowStepEngine.canStart(definitionStep, emptySet()))
         assertTrue(WorkflowStepEngine.canStart(definitionStep, setOf(FACT_WORK_ITEM_EXISTS)))
         assertFalse(WorkflowStepEngine.canPerform(definitionStep, COLLABORATOR_LOCAL_LLM, ACTION_FEEDBACK))

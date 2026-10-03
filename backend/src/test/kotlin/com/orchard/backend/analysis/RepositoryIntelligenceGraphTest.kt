@@ -30,6 +30,117 @@ import kotlinx.serialization.json.Json
 
 class RepositoryIntelligenceGraphTest {
     @Test
+    fun `coordinate successor remains unaccepted and idempotent across restart`() {
+        val state = createTempDirectory("orchard-coordinate-successor-state-")
+        val repository = createTempDirectory("orchard-coordinate-successor-repository-")
+        Files.createDirectories(repository.resolve("src"))
+        Files.writeString(repository.resolve("src/Main.kt"), "class Main\n")
+        git(repository, "init")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        fun recover() = WorkspaceStore(
+            repository = com.orchard.backend.workspace.FileWorkspaceRepository(state),
+            repositoryBindings = FileRepositoryBindingStore(state),
+            workflowMemory = com.orchard.backend.workspace.FileWorkflowMemoryStore(state),
+            definitionStore = com.orchard.backend.workspace.FileWorkDefinitionStore(state),
+            collaborationStore = com.orchard.backend.workspace.FileDefinitionCollaborationStore(state),
+        )
+        val workspace = recover()
+        createProject(workspace)
+        createEpic(workspace)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_STORY, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, title = "Story")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Task")))
+        workspace.commitBatch()
+        workspace.bindRepository(1, repository.toString())
+        val definition = com.orchard.backend.workspace.WorkDefinitionSubmission(
+            "Update Main", "Old behavior", "New behavior", listOf("Update Main"), listOf("Unrelated code"), emptyList(),
+            listOf(com.orchard.backend.workspace.AcceptanceCriterion("Build passes", "Build")),
+            repositoryEvidenceSelectors = listOf(com.orchard.backend.workspace.RepositoryEvidenceSelector("main", listOf(0), listOf("src/Main.kt"))),
+        )
+        workspace.submitWorkDefinition(4, definition)
+        assertEquals(com.orchard.backend.workspace.WorkflowStartStatus.CREATED, workspace.startWorkflow(4).status)
+        val originalRun = workspace.snapshot(0).workflowRuns.single()
+        workspace.configureRepositoryCoordinateAdmission(RepositoryIntelligenceCoordinateAdmission(RepositoryIntelligenceImporter(workspace)))
+        val prepared = workspace.prepareCoordinateSuccessor(originalRun.runId)
+        assertEquals(com.orchard.backend.workspace.DefinitionCollaborationStatus.RECORDED, prepared.status)
+        val proposal = requireNotNull(prepared.proposal)
+        assertEquals(originalRun.runId, proposal.content.successorOfRunId)
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, proposal.content.coordinateRepairEvidence?.status)
+        assertEquals(listOf("src/Main.kt"), proposal.content.definition.repositoryCoordinates.map { it.path })
+        assertTrue(proposal.workItemId != originalRun.context.workItemId)
+        assertEquals(originalRun, prepared.snapshot.workflowRuns.single())
+        assertEquals(null, prepared.snapshot.definitionProposals.single { it.proposal.proposalId == proposal.proposalId }.acceptedDefinitionId)
+        assertEquals(1, prepared.snapshot.workDefinitions.size)
+        assertEquals(proposal, workspace.prepareCoordinateSuccessor(originalRun.runId).proposal)
+        val recovered = recover()
+        assertEquals(proposal, recovered.prepareCoordinateSuccessor(originalRun.runId).proposal)
+        assertEquals(originalRun, recovered.snapshot(0).workflowRuns.single())
+        recovered.configureRepositoryCoordinateAdmission(RepositoryIntelligenceCoordinateAdmission(RepositoryIntelligenceImporter(recovered)))
+        recovered.beginBatch()
+        assertTrue(recovered.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "New wildcard draft")))
+        val newWorkItemId = recovered.lastCreatedId
+        recovered.commitBatch()
+        val submitted = recovered.submitWorkDefinition(newWorkItemId, definition.copy(
+            repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map { it.copy(pathGlobs = listOf("src/*.kt")) },
+        ))
+        val manifest = submitted.snapshot.workDefinitions.single { it.workItemId == newWorkItemId }
+        assertEquals(com.orchard.backend.workspace.DEFINITION_READY, manifest.assessment.status)
+        assertEquals(listOf("src/Main.kt"), manifest.definition.repositoryEvidenceSelectors.single().pathGlobs)
+        assertEquals(listOf("src/Main.kt"), manifest.definition.repositoryCoordinates.map { it.path })
+        val healed = submitted.snapshot.definitionProposals.single { it.proposal.workItemId == newWorkItemId }
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, healed.proposal.content.coordinateRepairEvidence?.status)
+        assertEquals(healed, recover().snapshot(0).definitionProposals.single { it.proposal.workItemId == newWorkItemId })
+    }
+
+    @Test
+    fun `repairs wildcard drafts into bounded pinned coordinates without truncation`() {
+        val state = createTempDirectory("orchard-coordinate-repair-state-")
+        val repository = createTempDirectory("orchard-coordinate-repair-repository-")
+        Files.createDirectories(repository.resolve("src"))
+        Files.writeString(repository.resolve("src/Main.kt"), "class Main\n")
+        git(repository, "init")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        val revision = git(repository, "rev-parse", "HEAD")
+        val workspace = WorkspaceStore(repositoryBindings = FileRepositoryBindingStore(state))
+        createProject(workspace)
+        workspace.bindRepository(1, repository.toString())
+        val admission = RepositoryIntelligenceCoordinateAdmission(RepositoryIntelligenceImporter(workspace))
+        val definition = com.orchard.backend.workspace.WorkDefinitionSubmission(
+            requestedOutcome = "Update Main",
+            currentBehavior = "Old behavior",
+            requiredBehavior = "New behavior",
+            scope = listOf("Update Main"),
+            nonGoals = listOf("Unrelated code"),
+            constraints = emptyList(),
+            acceptanceCriteria = listOf(com.orchard.backend.workspace.AcceptanceCriterion("Build passes", "Build")),
+            repositoryEvidenceSelectors = listOf(com.orchard.backend.workspace.RepositoryEvidenceSelector(
+                "source", listOf(0), listOf("src/*.kt"), contentLiterals = listOf("class Main"),
+            )),
+        )
+        Files.writeString(repository.resolve("src/Main.kt"), "class DirtyWorkingCopy\n")
+        val repaired = admission.repair(1, repository.toString(), revision, definition)
+        assertEquals(listOf("src/Main.kt"), repaired.definition.repositoryEvidenceSelectors.single().pathGlobs)
+        assertEquals(listOf("src/Main.kt"), repaired.definition.repositoryCoordinates.map { it.path })
+        assertEquals(listOf(0), repaired.definition.repositoryCoordinates.single().scopeIndexes)
+        assertEquals(revision, repaired.evidence?.repositoryRevision)
+        assertEquals(sha256Content("class Main\n"), repaired.evidence?.resolutions?.single()?.sourceHash)
+        assertEquals(null, repaired.diagnostic)
+        assertEquals(repaired, admission.repair(1, repository.toString(), revision, repaired.definition))
+        val missing = definition.copy(repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map { it.copy(pathGlobs = listOf("missing/*.kt")) })
+        assertEquals(missing, admission.repair(1, repository.toString(), revision, missing).definition)
+        assertTrue(admission.repair(1, repository.toString(), revision, missing).diagnostic != null)
+        (1..17).forEach { index -> Files.writeString(repository.resolve("src/Extra$index.kt"), "class Extra$index\n") }
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Too broad")
+        val oversized = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition)
+        assertEquals(definition, oversized.definition)
+        assertEquals(null, oversized.evidence)
+        assertTrue(oversized.diagnostic.orEmpty().contains("instead of truncating"))
+    }
+
+    @Test
     fun `imports committed submodule gitlinks as opaque pinned artifacts`() {
         val state = createTempDirectory("orchard-intelligence-gitlink-state-")
         val repository = createTempDirectory("orchard-intelligence-gitlink-repository-")

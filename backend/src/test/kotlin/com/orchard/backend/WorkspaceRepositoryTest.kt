@@ -75,6 +75,37 @@ import kotlinx.serialization.json.Json
 
 class WorkspaceRepositoryTest {
     @Test
+    fun legacyWildcardAssessmentRestoresButCannotStartDelivery() = withTempDirectory { directory ->
+        val repository = FileWorkspaceRepository(directory)
+        val definitions = FileWorkDefinitionStore(directory)
+        val collaboration = FileDefinitionCollaborationStore(directory)
+        val initial = WorkspaceStore(repository = repository)
+        initial.beginBatch()
+        assertTrue(initial.applyIntent(intent(ENTITY_PROJECT, "Project")))
+        assertTrue(initial.applyIntent(intent(ENTITY_EPIC, "Epic", projectId = 1)))
+        assertTrue(initial.applyIntent(intent(ENTITY_STORY, "Story", projectId = 1, epicId = 2)))
+        assertTrue(initial.applyIntent(intent(ENTITY_TASK, "Task", projectId = 1, epicId = 2, storyId = 3)))
+        initial.commitBatch()
+        val definition = readyDefinition().copy(repositoryEvidenceSelectors = listOf(
+            RepositoryEvidenceSelector("source", listOf(0), listOf("src/*.kt")),
+        ))
+        val proposal = newDefinitionProposal(1, 4, 1, null, "HUMAN", DefinitionProposalContent(definition), null)
+        collaboration.appendEvent(DefinitionCollaborationEvent(1, proposal = proposal))
+        val manifest = com.orchard.backend.workspace.newWorkDefinitionManifest(
+            1, 1, 4, com.orchard.backend.workspace.DefaultSystemWorkflow.resolve(ENTITY_TASK), definition,
+            com.orchard.backend.workspace.DefaultSystemWorkflow.assess(ENTITY_TASK, definition, 1),
+            com.orchard.backend.workspace.DefinitionProposalReference(1, proposal.hash),
+            assessmentPolicyVersion = 1,
+        )
+        definitions.append(manifest)
+        assertTrue("assessmentPolicyVersion" !in Json.encodeToString(manifest))
+        val recovered = WorkspaceStore(repository = repository, definitionStore = definitions, collaborationStore = collaboration)
+        assertEquals(manifest, recovered.snapshot(0).workDefinitions.single())
+        assertEquals(DEFINITION_READY, manifest.assessment.status)
+        assertEquals(WorkflowStartStatus.WORK_DEFINITION_NOT_READY, recovered.startWorkflow(4).status)
+    }
+
+    @Test
     fun eligibleCircuitNodeDispatchRecoversExactlyOnceAfterRestart() = withTempDirectory { directory ->
         val dispatchStore = FileCircuitDispatchStore(directory)
         val first = WorkspaceStore(

@@ -38,6 +38,7 @@ The server installs `ContentNegotiation` with `kotlinx.serialization`. Decoding 
 | --- | --- | --- |
 | `POST` | `/api/work-items/{workItemId}/definitions` | Record a work definition |
 | `POST` | `/api/work-items/{workItemId}/definition-proposals` | Generate a definition proposal |
+| `POST` | `/api/workflow-runs/{runId}/coordinate-successor` | Deterministically prepare one coordinate-pinned successor task and unaccepted proposal for a legacy run |
 | `POST` | `/api/definition-proposals/{proposalId}/feedback` | Add proposal feedback |
 | `POST` | `/api/definition-proposals/{proposalId}/accept` | Accept a proposal, optionally with edited definition |
 | `POST` | `/api/staged-plans` | Record a staged delivery plan |
@@ -50,6 +51,10 @@ The server installs `ContentNegotiation` with `kotlinx.serialization`. Decoding 
 | `POST` | `/api/workflow-runs/{runId}/cancel` | Cancel a run |
 
 Work definitions may include `repositoryEvidenceSelectors`. Each selector binds stable `scopeIndexes` to repository-relative `pathGlobs` and optional exact `contentLiterals`. `ALL_MATCHES` requires every matching file; `AFFINE_TEST` selects the matching test path with the strongest common path prefix to its `affinitySelectorId`. Empty selector lists are omitted so historical definition hashes remain unchanged.
+
+Wildcard selectors are discovery input, not admissible delivery authority. Proposal recording automatically attempts deterministic repair against the bound repository's committed intelligence manifest: selectors become exact paths and linked typed coordinates, with `coordinateRepairEvidence` recording revision, manifest versions, node IDs, and source hashes. Repair is atomic and bounded to 16 paths; empty, oversized, incomplete, or unsupported discovery retains the draft with `coordinateRepairDiagnostic` instead of truncating scope. Unrepaired wildcard definitions assess `NEEDS_INVESTIGATION`, never `READY`, and workflow start reassesses historical definitions under the current policy. Repair does not grant acceptance.
+
+For a legacy run lacking coordinate admission, the pilot advertises `prepare-coordinate-successor`. The endpoint creates a separate successor work item and unaccepted proposal carrying `successorOfRunId`; repeated calls, including after restart, return the same proposal. The source run and its pinned definition remain unchanged. The pilot then requires human acceptance of the prepared proposal before the successor's separate delivery admission. No model call or retry authority is consumed by repair.
 
 Model-backed repository analysis may also require `repositoryCoordinates`. Each coordinate has a stable `coordinateId`, one exact repository-relative `path`, and linked `scopeIndexes`. Coordinates are graph-query roots; they must not contain wildcard syntax. Selectors remain complete-scope validation inventory and do not automatically authorize model context. At workflow start, Orchard ensures a compatible manifest for the pinned revision and persists the admitted coordinate node IDs, source hashes, extractor version, and policy version in the immutable workflow context. A missing, unresolved, ambiguous, unsupported, or stale coordinate returns `422 Unprocessable Entity` and creates no run. Repository analysis and pilot authorization both verify that persisted evidence still matches the compatible manifest. The resulting execution-plan provenance records each resolved coordinate alongside the manifest and graph-context trace.
 

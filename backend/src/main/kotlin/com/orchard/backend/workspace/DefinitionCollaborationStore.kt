@@ -15,10 +15,17 @@ const val COLLABORATOR_HUMAN = "HUMAN"
 const val COLLABORATOR_LOCAL_LLM = "LOCAL_LLM"
 
 @Serializable
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 data class DefinitionProposalContent(
     val definition: WorkDefinitionSubmission,
     val observations: List<String> = emptyList(),
     val assumptions: List<String> = emptyList(),
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val coordinateRepairEvidence: RepositoryCoordinateAdmissionEvidence? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val coordinateRepairDiagnostic: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val successorOfRunId: Long? = null,
 )
 
 @Serializable
@@ -101,6 +108,7 @@ enum class DefinitionCollaborationStatus {
     STORAGE_UNAVAILABLE,
 }
 
+@Serializable
 data class DefinitionCollaborationResult(
     val status: DefinitionCollaborationStatus,
     val snapshot: WorkspaceSnapshot,

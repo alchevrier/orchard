@@ -97,6 +97,13 @@ data class RepositoryCoordinateAdmissionEvidence(
 )
 
 interface RepositoryCoordinateAdmission {
+    fun repair(
+        projectId: Int,
+        repositoryPath: String,
+        repositoryRevision: String,
+        definition: WorkDefinitionSubmission,
+    ): RepositoryCoordinateRepair = RepositoryCoordinateRepair(definition)
+
     fun assess(
         projectId: Int,
         repositoryPath: String,
@@ -104,6 +111,12 @@ interface RepositoryCoordinateAdmission {
         coordinates: List<RepositoryCoordinate>,
     ): RepositoryCoordinateAdmissionEvidence
 }
+
+data class RepositoryCoordinateRepair(
+    val definition: WorkDefinitionSubmission,
+    val evidence: RepositoryCoordinateAdmissionEvidence? = null,
+    val diagnostic: String? = null,
+)
 
 internal fun exactRepositoryCoordinatePaths(definition: WorkDefinitionSubmission?): List<String> =
     definition?.repositoryCoordinates.orEmpty().map { it.path }.distinct()
@@ -165,7 +178,8 @@ object DefaultSystemWorkflow {
         )
     }
 
-    fun assess(workItemType: Int, submission: WorkDefinitionSubmission): DefinitionAssessment {
+    fun assess(workItemType: Int, submission: WorkDefinitionSubmission, policyVersion: Int = 2): DefinitionAssessment {
+        require(policyVersion in 1..2) { "Unsupported definition assessment policy" }
         resolve(workItemType)
         val step = resolve(workItemType).stepDefinitions.single()
         if (submission.proposedSplitTitles.any { it.isNotBlank() }) {
@@ -183,6 +197,11 @@ object DefaultSystemWorkflow {
             }
             if (workItemType == ENTITY_BUG && submission.reproduction.isBlank()) add("reproduction")
             if (workItemType == ENTITY_BUG && submission.regressionCriterion.isBlank()) add("regressionCriterion")
+            submission.repositoryEvidenceSelectors.filter { policyVersion >= 2 }.forEach { selector ->
+                if (selector.pathGlobs.any { path -> path.any { it in "*?[]{}" } }) {
+                    add("repositoryEvidenceSelectors.${selector.selectorId}.exactRepositoryCoordinates")
+                }
+            }
         }
         if (missing.isNotEmpty()) return assessment(step, DEFINITION_NEEDS_INVESTIGATION, missing)
         val ambiguities = submission.unresolvedQuestions.filter { it.isNotBlank() }

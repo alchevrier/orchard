@@ -1666,6 +1666,15 @@ fun Application.workspaceApi(
             }
             call.respond(status, result.snapshot)
         }
+        post("/api/workflow-runs/{runId}/coordinate-successor") {
+            val runId = call.parameters["runId"]?.toLongOrNull()
+            if (runId == null || runId <= 0) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.prepareCoordinateSuccessor(runId)
+            call.respond(collaborationStatus(result.status), result)
+        }
         post("/api/definition-proposals/{proposalId}/feedback") {
             val proposalId = call.parameters["proposalId"]?.toLongOrNull()
             val request = runCatching { call.receive<DefinitionFeedbackRequest>() }.getOrNull()

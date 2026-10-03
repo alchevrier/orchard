@@ -256,8 +256,12 @@ internal fun compilePilotStatus(
     val latestActiveAttempt = analysisAttempts.asReversed().firstOrNull { attempt ->
         activeRuns.any { it.runId == attempt.runId }
     }
-    val run = latestActiveAttempt?.let { attempt -> activeRuns.singleOrNull { it.runId == attempt.runId } }
+    val selectedRun = latestActiveAttempt?.let { attempt -> activeRuns.singleOrNull { it.runId == attempt.runId } }
         ?: activeRuns.maxByOrNull { it.runId }
+    val successorWorkItemIds = snapshot.definitionProposals.filter {
+        it.proposal.content.successorOfRunId == selectedRun?.runId && it.acceptedDefinitionId != null
+    }.map { it.proposal.workItemId }
+    val run = activeRuns.lastOrNull { it.context.workItemId in successorWorkItemIds } ?: selectedRun
     val attempt = run?.let { selected -> analysisAttempts.lastOrNull { it.runId == selected.runId } }
     val plan = run?.let { selected -> analysisPlans.lastOrNull { it.runId == selected.runId } }
     val objective = selectObjective(objectives, run)
@@ -270,6 +274,7 @@ internal fun compilePilotStatus(
         plan,
         run?.let(intelligenceReady) ?: true,
         run?.let(coordinatesReady) ?: true,
+        run?.let { selected -> snapshot.definitionProposals.lastOrNull { it.proposal.content.successorOfRunId == selected.runId } },
     )
     val state = when {
         run == null -> "IDLE"
@@ -400,6 +405,7 @@ private fun compileActions(
     plan: RepositoryExecutionPlan?,
     intelligenceReady: Boolean,
     coordinatesReady: Boolean,
+    coordinateSuccessor: com.orchard.backend.workspace.DefinitionProposalView?,
 ): Pair<List<PilotAction>, List<PilotAction>> {
     if (run == null) return emptyList<PilotAction>() to emptyList()
     val authorized = when {
@@ -410,7 +416,13 @@ private fun compileActions(
             PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
         )
         !coordinatesReady -> listOf(
-            PilotAction("inspect-work-definition-coordinates", "GET", "/api/workspace", "READ_ONLY", "Repository analysis requires exact repository-relative scope paths in a successor work definition before model admission."),
+            if (coordinateSuccessor == null) {
+                PilotAction("prepare-coordinate-successor", "POST", "/api/workflow-runs/${run.runId}/coordinate-successor", "DETERMINISTIC", "Resolve bounded pinned repository paths into a successor proposal without rewriting the source run or invoking a model.")
+            } else if (coordinateSuccessor.acceptedDefinitionId == null) {
+                PilotAction("accept-coordinate-successor", "POST", "/api/definition-proposals/${coordinateSuccessor.proposal.proposalId}/accept", "HUMAN_AUTHORITY", "Review and accept the coordinate-pinned successor proposal before delivery admission.")
+            } else {
+                PilotAction("start-coordinate-successor", "POST", "/api/work-items/${coordinateSuccessor.proposal.workItemId}/runs", "DETERMINISTIC", "The accepted coordinate-pinned successor may pass its own delivery admission; do not retry the source run.")
+            },
         )
         attempt?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED -> listOf(
             PilotAction("retry-repository-analysis", "POST", "/api/repository-analysis/runs/${run.runId}/tick", "MODEL_DELIVERY", attempt.diagnostic),

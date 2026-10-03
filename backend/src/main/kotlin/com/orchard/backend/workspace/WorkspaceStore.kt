@@ -704,6 +704,64 @@ class WorkspaceStore(
         repositoryCoordinateAdmission = admission
     }
 
+    @Synchronized
+    fun prepareCoordinateSuccessor(runId: Long): DefinitionCollaborationResult {
+        val run = workflowRuns.singleOrNull { it.runId == runId }
+            ?: return collaborationFailure(DefinitionCollaborationStatus.WORK_ITEM_NOT_FOUND, "The source run does not exist.")
+        collaborationEvents.mapNotNull { it.proposal }.lastOrNull { it.content.successorOfRunId == runId }?.let {
+            return DefinitionCollaborationResult(DefinitionCollaborationStatus.RECORDED, snapshot(MESSAGE_DEFINITION_COLLABORATION), it)
+        }
+        val source = run.workDefinition?.definition
+            ?: return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "The source run has no pinned work definition.")
+        val head = runCatching { repositoryBindings.resolveHead(run.context.projectId) }.getOrNull()
+            ?: return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "The bound repository is unavailable.")
+        if (!head.clean) return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "Commit repository changes before preparing a coordinate successor.")
+        val repair = repositoryCoordinateAdmission?.repair(run.context.projectId, head.path, head.commitHash, source)
+        if (repair?.evidence?.status != RepositoryCoordinateAdmissionStatus.READY) return collaborationFailure(
+            DefinitionCollaborationStatus.INVALID_RECORD,
+            repair?.diagnostic ?: "Exact coordinate discovery is unavailable; do not retry broad analysis.",
+        )
+        val workItem = requireNotNull(committedEntity(run.context.workItemId))
+        val story = requireNotNull(committedEntity(workItem.parentId, ENTITY_STORY))
+        val marker = "coordinateSuccessorOfRunId=$runId\n"
+        var successor = entities.take(committedEntityCount).singleOrNull { it.content.startsWith(marker) }
+        if (successor == null) {
+            if (batchActive) return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "Finish the current workspace batch before preparing a successor.")
+            beginBatch()
+            try {
+                if (!applyIntent(DocumentIntent(
+                        actionTypeId = ACTION_CREATE,
+                        entityTypeId = workItem.type,
+                        boundWorkflowId = workItem.workflowId,
+                        projectId = run.context.projectId,
+                        epicId = story.parentId,
+                        storyId = story.id,
+                        title = workItem.title,
+                        content = marker + workItem.content,
+                    ))) {
+                    rollbackBatch()
+                    return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "The successor work item could not be admitted.")
+                }
+                val successorId = lastCreatedId
+                commitBatch()
+                successor = committedEntity(successorId)
+            } catch (_: Exception) {
+                if (batchActive) rollbackBatch()
+                return collaborationFailure(DefinitionCollaborationStatus.STORAGE_UNAVAILABLE, "The successor work item could not be saved.")
+            }
+        }
+        return recordDefinitionProposal(
+            requireNotNull(successor).id,
+            COLLABORATOR_HUMAN,
+            DefinitionProposalContent(
+                definition = repair.definition,
+                observations = listOf("Deterministically resolved successor scope from run $runId at repository revision ${head.commitHash}; the source run remains immutable."),
+                coordinateRepairEvidence = repair.evidence,
+                successorOfRunId = runId,
+            ),
+        )
+    }
+
     private fun persistWorkDefinition(
         workItemId: Int,
         submission: WorkDefinitionSubmission,
@@ -803,7 +861,13 @@ class WorkspaceStore(
             DefinitionCollaborationStatus.WORKFLOW_ALREADY_STARTED,
             "Definition collaboration is closed after delivery starts.",
         )
-        val definition = normalizeDefinition(content.definition)
+        val originalDefinition = normalizeDefinition(content.definition)
+        val project = projectFor(workItem)
+        val head = project?.let { runCatching { repositoryBindings.resolveHead(it.id) }.getOrNull() }
+        val repair = if (head != null && repositoryCoordinateAdmission != null && validDefinitionSize(originalDefinition)) {
+            repositoryCoordinateAdmission?.repair(requireNotNull(project).id, head.path, head.commitHash, originalDefinition)
+        } else null
+        val definition = repair?.definition ?: originalDefinition
         if (
             actor !in setOf(COLLABORATOR_HUMAN, COLLABORATOR_LOCAL_LLM) ||
             (actor == COLLABORATOR_LOCAL_LLM && provenance == null) ||
@@ -844,6 +908,8 @@ class WorkspaceStore(
                 definition = definition,
                 observations = content.observations.map(String::trim),
                 assumptions = content.assumptions.map(String::trim),
+                coordinateRepairEvidence = repair?.evidence ?: content.coordinateRepairEvidence,
+                coordinateRepairDiagnostic = repair?.diagnostic,
             ),
             provenance = provenance,
             conversationCommand = conversationCommand,
@@ -1221,7 +1287,9 @@ class WorkspaceStore(
             }
         }
         val workDefinition = workDefinitions.lastOrNull { it.workItemId == workItemId }
-        if (workDefinition?.assessment?.status != DEFINITION_READY) return workflowFailure(
+        if (workDefinition?.assessment?.status != DEFINITION_READY ||
+            DefaultSystemWorkflow.assess(workItem.type, workDefinition.definition).status != DEFINITION_READY
+        ) return workflowFailure(
             WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
             "Complete the system work-definition workflow before starting delivery.",
         )
@@ -1856,7 +1924,7 @@ class WorkspaceStore(
             require(DefaultSystemWorkflow.isCompatible(manifest.systemWorkflow)) {
                 "Work definition ${manifest.definitionId} references an invalid system workflow"
             }
-            require(manifest.assessment == DefaultSystemWorkflow.assess(workItem.type, manifest.definition)) {
+            require(manifest.assessment == DefaultSystemWorkflow.assess(workItem.type, manifest.definition, manifest.assessmentPolicyVersion)) {
                 "Work definition ${manifest.definitionId} has an invalid assessment"
             }
             manifest.sourceProposal?.let { source ->

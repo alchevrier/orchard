@@ -3,6 +3,7 @@
 package com.orchard.backend.analysis
 
 import com.orchard.backend.agent.sha256Content
+import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.workspace.ProjectGenesisView
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.exactRepositoryScopePaths
@@ -11,6 +12,9 @@ import com.orchard.backend.workspace.RepositoryCoordinateAdmission
 import com.orchard.backend.workspace.RepositoryCoordinateAdmissionEvidence
 import com.orchard.backend.workspace.RepositoryCoordinateAdmissionStatus
 import com.orchard.backend.workspace.RepositoryCoordinateResolutionEvidence
+import com.orchard.backend.workspace.RepositoryCoordinateRepair
+import com.orchard.backend.workspace.WorkDefinitionSubmission
+import com.orchard.backend.workspace.REPOSITORY_EVIDENCE_MATCH_ALL
 import com.orchard.backend.workspace.WorkflowRunView
 import com.orchard.backend.workspace.WorkspaceEntity
 import com.orchard.backend.workspace.WorkspaceStore
@@ -19,6 +23,7 @@ import com.orchard.backend.workspace.stagedPlanHash
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
+import java.nio.file.FileSystems
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
@@ -227,6 +232,63 @@ internal fun coordinateAdmissionMatchesGraph(
 class RepositoryIntelligenceCoordinateAdmission(
     private val importer: RepositoryIntelligenceImporter,
 ) : RepositoryCoordinateAdmission {
+    override fun repair(
+        projectId: Int,
+        repositoryPath: String,
+        repositoryRevision: String,
+        definition: WorkDefinitionSubmission,
+    ): RepositoryCoordinateRepair {
+        if (definition.repositoryEvidenceSelectors.isEmpty()) return RepositoryCoordinateRepair(definition)
+        return runCatching {
+            val graph = importer.ensure(projectId, repositoryPath, repositoryRevision).graph
+            val paths = graph.nodes.filter { it.kind != INTELLIGENCE_NODE_SYMBOL && it.contentHash != null }
+                .mapNotNull { it.path }.distinct().sorted()
+            val candidates = definition.repositoryEvidenceSelectors.associate { selector ->
+                val matchers = selector.pathGlobs.map { FileSystems.getDefault().getPathMatcher("glob:$it") }
+                selector.selectorId to paths.filter { path -> matchers.any { it.matches(Path.of(path)) } }
+            }
+            val selectedPaths = candidates.values.flatten().distinct().sorted()
+            require(selectedPaths.isNotEmpty() && selectedPaths.size <= 16) {
+                "Repository coordinate repair requires 1..16 exact paths; narrow or split the definition instead of truncating wildcard matches."
+            }
+            val sources = if (definition.repositoryEvidenceSelectors.any { it.contentLiterals.isNotEmpty() }) {
+                LocalCodingWorkspaceGateway().collectIntelligenceContext(repositoryPath, repositoryRevision, selectedPaths)
+                    .files.associate { it.path to it.content }
+            } else emptyMap()
+            require(definition.repositoryEvidenceSelectors.none { it.contentLiterals.isNotEmpty() } || sources.keys.containsAll(selectedPaths)) {
+                "Pinned content discovery is incomplete; do not repair from partial source evidence."
+            }
+            val selectors = definition.repositoryEvidenceSelectors.map { selector ->
+                val resolved = candidates.getValue(selector.selectorId).filter { path ->
+                    when {
+                        selector.contentLiterals.isEmpty() -> true
+                        sources[path] == null -> false
+                        selector.contentMatch == REPOSITORY_EVIDENCE_MATCH_ALL -> selector.contentLiterals.all(requireNotNull(sources[path])::contains)
+                        else -> selector.contentLiterals.any(requireNotNull(sources[path])::contains)
+                    }
+                }
+                require(resolved.isNotEmpty()) { "Selector ${selector.selectorId} has no supported pinned source matches; exact coordinates require investigation." }
+                selector.copy(pathGlobs = resolved)
+            }
+            val existing = definition.repositoryCoordinates
+            val ids = existing.mapTo(mutableSetOf()) { it.coordinateId }
+            val coordinates = selectors.flatMap { selector ->
+                selector.pathGlobs.map { path -> path to selector.scopeIndexes }
+            }.groupBy({ it.first }, { it.second }).map { (path, scopes) ->
+                val current = existing.singleOrNull { it.path == path }
+                var id = current?.coordinateId ?: "resolved-${sha256Content(path).take(12)}"
+                if (current == null) while (!ids.add(id)) id += "-anchor"
+                RepositoryCoordinate(id, path, (scopes.flatten() + current?.scopeIndexes.orEmpty()).distinct().sorted())
+            } + existing.filter { coordinate -> selectors.none { coordinate.path in it.pathGlobs } }
+            require(coordinates.size <= 16) { "Repository coordinate repair exceeds the bounded definition size; split the definition." }
+            val evidence = assess(projectId, repositoryPath, repositoryRevision, coordinates)
+            require(evidence.status == RepositoryCoordinateAdmissionStatus.READY) { evidence.diagnostic.orEmpty() }
+            RepositoryCoordinateRepair(definition.copy(repositoryEvidenceSelectors = selectors, repositoryCoordinates = coordinates), evidence)
+        }.getOrElse { failure ->
+            RepositoryCoordinateRepair(definition, diagnostic = failure.message ?: "Pinned repository coordinate repair is unavailable.")
+        }
+    }
+
     override fun assess(
         projectId: Int,
         repositoryPath: String,

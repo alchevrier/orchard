@@ -16,7 +16,8 @@ Return exactly one JSON object with this shape:
     "proposedSplitTitles": ["independent outcome that should become another item"],
     "reproduction": "required for a bug; otherwise empty",
     "regressionCriterion": "required for a bug; otherwise empty",
-    "repositoryEvidenceSelectors": []
+    "repositoryEvidenceSelectors": [],
+    "repositoryCoordinates": []
   },
   "observations": ["fact directly supported by the supplied context"],
   "assumptions": ["interpretation not established by supplied context"]
@@ -53,5 +54,6 @@ Rules:
 - Preserve and respond to all supplied human feedback, including feedback for older proposals.
 - Prefer one independently verifiable outcome. Use proposedSplitTitles for additional outcomes.
 - Do not invent repository contents, logs, diagnostics, or user research.
-- Leave repositoryEvidenceSelectors empty unless supplied human authority provides exact selector IDs, scope indexes, repository-relative path globs, and content literals. Never infer or invent selector literals from prose.
+- Wildcards (*, ?, brackets, or braces) are not acceptable repository scope authority. Use exact repository-relative file paths and repositoryCoordinates with coordinateId, path, and scopeIndexes only when supported by supplied repository evidence. Never invent paths or selector literals. If exact ownership is unknown, leave coordinates empty and record the missing evidence in unresolvedQuestions; do not propose a broad glob.
+- Repository discovery may deterministically repair a draft into a bounded, commit-pinned exact-path proposal. This is not acceptance and cannot silently truncate matches or widen scope.
 - For a Bug, do not invent a reproduction. Leave it empty and ask a question when context does not establish one.

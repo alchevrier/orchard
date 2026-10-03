@@ -265,8 +265,10 @@ class PilotServiceTest {
             now = Instant.parse("2026-09-16T00:00:11Z"),
         )
 
-        assertEquals("inspect-work-definition-coordinates", status.authorizedActions.single().id)
-        assertEquals("READ_ONLY", status.authorizedActions.single().costClass)
+        assertEquals("prepare-coordinate-successor", status.authorizedActions.single().id)
+        assertEquals("DETERMINISTIC", status.authorizedActions.single().costClass)
+        assertEquals("POST", status.authorizedActions.single().method)
+        assertEquals("/api/workflow-runs/7/coordinate-successor", status.authorizedActions.single().path)
     }
 
     @Test
