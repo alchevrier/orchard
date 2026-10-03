@@ -37,6 +37,19 @@ import kotlinx.serialization.json.Json
 
 class PilotServiceTest {
     @Test
+    fun `pilot initial analysis dispatch targets the selected run`() {
+        val status = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run())),
+            analysisAttempts = emptyList(), analysisPlans = emptyList(), providerEvents = emptyList(), resources = null, objectives = emptyList(),
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+        val action = status.authorizedActions.single()
+        assertEquals("run-repository-analysis", action.id)
+        assertEquals("/api/repository-analysis/runs/7/tick", action.path)
+        assertEquals("MODEL_DELIVERY", action.costClass)
+    }
+
+    @Test
     fun `pilot refreshes missing intelligence for admitted coordinates before requesting another successor`() {
         val admitted = run().copy(context = run().context.copy(
             repositoryCoordinateAdmission = com.orchard.backend.workspace.RepositoryCoordinateAdmissionEvidence(

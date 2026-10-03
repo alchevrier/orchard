@@ -445,7 +445,7 @@ private fun compileActions(
             PilotAction("run-coding-worker", "POST", "/api/coding-worker/runs/${run.runId}/tick", "MODEL_DELIVERY", "An admitted execution plan is ready for implementation."),
         )
         else -> listOf(
-            PilotAction("run-repository-analysis", "POST", "/api/repository-analysis/tick", "MODEL_DELIVERY", "The workflow has no repository execution plan."),
+            PilotAction("run-repository-analysis", "POST", "/api/repository-analysis/runs/${run.runId}/tick", "MODEL_DELIVERY", "The selected workflow has no repository execution plan; dispatch only its admitted analysis."),
         )
     }
     val disallowed = buildList {
