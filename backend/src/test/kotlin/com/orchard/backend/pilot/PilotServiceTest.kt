@@ -51,12 +51,12 @@ class PilotServiceTest {
                 coordinateRepairVersion = 1,
             ), null,
         )
-        fun status(currentBasis: Boolean) = compilePilotStatus(
+        fun status(currentBasis: Boolean, hasIntelligence: Boolean = true) = compilePilotStatus(
             snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run()), definitionProposals = listOf(
                 com.orchard.backend.workspace.DefinitionProposalView(proposal, emptyList()),
             )),
             analysisAttempts = emptyList(), analysisPlans = emptyList(), providerEvents = emptyList(), resources = null, objectives = emptyList(),
-            coordinatesReady = { false }, repairBasisCurrent = { currentBasis },
+            intelligenceReady = { hasIntelligence }, coordinatesReady = { false }, repairBasisCurrent = { currentBasis },
             now = Instant.parse("2026-09-16T00:00:11Z"),
         )
         val clarification = status(true).authorizedActions.single()
@@ -64,10 +64,12 @@ class PilotServiceTest {
         assertEquals("HUMAN_AUTHORITY", clarification.costClass)
         assertEquals("/api/definition-proposals/1/feedback", clarification.path)
         assertEquals(proposal.content.coordinateRepairDiagnostic, clarification.reason)
+        assertEquals(clarification, status(true, hasIntelligence = false).authorizedActions.single())
         val upgraded = status(false).authorizedActions.single()
         assertEquals("prepare-coordinate-successor", upgraded.id)
         assertEquals("DETERMINISTIC", upgraded.costClass)
         assertEquals("/api/workflow-runs/7/coordinate-successor", upgraded.path)
+        assertEquals(upgraded, status(false, hasIntelligence = false).authorizedActions.single())
     }
 
     @Test

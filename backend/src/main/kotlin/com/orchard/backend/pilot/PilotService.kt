@@ -417,9 +417,6 @@ private fun compileActions(
         attempt?.state == ANALYSIS_ATTEMPT_RUNNING -> listOf(
             PilotAction("inspect-provider-progress", "GET", "/api/model-providers/audit-events?limit=20", "READ_ONLY", "A model call owns this run; inspect progress without starting another inference."),
         )
-        !intelligenceReady -> listOf(
-            PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
-        )
         !coordinatesReady -> listOf(
             if (coordinateSuccessor == null || (!repairBasisCurrent && coordinateSuccessor.acceptedDefinitionId == null)) {
                 PilotAction("prepare-coordinate-successor", "POST", "/api/workflow-runs/${run.runId}/coordinate-successor", "DETERMINISTIC", "Resolve bounded pinned repository paths into a successor proposal without rewriting the source run or invoking a model.")
@@ -430,6 +427,9 @@ private fun compileActions(
             } else {
                 PilotAction("start-coordinate-successor", "POST", "/api/work-items/${coordinateSuccessor.proposal.workItemId}/runs", "DETERMINISTIC", "The accepted coordinate-pinned successor may pass its own delivery admission; do not retry the source run.")
             },
+        )
+        !intelligenceReady -> listOf(
+            PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
         )
         attempt?.state == ANALYSIS_ATTEMPT_RETRY_AUTHORIZED -> listOf(
             PilotAction("retry-repository-analysis", "POST", "/api/repository-analysis/runs/${run.runId}/tick", "MODEL_DELIVERY", attempt.diagnostic),
