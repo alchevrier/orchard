@@ -178,6 +178,89 @@ Faithfulness requires an auditable mapping from every model-facing actionable it
 
 The current scope is context quality and faithful frame compilation. Model-resource scheduling, semaphores, resource leases, provider KV-cache swapping, and a general offline semantic adjudicator are not prerequisites for completing this decision.
 
+## Implementation Trace: 2026-10-03
+
+The following source trace was performed at `b70019b`, without live inference. It answers the code-path questions above; semantic acceptance criteria and their implementation remain proposed. The exact historical pre-inference prompt for attempt 646 is still unavailable, so this trace must not be presented as a replay of that prompt.
+
+### Repository Analysis Is Not a Coding-Frame Consumer
+
+Production wiring injects repository intelligence into analysis and injects analysis into the coding worker in [OrchardApplication](../../backend/src/main/kotlin/com/orchard/backend/OrchardApplication.kt#L333). The worker requires a current plan before coding when that production dependency is present.
+
+The analysis path is:
+
+```text
+immutable run definition and coordinate admission
+	-> compatible pinned intelligence manifest
+	-> graph-local coordinate roots and neighbors
+	-> pinned source excerpts and selector memberships
+	-> required path selection
+	-> independent analysis envelope and compaction
+	-> provider request
+	-> strict candidate decoding
+	-> deterministic owner, scope, and verification compilation
+	-> plan validation and persistence
+```
+
+[RepositoryAnalysisService.analyze](../../backend/src/main/kotlin/com/orchard/backend/analysis/RepositoryAnalysisService.kt#L485) does not create or consume `AttentionFrame`. The graph selection preserves coordinates and reports omitted paths and unresolved boundaries, but projects its selected paths into source collection; graph relationships and boundary diagnostics are not fields of `CodingRepositoryContext`. The analysis envelope instead serializes scope text, selectors/path groups, repeated evidence identities, criteria, commands, and retry diagnostics. It has no explicit actionable/evidence-only or active/deferred frame contract.
+
+[Graph-local selection](../../backend/src/main/kotlin/com/orchard/backend/analysis/RepositoryIntelligenceGraph.kt#L150) defaults to 24 paths, favoring anchors before neighbors. `boundedRepositoryAnalysisPaths` separately takes 24 paths. These are context-selection limits, not the removed coordinate-admission cap. The graph trace records omissions, but the model envelope does not express the omitted authority as deferred obligations. This risk is separate from attempt 646, where all 23 required paths were represented.
+
+[Envelope construction and compaction](../../backend/src/main/kotlin/com/orchard/backend/analysis/RepositoryAnalysisService.kt#L709) retains fixed authority fields while shrinking `repositoryContext`. `requiredEvidence` describes `authorityContext`, not necessarily the final excerpt set; presence in that inventory does not prove that usable source reached the model. The compactor checks required path availability, size, and nonempty content, can remove matched declarations, and has no semantic adequacy predicate. Its null results are all reported at this call site as budget overflow.
+
+After inference, [candidate compilation](../../backend/src/main/kotlin/com/orchard/backend/analysis/RepositoryAnalysisService.kt#L1379) narrows source operations and constructs a plan. Subsequent owner, scope, and verification compilation and `validateOutput` enforce admitted criteria, path/scope relationships, operation shape, and commands before persistence. This is real downstream authority enforcement, but it does not establish that the preceding model input exposed adequate behavior evidence.
+
+### Coding Frames Preserve Authority, Not Excerpt Sufficiency
+
+The production coding path is:
+
+```text
+accepted execution plan and work definition
+	-> executable work package with source and evidence authority
+	-> coding Attention frame
+	-> structural frame verification
+	-> work-package ownership paths and plan/task lexical query
+	-> fresh pinned source excerpts
+	-> frame-bearing coding envelope
+	-> provider request
+	-> strict tool-batch decoding
+	-> frame path/action drift check
+	-> work-package application and verification
+```
+
+[CodingWorkerService](../../backend/src/main/kotlin/com/orchard/backend/agent/CodingWorkerService.kt#L350) builds the package, then compiles and verifies the frame before source collection. [Frame compilation and verification](../../backend/src/main/kotlin/com/orchard/backend/attention/AttentionFrame.kt#L103) preserve objective and purpose hashes, plan/package identity, active and deferred operation orders, correlations, ownership, constraints, invariants, non-goals, and checks. Evidence-only correlations carry citations and no mutation actions. Returned coding actions are checked by `attentionOperationDiagnostic` against actionable paths and allowed actions.
+
+The verifier receives the frame, plan, package, and project purpose, not the newly excerpted repository context or final prompt. Its `adequate` result certifies structural checks, not source-semantic sufficiency. The code does not run a second frame-to-excerpt quality gate after retrieval or serialization.
+
+[Coding prompt assembly](../../backend/src/main/kotlin/com/orchard/backend/agent/CodingWorkerService.kt#L539) selects source paths from `workPackage.ownership.paths`. It embeds the frame, but does not compile source selection from the frame's correlations, prerequisite evidence, or read-only citations. Consequently, read-only evidence can remain as a citation without its source bytes; prerequisite and deferred operations survive as orders, not complete expanded evidence relationships. These can be intentional bounded projections, but their adequacy is not currently checked. Package operation instructions and complete package sources are not serialized as a work package; the prompt uses the frame's behavior/criteria and freshly collected excerpts.
+
+This is not proof that any individual framed coding invocation failed. It is proof that frame validity and final-input adequacy are separate guarantees in the current implementation.
+
+### Excerpt and Provider Boundaries
+
+[Pinned excerpt collection](../../backend/src/main/kotlin/com/orchard/backend/agent/CodingWorkspaceGateway.kt#L166) hashes full source, distributes byte allowances, invokes lexical excerpting, and can fall back to a source prefix when a focused excerpt is short or lacks an owner declaration. It accepts nonempty excerpts that fit serialized byte limits. [Lexical excerpting](../../backend/src/main/kotlin/com/orchard/backend/agent/CodingWorkspaceGateway.kt#L991) can select declaration lines without their bodies, includes lexical count summaries, and falls back to prefix lines. Neither stage takes frame evidence obligations as input. Path identity and a full-source hash therefore cannot certify preserved behavior semantics.
+
+[Model token estimation](../../backend/src/main/kotlin/com/orchard/backend/vector/ModelExecutionProfile.kt#L184) returns UTF-8 byte length. Both analysis and coding use it to compare serialized prompts against token apertures; coding also derives a source-byte allowance from that calculation. The resulting fit checks do not repair excerpt adequacy.
+
+[Provider request construction](../../backend/src/main/kotlin/com/orchard/backend/vector/RestModelProvider.kt#L223) forwards the assembled string as an Ollama prompt or a single OpenAI-compatible user message. Ollama may retry structured generation without the structured format, using the same prompt. No provider-side step restores frame relationships or missing evidence.
+
+The analysis system prompt requests `RepositoryAnalysisCandidate`, and decoding expects that candidate. The envelope still names `RepositoryAnalysisPlanContent`. Importantly, [Ollama format selection](../../backend/src/main/kotlin/com/orchard/backend/vector/RestModelProvider.kt#L613) recognizes that stale marker but actually supplies candidate JSON properties. Thus the wire schema is not the old plan schema: the proven defects are contradictory envelope prose and schema routing by prompt substring, plus inconsistent path-limit wording. A typed stage contract should replace this accidental dependency. Strict service decoding remains required even when provider formatting is absent or falls back.
+
+### Minimum Changes for Faithfulness
+
+1. **Compile the analysis stage's authority relationships before selecting evidence.** Reuse the Attention authority semantics, but do not fabricate a coding frame: its accepted plan and work-package dependencies do not exist before analysis. Represent requirements, pinned roots, reasoning permissions, unresolved relationships, and coverage/deferment without granting mutation authority.
+2. **Make the invocation projection control retrieval.** Map every source item and canonical evidence reference to a correlation and an inclusion reason. Carry required contracts, producers/consumers, regression and read-only evidence where the active question needs them, rather than equating evidence selection with writable ownership.
+3. **Validate the materialized context after every lossy transformation.** Check reference resolution, source provenance, explicit coverage, required semantic anchors/windows, and the stage contract after excerpting and compaction. Distinguish sufficient evidence from unresolved evidence; do not pretend deterministic checks can prove every semantic judgment.
+4. **Use one typed output contract through serialization, provider formatting, parsing, and validation.** Preserve stage responsibilities and remove stale schema markers and contradictory limits. Validate the exact provider-message representation, not just the frame object.
+5. **Make budget and rejection evidence trustworthy.** Separate byte guards from binding-aware token accounting, deduplicate identities, and record a final frame-to-context mapping and typed failure report. Report capacity only after accounting and adequacy are established.
+
+The decisive tests are not only frame hash tests: a structurally valid frame with headers-only source must fail behavior adequacy; removal of necessary consumer/test evidence must fail or explicitly defer the affected obligation; evidence-only paths must not grant mutation permission; a schema-marker or provider-wrapper change must not change the intended contract; and large coordinate inventories must preserve explicit coverage across selection limits. Positive tests must show that adequate bounded contexts still dispatch without weakening authority.
+
+### Verification and Remaining Uncertainty
+
+Existing `AttentionFrameTest`, `CodingWorkspaceGatewayTest`, `CompanyCircuitTest`, and `ModelProviderCatalogTest` suites passed using `:backend:jvmTest` with those four test filters. They establish current frame invariants, pinned excerpt collection, budget compaction, and mocked provider behavior, not the proposed final-context quality guarantees. No live model request, aperture change, or retry authorization was performed.
+
+The original ambiguity is now resolved: the failed analysis did not use a coding frame, and the coding-frame path has structural enforcement without a final semantic context gate. What remains to decide is the stage-specific evidence-adequacy policy and its measurable acceptance fixtures, how to expose unresolved dependencies and deferred scope without unnecessary prompt expansion, and the smallest shared compilation contract that preserves existing authority and historical replay. This ADR remains proposed until those decisions and implementation evidence are available.
+
 ## Implementation and Validation
 
 First instrument compilation and distinguish failure causes. Then implement binding-aware accounting, aligned output contracts, canonical evidence references, typed relevance, and adequacy-preserving excerpts. Reassess measured workloads before adding analysis slicing. These are separate changes with their own regression evidence; this ADR does not declare them delivered.
