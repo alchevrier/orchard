@@ -60,6 +60,8 @@ Model-backed repository analysis may also require `repositoryCoordinates`. Each 
 
 Ticket-scoped project report revisions include typed evidence for candidate PRs, independent audits, company acceptance, and local promotion. Each new governed-delivery record changes the report source hash, producing an immutable inbox revision that remains correlated with the ticket's canonical conversation thread.
 
+When the source task belongs to a started staged plan, coordinate recovery creates a corrective bug under the same story rather than adding an ordinary task to the frozen plan. The bug records the blocked-run reproduction, original regression outcome, and successor lineage. The admitted plan and source run remain unchanged; the correction still requires definition acceptance and its own delivery admission.
+
 ## AI Operator Pilot
 
 | Method | Path | Purpose |

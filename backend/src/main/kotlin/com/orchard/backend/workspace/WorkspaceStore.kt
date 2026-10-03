@@ -729,6 +729,8 @@ class WorkspaceStore(
         )
         val workItem = requireNotNull(committedEntity(run.context.workItemId))
         val story = requireNotNull(committedEntity(workItem.parentId, ENTITY_STORY))
+        val frozenPlan = activeStagedPlan(story.id)?.stages?.flatMap { it.nodes }?.any { planNodeStarted(it.workItemId) } == true
+        val successorType = if (workItem.type == ENTITY_TASK && frozenPlan) ENTITY_BUG else workItem.type
         val marker = "coordinateSuccessorOfRunId=$runId\n"
         var successor = entities.take(committedEntityCount).singleOrNull { it.content.startsWith(marker) }
         if (successor == null) {
@@ -737,7 +739,7 @@ class WorkspaceStore(
             try {
                 if (!applyIntent(DocumentIntent(
                         actionTypeId = ACTION_CREATE,
-                        entityTypeId = workItem.type,
+                        entityTypeId = successorType,
                         boundWorkflowId = workItem.workflowId,
                         projectId = run.context.projectId,
                         epicId = story.parentId,
@@ -760,7 +762,10 @@ class WorkspaceStore(
             requireNotNull(successor).id,
             COLLABORATOR_HUMAN,
             DefinitionProposalContent(
-                definition = repairedDefinition,
+                definition = if (successor?.type == ENTITY_BUG && workItem.type == ENTITY_TASK) repairedDefinition.copy(
+                    reproduction = repairedDefinition.reproduction.ifBlank { "Attempt coordinate recovery of blocked workflow run $runId against its pinned work definition." },
+                    regressionCriterion = repairedDefinition.regressionCriterion.ifBlank { repairedDefinition.requiredBehavior },
+                ) else repairedDefinition,
                 observations = listOf("Attempted coordinate recovery from run $runId at repository revision ${head.commitHash} using repair capability $REPOSITORY_COORDINATE_REPAIR_VERSION; the source run remains immutable."),
                 coordinateRepairEvidence = repair.evidence,
                 coordinateRepairDiagnostic = diagnostic,

@@ -30,6 +30,51 @@ import kotlinx.serialization.json.Json
 
 class RepositoryIntelligenceGraphTest {
     @Test
+    fun `coordinate recovery creates corrective bug without reopening started staged plan`() {
+        val state = createTempDirectory("orchard-frozen-coordinate-recovery-state-")
+        val repository = createTempDirectory("orchard-frozen-coordinate-recovery-repository-")
+        Files.writeString(repository.resolve("Main.kt"), "class Main\n")
+        git(repository, "init")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        val workspace = WorkspaceStore(repositoryBindings = FileRepositoryBindingStore(state))
+        createProject(workspace)
+        createEpic(workspace)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_STORY, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, title = "Story")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Task")))
+        workspace.commitBatch()
+        workspace.bindRepository(1, repository.toString())
+        val definition = com.orchard.backend.workspace.WorkDefinitionSubmission(
+            "Update Main", "Old behavior", "New behavior", listOf("Update Main.kt"), listOf("Unrelated code"), emptyList(),
+            listOf(com.orchard.backend.workspace.AcceptanceCriterion("Build passes", "Build")),
+            repositoryEvidenceSelectors = listOf(com.orchard.backend.workspace.RepositoryEvidenceSelector("main", listOf(0), listOf("Main.kt"))),
+        )
+        workspace.submitWorkDefinition(4, definition)
+        assertEquals(com.orchard.backend.workspace.StagedPlanStatus.ACCEPTED, workspace.acceptStagedPlan(
+            com.orchard.backend.workspace.StagedDeliveryPlanSubmission(3, "Delivery", listOf(
+                com.orchard.backend.workspace.StagedPlanStageSubmission("delivery", "Delivery", "sequential-delivery-v1", nodes = listOf(
+                    com.orchard.backend.workspace.StagedPlanNodeSubmission("task", 4),
+                )),
+            )),
+        ).status)
+        val before = workspace.snapshot(0)
+        val original = before.workflowRuns.single()
+        workspace.configureRepositoryCoordinateAdmission(RepositoryIntelligenceCoordinateAdmission(RepositoryIntelligenceImporter(workspace)))
+        val result = workspace.prepareCoordinateSuccessor(original.runId)
+        assertEquals(com.orchard.backend.workspace.DefinitionCollaborationStatus.RECORDED, result.status)
+        val proposal = requireNotNull(result.proposal)
+        val successor = (0 until workspace.entityCount).map(workspace::entityAt).single { it.id == proposal.workItemId }
+        assertEquals(com.orchard.backend.workspace.ENTITY_BUG, successor.type)
+        assertEquals(3, successor.parentId)
+        assertTrue(proposal.content.definition.reproduction.contains(original.runId.toString()))
+        assertEquals("New behavior", proposal.content.definition.regressionCriterion)
+        assertEquals(before.stagedPlans, result.snapshot.stagedPlans)
+        assertEquals(before.workflowRuns, result.snapshot.workflowRuns)
+        assertEquals(proposal, workspace.prepareCoordinateSuccessor(original.runId).proposal)
+    }
+
+    @Test
     fun `coordinate successor remains unaccepted and idempotent across restart`() {
         val state = createTempDirectory("orchard-coordinate-successor-state-")
         val repository = createTempDirectory("orchard-coordinate-successor-repository-")
