@@ -35,6 +35,9 @@ class RepositoryIntelligenceGraphTest {
         val repository = createTempDirectory("orchard-coordinate-import-repository-")
         Files.writeString(repository.resolve("Main.kt"), "import java.nio.file.Path\nclass Main(val source: Path)\n")
         Files.writeString(repository.resolve("Dynamic.kt"), "class Dynamic { fun load() = Class.forName(\"example.Hidden\") }\n")
+        Files.writeString(repository.resolve("Literal.kt"), "val reflectionRule = \"Class.forName(\"\nval loaderRule = \"\"\"ServiceLoader.load(\"\"\"\n/* outer /* nested */ Class.forName( */\n// ServiceLoader.load(\n")
+        Files.writeString(repository.resolve("Configured.kt"), "class Configured { fun load() = ServiceLoader . load ( Runnable::class.java ) }\n")
+        Files.writeString(repository.resolve("Interpolated.kt"), "val dynamic = \"\${Class.forName(\"example.Hidden\")}\"\n")
         git(repository, "init")
         git(repository, "add", ".")
         git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Import and dynamic boundary fixture")
@@ -56,6 +59,10 @@ class RepositoryIntelligenceGraphTest {
         val dynamic = admission.assess(1, repository.toString(), revision, listOf(RepositoryCoordinate("dynamic", "Dynamic.kt", listOf(0))))
         assertEquals(RepositoryCoordinateAdmissionStatus.UNRESOLVED_BOUNDARY, dynamic.status)
         assertTrue(dynamic.diagnostic.orEmpty().contains("Dynamic.kt"))
+        assertTrue(graph.unresolvedBoundaries.none { it.path == "Literal.kt" })
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, admission.assess(1, repository.toString(), revision, listOf(RepositoryCoordinate("literal", "Literal.kt", listOf(0)))).status)
+        assertTrue(graph.unresolvedBoundaries.any { it.path == "Configured.kt" && it.kind == "CONFIGURATION_SELECTED_IMPLEMENTATION" })
+        assertTrue(graph.unresolvedBoundaries.any { it.path == "Interpolated.kt" && it.kind == "REFLECTION" })
     }
 
     @Test
@@ -499,7 +506,7 @@ class RepositoryIntelligenceGraphTest {
         val store = FileRepositoryIntelligenceGraphStore(state)
         val lifecycleStore = FileRepositoryIntelligenceLifecycleStore(state)
         val traceStore = FileRepositoryIntelligenceTraceStore(state)
-        val importer = RepositoryIntelligenceImporter(workspace, store, lifecycleStore = lifecycleStore, traceStore = traceStore)
+        val importer = RepositoryIntelligenceImporter(workspace, store, extractorVersion = 1, lifecycleStore = lifecycleStore, traceStore = traceStore)
 
         val firstEnsure = importer.ensure(1, repository.toString(), revision)
         val repeatedEnsure = importer.ensure(1, repository.toString(), revision)
@@ -508,6 +515,7 @@ class RepositoryIntelligenceGraphTest {
         val policyBumpedEnsure = RepositoryIntelligenceImporter(
             workspace,
             store,
+            extractorVersion = 1,
             policyVersion = 2,
         ).ensure(1, repository.toString(), revision)
         val extractorBumpedEnsure = RepositoryIntelligenceImporter(
@@ -522,6 +530,7 @@ class RepositoryIntelligenceGraphTest {
         val reproduced = RepositoryIntelligenceImporter(
             workspace,
             FileRepositoryIntelligenceGraphStore(freshState),
+            extractorVersion = 1,
         ).import(1, repository.toString(), revision)
 
         assertEquals(files.size, first.coverage.trackedFileCount)

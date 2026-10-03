@@ -1730,7 +1730,8 @@ class RepositoryIntelligenceImporter(
                 )
             }
         }
-        if (file.content.orEmpty().contains("Class.forName(")) {
+        val executableSource = sourceForBoundaryDetection(file.content.orEmpty())
+        if (Regex("\\bClass\\s*\\.\\s*forName\\s*\\(").containsMatchIn(executableSource)) {
             boundaries += addBoundary(
                 unresolvedBoundary(
                     kind = "REFLECTION",
@@ -1741,7 +1742,7 @@ class RepositoryIntelligenceImporter(
                 )
             )
         }
-        if (file.content.orEmpty().contains("ServiceLoader.load(")) {
+        if (Regex("\\bServiceLoader\\s*\\.\\s*load\\s*\\(").containsMatchIn(executableSource)) {
             boundaries += addBoundary(
                 unresolvedBoundary(
                     kind = "CONFIGURATION_SELECTED_IMPLEMENTATION",
@@ -1758,6 +1759,50 @@ class RepositoryIntelligenceImporter(
             unresolvedBoundaryIds = boundaries.distinct(),
             importReferences = importReferences,
         )
+    }
+
+    private fun sourceForBoundaryDetection(content: String): String {
+        val source = StringBuilder(content.length)
+        var offset = 0
+        while (offset < content.length) {
+            when {
+                content.startsWith("//", offset) -> {
+                    offset = content.indexOf('\n', offset).takeIf { it >= 0 } ?: content.length
+                    source.append(' ')
+                }
+                content.startsWith("/*", offset) -> {
+                    offset += 2
+                    var depth = 1
+                    while (offset < content.length && depth > 0) {
+                        when {
+                            content.startsWith("/*", offset) -> { depth++; offset += 2 }
+                            content.startsWith("*/", offset) -> { depth--; offset += 2 }
+                            else -> offset++
+                        }
+                    }
+                    source.append(' ')
+                }
+                content.startsWith("\"\"\"", offset) -> {
+                    val start = offset
+                    offset = content.indexOf("\"\"\"", offset + 3).takeIf { it >= 0 }?.plus(3) ?: content.length
+                    val literal = content.substring(start, offset)
+                    source.append(if (literal.contains("\${")) literal else " ")
+                }
+                content[offset] == '"' || content[offset] == '\'' -> {
+                    val start = offset
+                    val quote = content[offset++]
+                    while (offset < content.length) {
+                        val character = content[offset++]
+                        if (character == '\\' && offset < content.length) offset++
+                        else if (character == quote) break
+                    }
+                    val literal = content.substring(start, offset)
+                    source.append(if (quote == '"' && literal.contains("\${")) literal else " ")
+                }
+                else -> source.append(content[offset++])
+            }
+        }
+        return source.toString()
     }
 
     private fun classifySymbolIntelligence(
@@ -2058,7 +2103,7 @@ class RepositoryIntelligenceImporter(
     )
 
     private companion object {
-        const val DEFAULT_EXTRACTOR_VERSION = 1
+        const val DEFAULT_EXTRACTOR_VERSION = 2
         const val DEFAULT_POLICY_VERSION = 1
         const val MAX_ANALYZED_FILE_BYTES = 1024 * 1024
         const val GIT_TIMEOUT_SECONDS = 30L
