@@ -285,8 +285,8 @@ class RepositoryIntelligenceCoordinateAdmission(
                 selector.selectorId to (resolved + explicitPaths).distinct().sorted()
             }
             val selectedPaths = candidates.values.flatten().distinct().sorted()
-            require(selectedPaths.isNotEmpty() && selectedPaths.size <= 16) {
-                "Repository coordinate repair requires 1..16 exact paths; narrow or split the definition instead of truncating wildcard matches."
+            require(selectedPaths.isNotEmpty()) {
+                "Repository coordinate repair requires supported exact paths at the pinned repository revision."
             }
             val sources = if (definition.repositoryEvidenceSelectors.any { it.contentLiterals.isNotEmpty() }) {
                 LocalCodingWorkspaceGateway().collectIntelligenceContext(repositoryPath, repositoryRevision, selectedPaths)
@@ -317,7 +317,6 @@ class RepositoryIntelligenceCoordinateAdmission(
                 if (current == null) while (!ids.add(id)) id += "-anchor"
                 RepositoryCoordinate(id, path, (scopes.flatten() + current?.scopeIndexes.orEmpty()).distinct().sorted())
             } + existing.filter { coordinate -> selectors.none { coordinate.path in it.pathGlobs } }
-            require(coordinates.size <= 16) { "Repository coordinate repair exceeds the bounded definition size; split the definition." }
             val evidence = assess(projectId, repositoryPath, repositoryRevision, coordinates)
             require(evidence.status == RepositoryCoordinateAdmissionStatus.READY) { evidence.diagnostic.orEmpty() }
             RepositoryCoordinateRepair(definition.copy(repositoryEvidenceSelectors = selectors, repositoryCoordinates = coordinates), evidence)

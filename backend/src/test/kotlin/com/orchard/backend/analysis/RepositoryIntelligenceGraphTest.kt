@@ -179,7 +179,7 @@ class RepositoryIntelligenceGraphTest {
     }
 
     @Test
-    fun `repairs wildcard drafts into bounded pinned coordinates without truncation`() {
+    fun `repairs wildcard drafts into exact pinned coordinates without a path count cap`() {
         val state = createTempDirectory("orchard-coordinate-repair-state-")
         val repository = createTempDirectory("orchard-coordinate-repair-repository-")
         Files.createDirectories(repository.resolve("src"))
@@ -218,11 +218,28 @@ class RepositoryIntelligenceGraphTest {
         assertTrue(admission.repair(1, repository.toString(), revision, missing).diagnostic != null)
         (1..17).forEach { index -> Files.writeString(repository.resolve("src/Extra$index.kt"), "class Extra$index\n") }
         git(repository, "add", ".")
-        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Too broad")
-        val oversized = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition)
-        assertEquals(definition, oversized.definition)
-        assertEquals(null, oversized.evidence)
-        assertTrue(oversized.diagnostic.orEmpty().contains("instead of truncating"))
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Expand coordinate inventory")
+        val expandedRevision = git(repository, "rev-parse", "HEAD")
+        val expandedDefinition = definition.copy(repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map { it.copy(contentLiterals = emptyList()) })
+        val expanded = admission.repair(1, repository.toString(), expandedRevision, expandedDefinition)
+        val expectedPaths = ((1..17).map { "src/Extra$it.kt" } + "src/Main.kt").sorted()
+        assertEquals(expectedPaths, expanded.definition.repositoryCoordinates.map { it.path }.sorted())
+        assertEquals(expectedPaths, expanded.definition.repositoryEvidenceSelectors.single().pathGlobs)
+        assertTrue(expanded.definition.repositoryCoordinates.all { it.scopeIndexes == listOf(0) })
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, expanded.evidence?.status)
+        assertEquals(expandedRevision, expanded.evidence?.repositoryRevision)
+        assertEquals(expectedPaths, expanded.evidence?.resolutions?.map { it.path }?.sorted())
+        assertEquals(null, expanded.diagnostic)
+        val retained = admission.repair(1, repository.toString(), expandedRevision, expanded.definition.copy(
+            repositoryEvidenceSelectors = expanded.definition.repositoryEvidenceSelectors.map { it.copy(pathGlobs = listOf("src/Main.kt")) },
+        ))
+        assertEquals(expanded.definition.repositoryCoordinates.sortedBy { it.path }, retained.definition.repositoryCoordinates.sortedBy { it.path })
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, retained.evidence?.status)
+        assertEquals(null, retained.diagnostic)
+        val unsupported = admission.repair(1, repository.toString(), expandedRevision, definition)
+        assertEquals(definition, unsupported.definition)
+        assertEquals(null, unsupported.evidence)
+        assertTrue(unsupported.diagnostic.orEmpty().contains("no supported pinned source matches"))
         val anchored = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition.copy(
             scope = listOf("Update Main.kt"),
             repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map { it.copy(contentLiterals = emptyList()) },
