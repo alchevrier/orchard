@@ -238,14 +238,51 @@ class RepositoryIntelligenceCoordinateAdmission(
         repositoryRevision: String,
         definition: WorkDefinitionSubmission,
     ): RepositoryCoordinateRepair {
-        if (definition.repositoryEvidenceSelectors.isEmpty()) return RepositoryCoordinateRepair(definition)
+        if (definition.repositoryEvidenceSelectors.isEmpty()) {
+            val evidence = assess(projectId, repositoryPath, repositoryRevision, definition.repositoryCoordinates)
+            return RepositoryCoordinateRepair(
+                definition,
+                evidence.takeIf { it.status == RepositoryCoordinateAdmissionStatus.READY },
+                evidence.diagnostic,
+            )
+        }
         return runCatching {
             val graph = importer.ensure(projectId, repositoryPath, repositoryRevision).graph
             val paths = graph.nodes.filter { it.kind != INTELLIGENCE_NODE_SYMBOL && it.contentHash != null }
                 .mapNotNull { it.path }.distinct().sorted()
+            val ownersByScope = definition.scope.map { clause ->
+                exactRepositoryScopePaths(listOf(clause)).map { namedPath ->
+                    if (namedPath in paths) namedPath else {
+                        val matches = paths.filter { it.substringAfterLast('/') == namedPath }
+                        require(matches.size == 1) { "Scope owner $namedPath is unresolved or ambiguous at the current repository revision." }
+                        matches.single()
+                    }
+                }
+            }
+            val ownerPaths = (ownersByScope.flatten() + definition.repositoryCoordinates.map { it.path } +
+                definition.repositoryEvidenceSelectors.flatMap { it.pathGlobs }.filter { path -> path.none { it in "*?[]{}" } }).toSet()
+            val nodesById = graph.nodes.associateBy { it.nodeId }
+            val relatedNodeIds = graph.edges.filter { edge ->
+                edge.kind in setOf(INTELLIGENCE_EDGE_IMPORTS, INTELLIGENCE_EDGE_TESTS, INTELLIGENCE_EDGE_DEPENDS_ON) &&
+                    (nodesById[edge.fromNodeId]?.path in ownerPaths || nodesById[edge.toNodeId]?.path in ownerPaths)
+            }.flatMap { listOf(it.fromNodeId, it.toNodeId) }.toSet()
+            val relatedPaths = graph.nodes.filter { it.nodeId in relatedNodeIds }.mapNotNull { it.path }.toSet()
             val candidates = definition.repositoryEvidenceSelectors.associate { selector ->
                 val matchers = selector.pathGlobs.map { FileSystems.getDefault().getPathMatcher("glob:$it") }
-                selector.selectorId to paths.filter { path -> matchers.any { it.matches(Path.of(path)) } }
+                val matches = paths.filter { path -> matchers.any { it.matches(Path.of(path)) } }
+                val namedOwners = selector.scopeIndexes.flatMap { ownersByScope.getOrElse(it) { emptyList() } }.toSet()
+                val anchored = matches.filter { it in namedOwners }
+                val neighbors = matches.filter { it in ownerPaths || it in relatedPaths }
+                val wildcard = selector.pathGlobs.any { path -> path.any { it in "*?[]{}" } }
+                val explicitPaths = selector.pathGlobs.filter { path -> path.none { it in "*?[]{}" } }
+                require(paths.containsAll(explicitPaths)) { "Selector ${selector.selectorId} has an unresolved exact path at the current repository revision." }
+                val resolved = when {
+                    !wildcard -> matches
+                    anchored.isNotEmpty() -> anchored
+                    neighbors.isNotEmpty() -> neighbors
+                    else -> matches
+                }
+                selector.selectorId to (resolved + explicitPaths).distinct().sorted()
             }
             val selectedPaths = candidates.values.flatten().distinct().sorted()
             require(selectedPaths.isNotEmpty() && selectedPaths.size <= 16) {

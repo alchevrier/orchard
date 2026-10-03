@@ -26,6 +26,10 @@ data class DefinitionProposalContent(
     val coordinateRepairDiagnostic: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val successorOfRunId: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val coordinateRepairRevision: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val coordinateRepairVersion: Int = 0,
 )
 
 @Serializable

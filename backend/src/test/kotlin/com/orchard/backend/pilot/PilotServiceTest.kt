@@ -37,6 +37,40 @@ import kotlinx.serialization.json.Json
 
 class PilotServiceTest {
     @Test
+    fun `pilot clarifies unchanged repair failure and retries only with new capability basis`() {
+        val definition = com.orchard.backend.workspace.WorkDefinitionSubmission(
+            "Update owner", "Old behavior", "New behavior", listOf("Owner"), listOf("Unrelated code"), emptyList(), emptyList(),
+        )
+        val proposal = com.orchard.backend.workspace.newDefinitionProposal(
+            1, 8, 1, null, "HUMAN",
+            com.orchard.backend.workspace.DefinitionProposalContent(
+                definition,
+                coordinateRepairDiagnostic = "Owner is ambiguous; clarify exact scope.",
+                successorOfRunId = 7,
+                coordinateRepairRevision = "a".repeat(40),
+                coordinateRepairVersion = 1,
+            ), null,
+        )
+        fun status(currentBasis: Boolean) = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(run()), definitionProposals = listOf(
+                com.orchard.backend.workspace.DefinitionProposalView(proposal, emptyList()),
+            )),
+            analysisAttempts = emptyList(), analysisPlans = emptyList(), providerEvents = emptyList(), resources = null, objectives = emptyList(),
+            coordinatesReady = { false }, repairBasisCurrent = { currentBasis },
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+        val clarification = status(true).authorizedActions.single()
+        assertEquals("clarify-coordinate-successor", clarification.id)
+        assertEquals("HUMAN_AUTHORITY", clarification.costClass)
+        assertEquals("/api/definition-proposals/1/feedback", clarification.path)
+        assertEquals(proposal.content.coordinateRepairDiagnostic, clarification.reason)
+        val upgraded = status(false).authorizedActions.single()
+        assertEquals("prepare-coordinate-successor", upgraded.id)
+        assertEquals("DETERMINISTIC", upgraded.costClass)
+        assertEquals("/api/workflow-runs/7/coordinate-successor", upgraded.path)
+    }
+
+    @Test
     fun `pilot status explains running analysis from deterministic projections`() {
         val revision = "a".repeat(40)
         val run = WorkflowRunView(

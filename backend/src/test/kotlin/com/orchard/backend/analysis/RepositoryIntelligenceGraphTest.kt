@@ -91,6 +91,46 @@ class RepositoryIntelligenceGraphTest {
         val healed = submitted.snapshot.definitionProposals.single { it.proposal.workItemId == newWorkItemId }
         assertEquals(RepositoryCoordinateAdmissionStatus.READY, healed.proposal.content.coordinateRepairEvidence?.status)
         assertEquals(healed, recover().snapshot(0).definitionProposals.single { it.proposal.workItemId == newWorkItemId })
+        recovered.configureRepositoryCoordinateAdmission(null)
+        recovered.beginBatch()
+        assertTrue(recovered.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Legacy missing owner")))
+        val missingWorkItemId = recovered.lastCreatedId
+        recovered.commitBatch()
+        recovered.submitWorkDefinition(missingWorkItemId, definition.copy(
+            repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map { it.copy(pathGlobs = listOf("src/Missing.kt")) },
+        ))
+        assertEquals(com.orchard.backend.workspace.WorkflowStartStatus.CREATED, recovered.startWorkflow(missingWorkItemId).status)
+        val missingRunId = recovered.snapshot(0).workflowRuns.last().runId
+        recovered.configureRepositoryCoordinateAdmission(RepositoryIntelligenceCoordinateAdmission(RepositoryIntelligenceImporter(recovered)))
+        val failed = requireNotNull(recovered.prepareCoordinateSuccessor(missingRunId).proposal)
+        assertTrue(failed.content.coordinateRepairDiagnostic != null)
+        assertTrue(failed.content.definition.unresolvedQuestions.isNotEmpty())
+        assertEquals(null, failed.content.coordinateRepairEvidence)
+        val restarted = recover()
+        restarted.configureRepositoryCoordinateAdmission(RepositoryIntelligenceCoordinateAdmission(RepositoryIntelligenceImporter(restarted)))
+        assertEquals(failed, restarted.prepareCoordinateSuccessor(missingRunId).proposal)
+        Files.writeString(repository.resolve("src/Missing.kt"), "class Missing\n")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Provide missing owner")
+        assertTrue(!restarted.coordinateRepairBasisCurrent(failed))
+        val renewed = requireNotNull(restarted.prepareCoordinateSuccessor(missingRunId).proposal)
+        assertEquals(failed.workItemId, renewed.workItemId)
+        assertEquals(failed.proposalId, renewed.parentProposalId)
+        assertEquals(failed.revision + 1, renewed.revision)
+        assertEquals(null, renewed.content.coordinateRepairDiagnostic)
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, renewed.content.coordinateRepairEvidence?.status)
+        assertEquals(renewed, restarted.prepareCoordinateSuccessor(missingRunId).proposal)
+        val olderCapability = requireNotNull(restarted.recordDefinitionProposal(
+            renewed.workItemId,
+            com.orchard.backend.workspace.COLLABORATOR_HUMAN,
+            renewed.content.copy(coordinateRepairVersion = 1),
+        ).proposal)
+        assertTrue(!restarted.coordinateRepairBasisCurrent(olderCapability))
+        val upgraded = requireNotNull(restarted.prepareCoordinateSuccessor(missingRunId).proposal)
+        assertEquals(olderCapability.proposalId, upgraded.parentProposalId)
+        assertEquals(renewed.workItemId, upgraded.workItemId)
+        assertEquals(com.orchard.backend.workspace.REPOSITORY_COORDINATE_REPAIR_VERSION, upgraded.content.coordinateRepairVersion)
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, upgraded.content.coordinateRepairEvidence?.status)
     }
 
     @Test
@@ -138,6 +178,34 @@ class RepositoryIntelligenceGraphTest {
         assertEquals(definition, oversized.definition)
         assertEquals(null, oversized.evidence)
         assertTrue(oversized.diagnostic.orEmpty().contains("instead of truncating"))
+        val anchored = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition.copy(
+            scope = listOf("Update Main.kt"),
+            repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map { it.copy(contentLiterals = emptyList()) },
+        ))
+        assertEquals(listOf("src/Main.kt"), anchored.definition.repositoryCoordinates.map { it.path })
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, anchored.evidence?.status)
+        val mixed = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition.copy(
+            scope = listOf("Update Main.kt"),
+            repositoryEvidenceSelectors = definition.repositoryEvidenceSelectors.map {
+                it.copy(pathGlobs = listOf("src/*.kt", "src/Extra1.kt"), contentLiterals = emptyList())
+            },
+        ))
+        assertEquals(listOf("src/Extra1.kt", "src/Main.kt"), mixed.definition.repositoryCoordinates.map { it.path }.sorted())
+        val ambiguous = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition.copy(scope = listOf("Update Missing.kt")))
+        assertTrue(ambiguous.diagnostic.orEmpty().contains("unresolved or ambiguous"))
+        Files.writeString(repository.resolve("src/Main.kt"), "package example\nclass Main\n")
+        Files.writeString(repository.resolve("src/Consumer.kt"), "package example\nimport example.Main\nclass Consumer(val owner: Main)\n")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Prove consumer relationship")
+        val neighbors = admission.repair(1, repository.toString(), git(repository, "rev-parse", "HEAD"), definition.copy(
+            scope = listOf("Update Main.kt", "Update consumers"),
+            repositoryEvidenceSelectors = listOf(
+                com.orchard.backend.workspace.RepositoryEvidenceSelector("owner", listOf(0), listOf("src/Main.kt")),
+                com.orchard.backend.workspace.RepositoryEvidenceSelector("consumers", listOf(1), listOf("src/*.kt")),
+            ),
+        ))
+        assertEquals(null, neighbors.diagnostic)
+        assertEquals(listOf("src/Consumer.kt", "src/Main.kt"), neighbors.definition.repositoryCoordinates.map { it.path }.sorted())
     }
 
     @Test

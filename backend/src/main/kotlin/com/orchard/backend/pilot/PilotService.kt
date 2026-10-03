@@ -230,6 +230,7 @@ class PilotService(
                 graph != null && coordinateAdmissionMatchesGraph(run.context.repositoryCoordinateAdmission, graph)
             }
         },
+        repairBasisCurrent = { proposal -> workspace.coordinateRepairBasisCurrent(proposal.proposal) },
         now = now(),
     )
 
@@ -250,6 +251,7 @@ internal fun compilePilotStatus(
     operationMode: OrchardOperationMode = OrchardOperationMode.AUTONOMOUS,
     intelligenceReady: (WorkflowRunView) -> Boolean = { true },
     coordinatesReady: (WorkflowRunView) -> Boolean = { true },
+    repairBasisCurrent: (com.orchard.backend.workspace.DefinitionProposalView) -> Boolean = { true },
     now: Instant,
 ): PilotStatus {
     val activeRuns = snapshot.workflowRuns.filter { it.state !in TERMINAL_RUN_STATES }
@@ -268,13 +270,15 @@ internal fun compilePilotStatus(
     val providerCycle = currentProviderCycle(providerEvents, attempt?.promptHash)
     val operation = compileOperation(run, attempt, plan, now)
     val evidence = compileEvidence(run)
+    val coordinateSuccessor = run?.let { selected -> snapshot.definitionProposals.lastOrNull { it.proposal.content.successorOfRunId == selected.runId } }
     val actions = compileActions(
         run,
         attempt,
         plan,
         run?.let(intelligenceReady) ?: true,
         run?.let(coordinatesReady) ?: true,
-        run?.let { selected -> snapshot.definitionProposals.lastOrNull { it.proposal.content.successorOfRunId == selected.runId } },
+        coordinateSuccessor,
+        coordinateSuccessor?.let(repairBasisCurrent) ?: true,
     )
     val state = when {
         run == null -> "IDLE"
@@ -406,6 +410,7 @@ private fun compileActions(
     intelligenceReady: Boolean,
     coordinatesReady: Boolean,
     coordinateSuccessor: com.orchard.backend.workspace.DefinitionProposalView?,
+    repairBasisCurrent: Boolean,
 ): Pair<List<PilotAction>, List<PilotAction>> {
     if (run == null) return emptyList<PilotAction>() to emptyList()
     val authorized = when {
@@ -416,8 +421,10 @@ private fun compileActions(
             PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Build or reuse compatible repository intelligence before repository analysis."),
         )
         !coordinatesReady -> listOf(
-            if (coordinateSuccessor == null) {
+            if (coordinateSuccessor == null || (!repairBasisCurrent && coordinateSuccessor.acceptedDefinitionId == null)) {
                 PilotAction("prepare-coordinate-successor", "POST", "/api/workflow-runs/${run.runId}/coordinate-successor", "DETERMINISTIC", "Resolve bounded pinned repository paths into a successor proposal without rewriting the source run or invoking a model.")
+            } else if (coordinateSuccessor.proposal.content.coordinateRepairDiagnostic != null) {
+                PilotAction("clarify-coordinate-successor", "POST", "/api/definition-proposals/${coordinateSuccessor.proposal.proposalId}/feedback", "HUMAN_AUTHORITY", requireNotNull(coordinateSuccessor.proposal.content.coordinateRepairDiagnostic))
             } else if (coordinateSuccessor.acceptedDefinitionId == null) {
                 PilotAction("accept-coordinate-successor", "POST", "/api/definition-proposals/${coordinateSuccessor.proposal.proposalId}/accept", "HUMAN_AUTHORITY", "Review and accept the coordinate-pinned successor proposal before delivery admission.")
             } else {

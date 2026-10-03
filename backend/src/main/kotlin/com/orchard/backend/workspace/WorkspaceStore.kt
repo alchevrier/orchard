@@ -708,18 +708,24 @@ class WorkspaceStore(
     fun prepareCoordinateSuccessor(runId: Long): DefinitionCollaborationResult {
         val run = workflowRuns.singleOrNull { it.runId == runId }
             ?: return collaborationFailure(DefinitionCollaborationStatus.WORK_ITEM_NOT_FOUND, "The source run does not exist.")
-        collaborationEvents.mapNotNull { it.proposal }.lastOrNull { it.content.successorOfRunId == runId }?.let {
-            return DefinitionCollaborationResult(DefinitionCollaborationStatus.RECORDED, snapshot(MESSAGE_DEFINITION_COLLABORATION), it)
-        }
+        val previous = collaborationEvents.mapNotNull { it.proposal }.lastOrNull { it.content.successorOfRunId == runId }
+        if (previous != null && (coordinateRepairBasisCurrent(previous) ||
+            workDefinitions.any { it.sourceProposal?.proposalId == previous.proposalId } ||
+            workflowRuns.any { it.context.workItemId == previous.workItemId }
+        )) return DefinitionCollaborationResult(DefinitionCollaborationStatus.RECORDED, snapshot(MESSAGE_DEFINITION_COLLABORATION), previous)
         val source = run.workDefinition?.definition
             ?: return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "The source run has no pinned work definition.")
         val head = runCatching { repositoryBindings.resolveHead(run.context.projectId) }.getOrNull()
             ?: return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "The bound repository is unavailable.")
         if (!head.clean) return collaborationFailure(DefinitionCollaborationStatus.INVALID_RECORD, "Commit repository changes before preparing a coordinate successor.")
         val repair = repositoryCoordinateAdmission?.repair(run.context.projectId, head.path, head.commitHash, source)
-        if (repair?.evidence?.status != RepositoryCoordinateAdmissionStatus.READY) return collaborationFailure(
+            ?: return collaborationFailure(
             DefinitionCollaborationStatus.INVALID_RECORD,
-            repair?.diagnostic ?: "Exact coordinate discovery is unavailable; do not retry broad analysis.",
+            "Exact coordinate discovery is unavailable; do not retry broad analysis.",
+        )
+        val diagnostic = repair.diagnostic
+        val repairedDefinition = if (diagnostic == null) repair.definition else repair.definition.copy(
+            unresolvedQuestions = (repair.definition.unresolvedQuestions + "Resolve repository scope: ${diagnostic.take(2_000)}").distinct(),
         )
         val workItem = requireNotNull(committedEntity(run.context.workItemId))
         val story = requireNotNull(committedEntity(workItem.parentId, ENTITY_STORY))
@@ -754,12 +760,23 @@ class WorkspaceStore(
             requireNotNull(successor).id,
             COLLABORATOR_HUMAN,
             DefinitionProposalContent(
-                definition = repair.definition,
-                observations = listOf("Deterministically resolved successor scope from run $runId at repository revision ${head.commitHash}; the source run remains immutable."),
+                definition = repairedDefinition,
+                observations = listOf("Attempted coordinate recovery from run $runId at repository revision ${head.commitHash} using repair capability $REPOSITORY_COORDINATE_REPAIR_VERSION; the source run remains immutable."),
                 coordinateRepairEvidence = repair.evidence,
+                coordinateRepairDiagnostic = diagnostic,
                 successorOfRunId = runId,
+                coordinateRepairRevision = head.commitHash,
+                coordinateRepairVersion = REPOSITORY_COORDINATE_REPAIR_VERSION,
             ),
         )
+    }
+
+    @Synchronized
+    fun coordinateRepairBasisCurrent(proposal: DefinitionProposal): Boolean {
+        val project = committedEntity(proposal.workItemId)?.let(::projectFor) ?: return false
+        val head = runCatching { repositoryBindings.resolveHead(project.id) }.getOrNull() ?: return false
+        return proposal.content.coordinateRepairVersion == REPOSITORY_COORDINATE_REPAIR_VERSION &&
+            proposal.content.coordinateRepairRevision == head.commitHash
     }
 
     private fun persistWorkDefinition(
@@ -909,7 +926,7 @@ class WorkspaceStore(
                 observations = content.observations.map(String::trim),
                 assumptions = content.assumptions.map(String::trim),
                 coordinateRepairEvidence = repair?.evidence ?: content.coordinateRepairEvidence,
-                coordinateRepairDiagnostic = repair?.diagnostic,
+                coordinateRepairDiagnostic = if (repair != null) repair.diagnostic else content.coordinateRepairDiagnostic,
             ),
             provenance = provenance,
             conversationCommand = conversationCommand,
