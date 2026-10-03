@@ -417,6 +417,10 @@ private fun compileActions(
         attempt?.state == ANALYSIS_ATTEMPT_RUNNING -> listOf(
             PilotAction("inspect-provider-progress", "GET", "/api/model-providers/audit-events?limit=20", "READ_ONLY", "A model call owns this run; inspect progress without starting another inference."),
         )
+        !intelligenceReady && coordinateSuccessor == null &&
+            run.context.repositoryCoordinateAdmission?.status == com.orchard.backend.workspace.RepositoryCoordinateAdmissionStatus.READY -> listOf(
+            PilotAction("ensure-repository-intelligence", "POST", "/api/repository-intelligence/runs/${run.runId}/ensure", "DETERMINISTIC", "Refresh compatible repository intelligence before verifying the run's admitted coordinate evidence."),
+        )
         !coordinatesReady -> listOf(
             if (coordinateSuccessor == null || (!repairBasisCurrent && coordinateSuccessor.acceptedDefinitionId == null)) {
                 PilotAction("prepare-coordinate-successor", "POST", "/api/workflow-runs/${run.runId}/coordinate-successor", "DETERMINISTIC", "Resolve bounded pinned repository paths into a successor proposal without rewriting the source run or invoking a model.")

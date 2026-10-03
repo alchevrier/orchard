@@ -37,6 +37,31 @@ import kotlinx.serialization.json.Json
 
 class PilotServiceTest {
     @Test
+    fun `pilot refreshes missing intelligence for admitted coordinates before requesting another successor`() {
+        val admitted = run().copy(context = run().context.copy(
+            repositoryCoordinateAdmission = com.orchard.backend.workspace.RepositoryCoordinateAdmissionEvidence(
+                status = com.orchard.backend.workspace.RepositoryCoordinateAdmissionStatus.READY,
+                repositoryId = 2,
+                repositoryRevision = "a".repeat(40),
+                extractorVersion = 2,
+                policyVersion = 1,
+                resolutions = emptyList(),
+            ),
+        ))
+        fun status(hasIntelligence: Boolean) = compilePilotStatus(
+            snapshot = WorkspaceSnapshot(emptyMap(), workflowRuns = listOf(admitted)),
+            analysisAttempts = emptyList(), analysisPlans = emptyList(), providerEvents = emptyList(), resources = null, objectives = emptyList(),
+            intelligenceReady = { hasIntelligence }, coordinatesReady = { false },
+            now = Instant.parse("2026-09-16T00:00:11Z"),
+        )
+        val refresh = status(false).authorizedActions.single()
+        assertEquals("ensure-repository-intelligence", refresh.id)
+        assertEquals("/api/repository-intelligence/runs/7/ensure", refresh.path)
+        assertEquals("DETERMINISTIC", refresh.costClass)
+        assertEquals("prepare-coordinate-successor", status(true).authorizedActions.single().id)
+    }
+
+    @Test
     fun `pilot clarifies unchanged repair failure and retries only with new capability basis`() {
         val definition = com.orchard.backend.workspace.WorkDefinitionSubmission(
             "Update owner", "Old behavior", "New behavior", listOf("Owner"), listOf("Unrelated code"), emptyList(), emptyList(),
