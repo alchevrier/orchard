@@ -266,6 +266,17 @@ class RepositoryIntelligenceGraphTest {
         assertEquals(expandedRevision, expanded.evidence?.repositoryRevision)
         assertEquals(expectedPaths, expanded.evidence?.resolutions?.map { it.path }?.sorted())
         assertEquals(null, expanded.diagnostic)
+        createEpic(workspace)
+        workspace.beginBatch()
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_STORY, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, title = "Story")))
+        assertTrue(workspace.applyIntent(DocumentIntent(ACTION_CREATE, com.orchard.backend.workspace.ENTITY_TASK, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = 1, epicId = 2, storyId = 3, title = "Task")))
+        workspace.commitBatch()
+        workspace.configureRepositoryCoordinateAdmission(admission)
+        val recorded = workspace.recordDefinitionProposal(4, "HUMAN", com.orchard.backend.workspace.DefinitionProposalContent(expandedDefinition))
+        assertEquals(com.orchard.backend.workspace.DefinitionCollaborationStatus.RECORDED, recorded.status)
+        assertEquals(expectedPaths, recorded.proposal?.content?.definition?.repositoryCoordinates?.map { it.path }?.sorted())
+        assertEquals(expectedPaths, recorded.proposal?.content?.definition?.repositoryEvidenceSelectors?.single()?.pathGlobs)
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, recorded.proposal?.content?.coordinateRepairEvidence?.status)
         val retained = admission.repair(1, repository.toString(), expandedRevision, expanded.definition.copy(
             repositoryEvidenceSelectors = expanded.definition.repositoryEvidenceSelectors.map { it.copy(pathGlobs = listOf("src/Main.kt")) },
         ))

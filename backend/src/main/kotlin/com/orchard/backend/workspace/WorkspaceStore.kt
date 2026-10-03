@@ -3199,7 +3199,7 @@ class WorkspaceStore(
             selector.selectorId.isNotBlank() && selector.selectorId.length <= MAX_SELECTOR_ID &&
                 selector.scopeIndexes.isNotEmpty() && selector.scopeIndexes.distinct().size == selector.scopeIndexes.size &&
                 selector.scopeIndexes.all { it in definition.scope.indices } &&
-                selector.pathGlobs.isNotEmpty() && selector.pathGlobs.size <= MAX_DEFINITION_ENTRIES &&
+                selector.pathGlobs.isNotEmpty() &&
                 selector.pathGlobs.all(::validRepositoryGlob) &&
                 selector.contentLiterals.size <= MAX_DEFINITION_ENTRIES &&
                 selector.contentLiterals.all { it.isNotBlank() && it.length <= MAX_SELECTOR_LITERAL } &&
@@ -3216,8 +3216,7 @@ class WorkspaceStore(
 
     private fun validRepositoryCoordinates(definition: WorkDefinitionSubmission): Boolean {
         val coordinates = definition.repositoryCoordinates
-        return coordinates.size <= MAX_DEFINITION_ENTRIES &&
-            coordinates.map { it.coordinateId }.distinct().size == coordinates.size &&
+        return coordinates.map { it.coordinateId }.distinct().size == coordinates.size &&
             coordinates.all { coordinate ->
                 coordinate.coordinateId.isNotBlank() && coordinate.coordinateId.length <= MAX_SELECTOR_ID &&
                     coordinate.path.isNotBlank() && coordinate.path.length <= MAX_SELECTOR_GLOB &&
