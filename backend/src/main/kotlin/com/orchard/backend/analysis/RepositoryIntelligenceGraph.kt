@@ -365,13 +365,17 @@ class RepositoryIntelligenceCoordinateAdmission(
                 graph,
                 "A repository coordinate does not resolve to an exact content-addressed manifest node.",
             )
-        if (resolutions.any { resolution -> graph.unresolvedBoundaries.any { it.nodeId == resolution.nodeId } }) {
+        val unsupportedBoundaries = graph.unresolvedBoundaries.filterNot {
+            it.kind == "UNRESOLVED_IMPORT" && it.handlingPolicy == "REQUIRE_EXPLICIT_CONTEXT"
+        }
+        val unsupportedPaths = resolutions.filter { resolution -> unsupportedBoundaries.any { it.nodeId == resolution.nodeId } }.map { it.path }
+        if (unsupportedPaths.isNotEmpty()) {
             return admission(
                 RepositoryCoordinateAdmissionStatus.UNRESOLVED_BOUNDARY,
                 projectId,
                 repositoryRevision,
                 graph,
-                "A repository coordinate resolves through an unsupported manifest boundary.",
+                "Repository coordinates resolve through unsupported manifest boundaries: ${unsupportedPaths.joinToString(", ")}.",
             )
         }
         return admission(

@@ -30,6 +30,35 @@ import kotlinx.serialization.json.Json
 
 class RepositoryIntelligenceGraphTest {
     @Test
+    fun `coordinate admission preserves explicit import uncertainty and rejects dynamic boundaries`() {
+        val state = createTempDirectory("orchard-coordinate-import-state-")
+        val repository = createTempDirectory("orchard-coordinate-import-repository-")
+        Files.writeString(repository.resolve("Main.kt"), "import java.nio.file.Path\nclass Main(val source: Path)\n")
+        Files.writeString(repository.resolve("Dynamic.kt"), "class Dynamic { fun load() = Class.forName(\"example.Hidden\") }\n")
+        git(repository, "init")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Import and dynamic boundary fixture")
+        val revision = git(repository, "rev-parse", "HEAD")
+        val workspace = WorkspaceStore(repositoryBindings = FileRepositoryBindingStore(state))
+        createProject(workspace)
+        workspace.bindRepository(1, repository.toString())
+        val importer = RepositoryIntelligenceImporter(workspace)
+        val graph = importer.ensure(1, repository.toString(), revision).graph
+        val importBoundary = graph.unresolvedBoundaries.single { it.path == "Main.kt" }
+        assertEquals("UNRESOLVED_IMPORT", importBoundary.kind)
+        assertEquals("REQUIRE_EXPLICIT_CONTEXT", importBoundary.handlingPolicy)
+        val admission = RepositoryIntelligenceCoordinateAdmission(importer)
+        val evidence = admission.assess(1, repository.toString(), revision, listOf(RepositoryCoordinate("main", "Main.kt", listOf(0))))
+        assertEquals(RepositoryCoordinateAdmissionStatus.READY, evidence.status)
+        assertEquals(sha256Content("import java.nio.file.Path\nclass Main(val source: Path)\n"), evidence.resolutions.single().sourceHash)
+        val selection = graphLocalRepositoryAnalysisSelection(graph, listOf("Update Main.kt"), coordinatePaths = listOf("Main.kt"))
+        assertTrue(importBoundary.boundaryId in selection.unresolvedBoundaryIds)
+        val dynamic = admission.assess(1, repository.toString(), revision, listOf(RepositoryCoordinate("dynamic", "Dynamic.kt", listOf(0))))
+        assertEquals(RepositoryCoordinateAdmissionStatus.UNRESOLVED_BOUNDARY, dynamic.status)
+        assertTrue(dynamic.diagnostic.orEmpty().contains("Dynamic.kt"))
+    }
+
+    @Test
     fun `coordinate recovery creates corrective bug without reopening started staged plan`() {
         val state = createTempDirectory("orchard-frozen-coordinate-recovery-state-")
         val repository = createTempDirectory("orchard-frozen-coordinate-recovery-repository-")
