@@ -4,7 +4,7 @@
 
 Proposed
 
-Refines the budgeting boundary in [ADR 028](028-context-bounded-model-profiles.md) and extends [ADR 029](029-user-configurable-model-apertures.md), [ADR 048](048-deterministic-attention-compilation.md), [ADR 049](049-attention-layer-definition.md), [ADR 051](051-resource-bounded-persistence-and-stop-authority.md), [ADR 054](054-commit-pinned-repository-intelligence-manifests.md), and [ADR 055](055-coordinate-aware-work-definition-admission.md). It does not supersede their authority, provenance, resource, or historical-record invariants. Requirements below are architectural policy proposed for implementation, not a claim that the current compiler satisfies them.
+Clarifies completion of the Attention integration described by [ADR 048](048-deterministic-attention-compilation.md) and [ADR 049](049-attention-layer-definition.md), refines the budgeting boundary in [ADR 028](028-context-bounded-model-profiles.md), and extends [ADR 029](029-user-configurable-model-apertures.md), [ADR 051](051-resource-bounded-persistence-and-stop-authority.md), [ADR 054](054-commit-pinned-repository-intelligence-manifests.md), and [ADR 055](055-coordinate-aware-work-definition-admission.md). It does not supersede their authority, provenance, resource, or historical-record invariants or introduce an Attention replacement. Integration repairs and proposed additional quality guarantees are distinguished below; neither is claimed delivered by this record.
 
 ## Context
 
@@ -42,9 +42,23 @@ This evidence does not establish physical model-window exhaustion or that 23 fil
 
 ADR 028 deliberately permitted a conservative byte-based preflight estimate when a matching tokenizer was unavailable. That fail-safe was intended to prevent undercounting, not to imply that bytes were measured tokens. Its rationale remains valid; its units, uncertainty, and rejection semantics must become explicit.
 
+### Integration Repair Versus Additional Guarantees
+
+The implementation trace below establishes that repository analysis constructs its context independently of Attention. Relative to the governing Attention design, this is a missing integration, not evidence that Orchard needs a new context architecture. Coding integrates frames later, but source retrieval and final request assembly do not establish that the materialized context faithfully preserves all required frame relationships.
+
+| Classification | Work required | Architectural meaning |
+| --- | --- | --- |
+| Attention integration repair | Apply Attention authority and traceability to analysis before evidence selection, and preserve them through retrieval and serialization | Complete the intended integration; do not add a parallel context authority |
+| Contract and diagnostic repair | Align stage instructions, schema routing, parsing, and validation; distinguish existing failure causes and honestly label budget units | Correct inconsistent implementation, not create new workflow authority |
+| Proposed quality-policy refinements | Define stage-specific excerpt adequacy, post-compaction quality gates, canonical evidence representation, and binding-aware accounting | Specify additional measurable guarantees within Attention; decisions and implementation remain outstanding |
+
+An analysis-stage projection cannot use the coding-frame constructor unchanged: the accepted plan and executable work package it requires do not exist until analysis completes. A stage-appropriate representation is an integration detail under the same Attention principles, not permission to invent plan authority or replace the Attention layer.
+
 ## Decision
 
-Orchard will compile **quality-governed invocation context** from admitted authority and revision-pinned evidence. Quality is determined before inference by relevance, authority, semantic adequacy, consistency, representation cost, and reproducibility. It is not a single aggregate score or a model's assertion that it has enough context.
+Orchard will complete the existing Attention integration so that Attention relationships govern **quality-governed invocation context** from admitted authority and revision-pinned evidence. The frame or stage-appropriate Attention projection must control evidence selection and remain traceable through excerpting, compaction, envelope serialization, and provider formatting; merely embedding a frame alongside independently selected source is insufficient.
+
+Quality is determined before inference by relevance, authority, semantic adequacy, consistency, representation cost, and reproducibility. It is not a single aggregate score or a model's assertion that it has enough context. The quality rules below refine faithful Attention compilation; they do not establish a separate context-quality authority or require a new orchestration subsystem.
 
 The governing rule is:
 
@@ -135,6 +149,7 @@ Slicing is a remedy for measured, relevant workload size, not a way to conceal a
 
 ## Consequences
 
+- Repository analysis joins the intended Attention integration rather than acquiring a separate reasoning or context architecture.
 - Context quality becomes an inspectable Orchard responsibility rather than prompt-engineering intuition.
 - Valid coordinates and valid source hashes remain necessary but are no longer confused with semantic sufficiency.
 - Smaller prompts do not automatically imply better reasoning; useful evidence must survive compaction.
@@ -145,6 +160,10 @@ Slicing is a remedy for measured, relevant workload size, not a way to conceal a
 - A blocked context can be repaired without rewriting historical authority, spending inference, or weakening acceptance.
 
 ## Alternatives Considered
+
+### Introduce a Parallel Context Architecture
+
+Rejected. The trace shows missing Attention integration and incomplete enforcement of materialized context, not that the governing Attention principles must be replaced. Repair the integration and specify its missing quality guarantees before considering another abstraction.
 
 ### Increase the Aperture First
 
@@ -164,9 +183,9 @@ Rejected as admission authority. A model may assist bounded investigation, but c
 
 ## Open Questions and Completion Gate
 
-This proposal is incomplete pending an exact implementation trace. The audit establishes context defects but does not establish that Attention frames themselves are inadequate. Before accepting this decision or implementing a new abstraction, trace the active path from admitted authority through frame compilation, evidence selection, excerpt generation, compaction, envelope serialization, system instructions, provider formatting, and validation.
+The source-path trace is recorded below and establishes the missing analysis integration and the absence of a final semantic context gate in coding. It does not establish that the governing Attention design is inadequate. This proposal remains incomplete pending stage-specific quality-policy decisions, corrective integration, and executable final-request evidence.
 
-The trace must answer:
+The trace addresses:
 
 - Which model-backed stages actually compile and consume an Attention frame, and which construct independent context?
 - Where are frame relationships, evidence-only dispositions, active/deferred coverage, and permissions retained, weakened, or omitted?
@@ -247,11 +266,11 @@ The analysis system prompt requests `RepositoryAnalysisCandidate`, and decoding 
 
 ### Minimum Changes for Faithfulness
 
-1. **Compile the analysis stage's authority relationships before selecting evidence.** Reuse the Attention authority semantics, but do not fabricate a coding frame: its accepted plan and work-package dependencies do not exist before analysis. Represent requirements, pinned roots, reasoning permissions, unresolved relationships, and coverage/deferment without granting mutation authority.
-2. **Make the invocation projection control retrieval.** Map every source item and canonical evidence reference to a correlation and an inclusion reason. Carry required contracts, producers/consumers, regression and read-only evidence where the active question needs them, rather than equating evidence selection with writable ownership.
-3. **Validate the materialized context after every lossy transformation.** Check reference resolution, source provenance, explicit coverage, required semantic anchors/windows, and the stage contract after excerpting and compaction. Distinguish sufficient evidence from unresolved evidence; do not pretend deterministic checks can prove every semantic judgment.
-4. **Use one typed output contract through serialization, provider formatting, parsing, and validation.** Preserve stage responsibilities and remove stale schema markers and contradictory limits. Validate the exact provider-message representation, not just the frame object.
-5. **Make budget and rejection evidence trustworthy.** Separate byte guards from binding-aware token accounting, deduplicate identities, and record a final frame-to-context mapping and typed failure report. Report capacity only after accounting and adequacy are established.
+1. **Integration repair: compile the analysis stage's authority relationships before selecting evidence.** Reuse the Attention authority semantics, but do not fabricate a coding frame: its accepted plan and work-package dependencies do not exist before analysis. Represent requirements, pinned roots, reasoning permissions, unresolved relationships, and coverage/deferment without granting mutation authority.
+2. **Integration repair: make the invocation projection control retrieval.** Map every source item to a correlation and an inclusion reason. Carry required contracts, producers/consumers, regression and read-only evidence where the active question needs them, rather than equating evidence selection with writable ownership. Canonical representation is a proposed refinement, not a prerequisite for restoring traceability.
+3. **Quality-policy refinement: validate the materialized context after every lossy transformation.** Check reference resolution, source provenance, explicit coverage, required semantic anchors/windows, and the stage contract after excerpting and compaction. Distinguish sufficient evidence from unresolved evidence; do not pretend deterministic checks can prove every semantic judgment.
+4. **Contract repair: use one typed output contract through serialization, provider formatting, parsing, and validation.** Preserve stage responsibilities and remove stale schema markers and contradictory limits. Validate the exact provider-message representation, not just the frame object.
+5. **Diagnostic repair and accounting refinement: make budget and rejection evidence trustworthy.** Immediately distinguish failure causes and label conservative estimates honestly. Binding-aware token accounting and canonical evidence deduplication remain explicit policy refinements. Record a final frame-to-context mapping and typed failure report; report capacity only after accounting and adequacy are established.
 
 The decisive tests are not only frame hash tests: a structurally valid frame with headers-only source must fail behavior adequacy; removal of necessary consumer/test evidence must fail or explicitly defer the affected obligation; evidence-only paths must not grant mutation permission; a schema-marker or provider-wrapper change must not change the intended contract; and large coordinate inventories must preserve explicit coverage across selection limits. Positive tests must show that adequate bounded contexts still dispatch without weakening authority.
 
@@ -263,10 +282,12 @@ The original ambiguity is now resolved: the failed analysis did not use a coding
 
 ## Implementation and Validation
 
-First instrument compilation and distinguish failure causes. Then implement binding-aware accounting, aligned output contracts, canonical evidence references, typed relevance, and adequacy-preserving excerpts. Reassess measured workloads before adding analysis slicing. These are separate changes with their own regression evidence; this ADR does not declare them delivered.
+First repair analysis-stage Attention integration and establish traceability through evidence selection and the final request, with focused regression tests. In that work, correct stage-contract contradictions and expose accurate failure causes and budget units. Separately decide and implement stage-specific adequacy gates, binding-aware accounting, and canonical evidence representation within the same Attention compilation path. Reassess measured workloads before adding analysis slicing. A proposed representation optimization must not delay the corrective integration. These are separate changes with their own regression evidence; this ADR does not declare them delivered.
 
 Validation must cover:
 
+- analysis-stage Attention integration before retrieval, without fabricated coding-plan or work-package authority;
+- final-request traceability to Attention relationships, not just the presence of a serialized frame;
 - different byte/token ratios, multilingual text, tokenizer mismatch, and provider formatting overhead;
 - explicit reserve policy and unchanged user overrides;
 - a fixed metadata floor that exceeds the byte fallback but fits the matching tokenizer's token budget;
