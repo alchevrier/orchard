@@ -232,6 +232,30 @@ const val MODEL_TOKEN_COUNT_TOKENIZER = "TOKENIZER_WITH_OVERHEAD_RESERVE"
 const val MODEL_TOKEN_COUNT_BYTE_FALLBACK = "UTF8_BYTE_UPPER_BOUND"
 const val MODEL_PROVIDER_OVERHEAD_RESERVE_TOKENS = 0
 const val MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT = "UNVERIFIED_PROVIDER_TEMPLATE"
+const val MODEL_INPUT_FORMAT_GPT_OSS_HARMONY = "gpt-oss-harmony-v1"
+const val MODEL_TOKEN_COUNT_FORMATTED_UPPER_BOUND = "FORMATTED_INPUT_TOKEN_UPPER_BOUND"
+private const val GPT_OSS_OPTIONAL_BOUNDARY_TOKENS = 2
+
+internal data class FormattedModelInput(val prompt: String, val providerFormat: String)
+
+internal fun formatModelInput(value: String, binding: ModelBindingProfile): FormattedModelInput? {
+    val protocol = binding.configuration["protocol"]
+    if (protocol == null || protocol == "OLLAMA_NATIVE" && binding.configuration["input.format"] == "raw") {
+        return FormattedModelInput(value, "raw-input-v1")
+    }
+    if (protocol != "OLLAMA_NATIVE" || binding.configuration["input.format"] != MODEL_INPUT_FORMAT_GPT_OSS_HARMONY ||
+        binding.model !in setOf("gpt-oss:120b", "gpt-oss:20b")) return null
+    val date = binding.configuration["input.format.date"]?.let {
+        runCatching { java.time.LocalDate.parse(it).toString() }.getOrNull()
+    } ?: return null
+    return FormattedModelInput(
+        "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\n" +
+            "Knowledge cutoff: 2024-06\nCurrent date: $date\n\nReasoning: low\n\n" +
+            "# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>" +
+            "<|start|>user<|message|>$value<|end|><|start|>assistant",
+        MODEL_INPUT_FORMAT_GPT_OSS_HARMONY,
+    )
+}
 
 @Serializable
 @OptIn(ExperimentalSerializationApi::class)
@@ -246,16 +270,36 @@ data class ModelTokenAccounting(
     val providerFormat: String? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val capacityEstablished: Boolean = false,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val serializedInputBytes: Int? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val serializedInputHash: String? = null,
 )
 
 fun accountModelInput(value: String, binding: ModelBindingProfile): ModelTokenAccounting {
-    val protocol = binding.configuration["protocol"]
-    val raw = protocol == null || protocol == "OLLAMA_NATIVE" && binding.configuration["input.format"] == "raw"
     val content = accountModelText(value, binding, 0)
+    val formatted = formatModelInput(value, binding)
+    if (formatted?.providerFormat == MODEL_INPUT_FORMAT_GPT_OSS_HARMONY) {
+        val rendered = accountModelText(formatted.prompt, binding, 0)
+        val bytes = formatted.prompt.encodeToByteArray().size
+        val total = if (rendered.method == MODEL_TOKEN_COUNT_BYTE_FALLBACK) bytes else rendered.totalTokens
+        val boundedTotal = (maxOf(total, content.totalTokens).toLong() + GPT_OSS_OPTIONAL_BOUNDARY_TOKENS).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        return content.copy(
+            providerOverheadTokens = boundedTotal - content.totalTokens,
+            totalTokens = boundedTotal,
+            method = if (rendered.method == MODEL_TOKEN_COUNT_BYTE_FALLBACK) MODEL_TOKEN_COUNT_BYTE_FALLBACK else MODEL_TOKEN_COUNT_FORMATTED_UPPER_BOUND,
+            providerFormat = formatted.providerFormat,
+            capacityEstablished = true,
+            serializedInputBytes = bytes,
+            serializedInputHash = com.orchard.backend.workspace.stagedPlanHash(formatted.prompt),
+        )
+    }
     return content.copy(
-        method = if (raw) content.method else MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT,
-        providerFormat = if (raw) "raw-input-v1" else "unverified-provider-template-v1",
-        capacityEstablished = raw,
+        method = if (formatted != null) content.method else MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT,
+        providerFormat = formatted?.providerFormat ?: "unverified-provider-template-v1",
+        capacityEstablished = formatted != null,
+        serializedInputBytes = formatted?.prompt?.encodeToByteArray()?.size,
+        serializedInputHash = formatted?.prompt?.let { com.orchard.backend.workspace.stagedPlanHash(it) },
     )
 }
 

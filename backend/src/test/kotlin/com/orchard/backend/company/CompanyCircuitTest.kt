@@ -261,7 +261,7 @@ class CompanyCircuitTest {
 
     @Test
     fun `analysis admission uses final raw provider accounting without changing explicit apertures`() = runTest {
-        for (format in listOf("raw", "mismatch", "automatic", "oversized")) {
+        for (format in listOf("raw", "mismatch", "automatic", "oversized", "native")) {
             val state = createTempDirectory("orchard-accounting-$format-")
             val projects = createTempDirectory("orchard-accounting-projects-")
             val bindings = FileRepositoryBindingStore(state)
@@ -281,6 +281,7 @@ class CompanyCircuitTest {
             val configuration = catalog.bindings.single().configuration + when (format) {
                 "raw", "oversized" -> mapOf("input.format" to "raw")
                 "mismatch" -> mapOf("input.format" to "raw", "tokenizer.model" to "different-model")
+                "native" -> emptyMap()
                 else -> mapOf("input.format" to "automatic")
             }
             val provider = com.orchard.backend.vector.CatalogModelProvider(catalog.endpoints.single(),
@@ -312,13 +313,14 @@ class CompanyCircuitTest {
                 assertEquals(5_600, selection.modelInputBudgetTokens)
                 val metadata = requireNotNull(selection.minimumEnvelopeAccounting)
                 assertTrue(metadata.contentBytes > selection.modelInputBudgetTokens, metadata.toString())
-                if (format == "raw" || format == "oversized") {
+                if (format == "raw" || format == "oversized" || format == "native") {
                     assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, result.status, result.diagnostic)
                     assertEquals(listOf(ANALYSIS_ATTEMPT_RUNNING, ANALYSIS_ATTEMPT_BLOCKED), records.map { it.state })
                     assertTrue(metadata.totalTokens < selection.modelInputBudgetTokens)
                     val request = requests.single()
                     assertEquals("true", request.getValue("raw").jsonPrimitive.content)
-                    val prompt = request.getValue("prompt").jsonPrimitive.content
+                    val wirePrompt = request.getValue("prompt").jsonPrimitive.content
+                    val prompt = if (format == "native") wirePrompt.substringAfter("<|start|>user<|message|>").substringBeforeLast("<|end|><|start|>assistant") else wirePrompt
                     assertTrue(prompt.contains("\u4f60\u597d"))
                     val contract = com.orchard.backend.vector.ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE
                     assertTrue(prompt.contains(contract.instruction))
@@ -332,8 +334,18 @@ class CompanyCircuitTest {
                     }
                     val accounting = com.orchard.backend.vector.accountModelInput(prompt, provider.bindingProfile())
                     assertEquals(selection.tokenAccounting, accounting)
-                    assertEquals(0, accounting.providerOverheadTokens)
-                    assertEquals("raw-input-v1", accounting.providerFormat)
+                    if (format == "native") {
+                        assertEquals(com.orchard.backend.vector.MODEL_INPUT_FORMAT_GPT_OSS_HARMONY, accounting.providerFormat)
+                        assertTrue(accounting.providerOverheadTokens > 2)
+                        assertEquals(wirePrompt, requireNotNull(com.orchard.backend.vector.formatModelInput(prompt, provider.bindingProfile())).prompt)
+                        assertTrue(wirePrompt.startsWith("<|start|>system<|message|>"))
+                        assertEquals(wirePrompt.encodeToByteArray().size, accounting.serializedInputBytes)
+                        assertEquals(com.orchard.backend.workspace.stagedPlanHash(wirePrompt), accounting.serializedInputHash)
+                        assertTrue("input.format" !in configuration)
+                    } else {
+                        assertEquals(0, accounting.providerOverheadTokens)
+                        assertEquals("raw-input-v1", accounting.providerFormat)
+                    }
                     assertTrue(accounting.contentBytes > accounting.contentTokens)
                     val observation = workspace.modelExecutions().single()
                     assertEquals(accounting, observation.inputAccounting)

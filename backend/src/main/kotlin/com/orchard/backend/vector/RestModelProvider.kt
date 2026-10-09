@@ -114,6 +114,7 @@ class CatalogModelProvider(
     private val client = if (engine == null) HttpClient(CIO) { configure() } else HttpClient(engine) { configure() }
     private val triagePrompt = loadPrompt("architect_phase0_triage.md")
     private val planningPrompt = loadPrompt("architect_phase2_planning.md")
+    private val inputFormatDate = java.time.LocalDate.now(java.time.Clock.systemUTC()).toString()
     @Volatile
     private var ollamaResidentUntilNanos = 0L
     @Volatile
@@ -176,13 +177,20 @@ class CatalogModelProvider(
         model = binding.model,
         contextWindowTokens = binding.contextWindowTokens,
         capabilities = binding.capabilities,
-        configuration = binding.configuration + mapOf(
+        configuration = effectiveInputConfiguration() + mapOf(
             "protocol" to endpoint.protocol,
             "locality" to endpoint.locality,
             "providerPolicy" to providerPolicy,
         ),
         modelDigest = binding.modelDigest,
     )
+
+    private fun effectiveInputConfiguration(): Map<String, String> {
+        if (endpoint.protocol != PROVIDER_PROTOCOL_OLLAMA_NATIVE || binding.model !in setOf("gpt-oss:120b", "gpt-oss:20b")) return binding.configuration
+        val format = binding.configuration["input.format"] ?: MODEL_INPUT_FORMAT_GPT_OSS_HARMONY
+        if (format != MODEL_INPUT_FORMAT_GPT_OSS_HARMONY) return binding.configuration
+        return mapOf("input.format" to format, "input.format.date" to inputFormatDate) + binding.configuration
+    }
 
     override fun resourceDemand(profile: ModelExecutionProfile): ModelResourceDemand =
         resourceDemand(profile, profile.inputBudgetTokens)
@@ -280,7 +288,9 @@ class CatalogModelProvider(
         contract: ModelOutputContract,
     ): OllamaCatalogResponse {
         val startedAt = nanoTime()
-        val promptHash = providerPromptHash(prompt)
+        val formattedInput = formatModelInput(prompt, bindingProfile())
+        val wirePrompt = formattedInput?.prompt ?: prompt
+        val promptHash = providerPromptHash(wirePrompt)
         val promptTokens = accountModelInput(prompt, bindingProfile()).totalTokens
         val think = ollamaThinkControl(structured)
         val options = OllamaCatalogOptions(
@@ -298,14 +308,14 @@ class CatalogModelProvider(
                 if (structured) {
                     setBody(OllamaCatalogRequest(
                         binding.model,
-                        prompt,
+                        wirePrompt,
                         format = ollamaResponseFormat(contract),
                         think = think,
                         options = options,
-                        raw = binding.configuration["input.format"] == "raw",
+                        raw = formattedInput != null,
                     ))
                 } else {
-                    setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options, raw = binding.configuration["input.format"] == "raw"))
+                    setBody(OllamaCatalogPlainRequest(binding.model, wirePrompt, think = think, options = options, raw = formattedInput != null))
                 }
             }
         } catch (error: Exception) {

@@ -32,6 +32,78 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ModelProviderCatalogTest {
     @Test
+    fun `default GPT OSS catalog formats identical raw wire input across structured fallback`() = runTest {
+        val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
+        val engine = MockEngine { request ->
+            requests += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+            respond(if (requests.size == 1) """{"response":"{","done":false}""" else """{"response":"{}","done":true}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val saved = catalog.bindings.single().copy(model = "gpt-oss:120b")
+        assertFalse("input.format" in saved.configuration)
+        val provider = CatalogModelProvider(catalog.endpoints.single(), saved, engine = engine)
+        try {
+            val prompt = "\u4f60\u597d \uD83D\uDE80 Return one compact JSON object."
+            val profile = provider.bindingProfile()
+            assertEquals(MODEL_INPUT_FORMAT_GPT_OSS_HARMONY, profile.configuration["input.format"])
+            val expected = requireNotNull(formatModelInput(prompt, profile))
+            val accounting = accountModelInput(prompt, profile)
+            val result = provider.executeRepositoryAnalysis(prompt, 128, 4_096)
+            assertEquals(2, requests.size)
+            requests.forEach {
+                assertEquals(expected.prompt, it.getValue("prompt").jsonPrimitive.content)
+                assertEquals("true", it.getValue("raw").jsonPrimitive.content)
+            }
+            assertTrue("format" in requests.first())
+            assertFalse("format" in requests.last())
+            assertEquals(accounting.totalTokens, result.promptTokens)
+            assertEquals(expected.prompt.encodeToByteArray().size, accounting.serializedInputBytes)
+            assertEquals(com.orchard.backend.workspace.stagedPlanHash(expected.prompt), accounting.serializedInputHash)
+            assertEquals(profile, provider.bindingProfile())
+            assertFalse("input.format" in saved.configuration)
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test
+    fun `GPT OSS Harmony formatting accounts complete payload and fails closed for unsupported bindings`() {
+        val binding = ModelBindingProfile("test", "local", "gpt-oss:120b", 131_072, emptySet(), mapOf(
+            "protocol" to PROVIDER_PROTOCOL_OLLAMA_NATIVE, "input.format" to MODEL_INPUT_FORMAT_GPT_OSS_HARMONY,
+            "input.format.date" to "2026-10-09",
+        ))
+        val prompt = "\u4f60\u597d \uD83D\uDE80 Return one JSON object."
+        val formatted = requireNotNull(formatModelInput(prompt, binding))
+        assertTrue(formatted.prompt.contains("Current date: 2026-10-09"))
+        assertTrue(formatted.prompt.contains("<|start|>user<|message|>$prompt<|end|>"))
+        assertTrue(formatted.prompt.endsWith("<|start|>assistant"))
+        val input = accountModelInput(prompt, binding)
+        val rendered = accountModelOutput(formatted.prompt, binding)
+        assertTrue(input.capacityEstablished)
+        assertEquals(MODEL_TOKEN_COUNT_FORMATTED_UPPER_BOUND, input.method)
+        assertEquals(rendered.totalTokens + 2, input.totalTokens)
+        assertEquals(input.totalTokens - input.contentTokens, input.providerOverheadTokens)
+        assertTrue(input.providerOverheadTokens > 2)
+        assertEquals(prompt.encodeToByteArray().size, input.contentBytes)
+        assertEquals(formatted.prompt.encodeToByteArray().size, input.serializedInputBytes)
+        assertEquals(com.orchard.backend.workspace.stagedPlanHash(formatted.prompt), input.serializedInputHash)
+        for (unsupported in listOf(
+            binding.copy(model = "unknown-model"),
+            binding.copy(configuration = binding.configuration - "input.format.date"),
+            binding.copy(configuration = binding.configuration + ("input.format.date" to "invalid")),
+            binding.copy(configuration = binding.configuration + ("input.format" to "automatic")),
+        )) {
+            assertEquals(null, formatModelInput(prompt, unsupported))
+            assertFalse(accountModelInput(prompt, unsupported).capacityEstablished)
+        }
+        val mismatch = binding.copy(configuration = binding.configuration + ("tokenizer.model" to "different-model"))
+        val fallback = accountModelInput(prompt, mismatch)
+        assertEquals(MODEL_TOKEN_COUNT_BYTE_FALLBACK, fallback.method)
+        assertEquals(requireNotNull(formatModelInput(prompt, mismatch)).prompt.encodeToByteArray().size + 2, fallback.totalTokens)
+    }
+
+    @Test
     fun `typed stage instructions wire schemas and validators share array boundaries`() = runTest {
         val contracts = listOf(ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE, ModelOutputContract.BOUNDED_CODING_TOOL_BATCH, ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS)
         for (contract in contracts) {
@@ -112,7 +184,7 @@ class ModelProviderCatalogTest {
         assertEquals(0, accounting.providerOverheadTokens)
         assertTrue(accounting.contentBytes > accounting.contentTokens)
         assertEquals(accounting.totalTokens, generation.promptTokens)
-        val automatic = accountModelInput(prompt, provider.bindingProfile().copy(configuration = provider.bindingProfile().configuration - "input.format"))
+        val automatic = accountModelInput(prompt, provider.bindingProfile().copy(configuration = provider.bindingProfile().configuration + ("input.format" to "automatic")))
         assertFalse(automatic.capacityEstablished)
         assertEquals(MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT, automatic.method)
         val mismatch = accountModelInput(prompt, provider.bindingProfile().copy(configuration = provider.bindingProfile().configuration + ("tokenizer.model" to "different-model")))
