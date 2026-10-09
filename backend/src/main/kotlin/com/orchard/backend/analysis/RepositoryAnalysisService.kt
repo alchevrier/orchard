@@ -948,8 +948,10 @@ class RepositoryAnalysisService(
                 run.workDefinition?.definition?.acceptanceCriteria?.map { criterion -> criterion.verification }.orEmpty(),
             )
         }
+        val identityDiagnostic = output?.let { repositoryAnalysisIdentityDiagnostic(authorityContext, it) }
         val execution = recordExecution(
-            profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence, selectionFor(boundedContext, true).qualityReport
+            profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence, selectionFor(boundedContext, true).qualityReport,
+            downstreamValid = output != null && identityDiagnostic == null,
         ) ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
         if (output == null) return blockAttempt(
             run.runId,
@@ -958,7 +960,7 @@ class RepositoryAnalysisService(
             RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
             attentionDiagnostic ?: repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
         )
-        repositoryAnalysisIdentityDiagnostic(authorityContext, output)?.let {
+        identityDiagnostic?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
         }
         val createResolvedOutput = compileResolvedCreateQuestions(output)
@@ -1127,6 +1129,7 @@ class RepositoryAnalysisService(
         schemaValid: Boolean,
         admission: com.orchard.backend.resource.ResourceAdmissionEvidence,
         qualityReport: com.orchard.backend.attention.ContextQualityReport? = null,
+        downstreamValid: Boolean = schemaValid,
     ) = workspace.recordModelExecution(
         ModelExecutionObservationDraft(
             profile = profile,
@@ -1140,7 +1143,7 @@ class RepositoryAnalysisService(
             inputAccounting = accountModelInput(prompt, binding),
             qualityReport = qualityReport?.copy(downstream = when {
                 generation == null -> com.orchard.backend.attention.ContextQualityStatus.NOT_ATTEMPTED
-                schemaValid -> com.orchard.backend.attention.ContextQualityStatus.PASS
+                downstreamValid -> com.orchard.backend.attention.ContextQualityStatus.PASS
                 else -> com.orchard.backend.attention.ContextQualityStatus.FAIL
             }),
             outputTokens = generation?.completionTokens ?: 0,

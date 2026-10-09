@@ -104,6 +104,7 @@ class ModelProviderCatalogTest {
     }
 
     @Test
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     fun `typed stage instructions wire schemas and validators share array boundaries`() = runTest {
         val contracts = listOf(ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE, ModelOutputContract.BOUNDED_CODING_TOOL_BATCH, ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS)
         for (contract in contracts) {
@@ -121,6 +122,23 @@ class ModelProviderCatalogTest {
                 val request = Json.parseToJsonElement(body).jsonObject
                 assertEquals(prompt, request.getValue("prompt").jsonPrimitive.content)
                 val properties = request.getValue("format").jsonObject.getValue("properties").jsonObject
+                if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
+                    val descriptor = com.orchard.backend.analysis.RepositoryAnalysisCandidate.serializer().descriptor
+                    val required = request.getValue("format").jsonObject.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet()
+                    assertEquals((0 until descriptor.elementsCount).filterNot { descriptor.isElementOptional(it) }.map { descriptor.getElementName(it) }.toSet(), required)
+                    for (field in contract.arrayLimits.keys + "unresolvedQuestions") {
+                        val items = properties.getValue(field).jsonObject.getValue("items").jsonObject
+                        assertEquals(if (field == "evidence") "object" else "string", items.getValue("type").jsonPrimitive.content)
+                    }
+                    val citation = properties.getValue("evidence").jsonObject.getValue("items").jsonObject
+                    val citationDescriptor = com.orchard.backend.analysis.RepositoryEvidenceCitation.serializer().descriptor
+                    val citationProperties = citation.getValue("properties").jsonObject
+                    assertEquals((0 until citationDescriptor.elementsCount).map { citationDescriptor.getElementName(it) }.toSet(), citationProperties.keys)
+                    assertEquals((0 until citationDescriptor.elementsCount).filterNot { citationDescriptor.isElementOptional(it) }.map { citationDescriptor.getElementName(it) }.toSet(), citation.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet())
+                    assertEquals("false", citation.getValue("additionalProperties").jsonPrimitive.content)
+                    assertEquals("string", citationProperties.getValue("contentHash").jsonObject.getValue("type").jsonPrimitive.content)
+                    assertEquals(setOf("string", "null"), citationProperties.getValue("symbol").jsonObject.getValue("type").jsonArray.map { it.jsonPrimitive.content }.toSet())
+                }
                 for ((field, limit) in contract.arrayLimits) {
                     assertTrue(prompt.contains("$field=$limit"))
                     assertEquals(limit.toString(), properties.getValue(field).jsonObject.getValue("maxItems").jsonPrimitive.content)

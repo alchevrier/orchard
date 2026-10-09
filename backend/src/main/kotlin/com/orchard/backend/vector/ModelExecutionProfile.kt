@@ -6,8 +6,15 @@ import java.security.MessageDigest
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.StructureKind
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonPrimitive
 
 const val MODEL_CAPABILITY_STRICT_JSON = "STRICT_JSON"
@@ -21,7 +28,7 @@ enum class ModelOutputContract {
     val versionedId: String
         get() = when (this) {
             JSON_OBJECT -> "json-object-v1"
-            REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v1"
+            REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v2"
             BOUNDED_CODING_TOOL_BATCH -> "bounded-coding-tool-batch-v1"
             BOUNDED_LITERAL_REPLACEMENTS -> "bounded-literal-replacements-v1"
         }
@@ -35,8 +42,16 @@ enum class ModelOutputContract {
 
     val instruction: String
         get() = "Output contract $versionedId. Maximum array lengths: ${arrayLimits.entries.joinToString { "${it.key}=${it.value}" }}. " +
-            if (this == BOUNDED_LITERAL_REPLACEMENTS) "Every operation must use REPLACE_LITERAL. Admitted ownership and action limits still apply."
-            else "Admitted ownership and action limits still apply."
+            when (this) {
+                REPOSITORY_ANALYSIS_CANDIDATE -> "Return JSON matching $structuredSchema. Each evidence contentHash must be copied from that path's pinned repository source hash, not its excerpt hash. Admitted ownership and action limits still apply."
+                BOUNDED_LITERAL_REPLACEMENTS -> "Every operation must use REPLACE_LITERAL. Admitted ownership and action limits still apply."
+                else -> "Admitted ownership and action limits still apply."
+            }
+
+    internal val structuredSchema: JsonObject?
+        get() = if (this == REPOSITORY_ANALYSIS_CANDIDATE) {
+            serializedOutputSchema(com.orchard.backend.analysis.RepositoryAnalysisCandidate.serializer().descriptor, arrayLimits)
+        } else null
 
     fun diagnostic(output: JsonObject): String? {
         for ((field, limit) in arrayLimits) {
@@ -47,6 +62,36 @@ enum class ModelOutputContract {
                 (it as? JsonObject)?.get("action")?.jsonPrimitive?.content != "REPLACE_LITERAL"
             }) return "$versionedId requires REPLACE_LITERAL operations."
         return null
+    }
+}
+
+@OptIn(ExperimentalSerializationApi::class)
+private fun serializedOutputSchema(descriptor: SerialDescriptor, arrayLimits: Map<String, Int> = emptyMap()): JsonObject = buildJsonObject {
+    val type = when (descriptor.kind) {
+        PrimitiveKind.STRING -> "string"
+        StructureKind.CLASS -> "object"
+        StructureKind.LIST -> "array"
+        else -> error("Unsupported output contract descriptor: ${descriptor.serialName}")
+    }
+    put("type", if (descriptor.isNullable) JsonArray(listOf(JsonPrimitive(type), JsonPrimitive("null"))) else JsonPrimitive(type))
+    when (descriptor.kind) {
+        StructureKind.CLASS -> {
+            put("additionalProperties", false)
+            put("required", buildJsonArray {
+                for (index in 0 until descriptor.elementsCount) {
+                    if (!descriptor.isElementOptional(index)) add(JsonPrimitive(descriptor.getElementName(index)))
+                }
+            })
+            put("properties", buildJsonObject {
+                for (index in 0 until descriptor.elementsCount) {
+                    val name = descriptor.getElementName(index)
+                    val property = serializedOutputSchema(descriptor.getElementDescriptor(index))
+                    put(name, arrayLimits[name]?.let { JsonObject(property + ("maxItems" to JsonPrimitive(it))) } ?: property)
+                }
+            })
+        }
+        StructureKind.LIST -> put("items", serializedOutputSchema(descriptor.getElementDescriptor(0)))
+        else -> Unit
     }
 }
 

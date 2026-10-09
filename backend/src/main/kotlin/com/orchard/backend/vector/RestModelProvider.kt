@@ -629,24 +629,7 @@ class ModelProviderRegistry(
 }
 
 private fun ollamaResponseFormat(contract: ModelOutputContract): JsonElement = if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
-    buildJsonObject {
-        put("type", "object")
-        put("additionalProperties", false)
-        put("required", buildJsonArray {
-            listOf("disposition", "summary", "evidence", "reuse", "preservedInvariants", "nonGoals", "sourcePaths", "unresolvedQuestions")
-                .forEach { add(JsonPrimitive(it)) }
-        })
-        put("properties", buildJsonObject {
-            put("disposition", buildJsonObject { put("type", "string") })
-            put("summary", buildJsonObject { put("type", "string") })
-            listOf("evidence", "reuse", "preservedInvariants", "nonGoals", "sourcePaths", "unresolvedQuestions").forEach { name ->
-                put(name, buildJsonObject {
-                    put("type", "array")
-                    contract.arrayLimits[name]?.let { put("maxItems", it) }
-                })
-            }
-        })
-    }
+    requireNotNull(contract.structuredSchema)
 } else if (contract == ModelOutputContract.BOUNDED_CODING_TOOL_BATCH || contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS) {
     val requiresLiteralReplacements = contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS
     buildJsonObject {

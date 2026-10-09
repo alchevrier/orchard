@@ -104,6 +104,81 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class CompanyCircuitTest {
     @Test
+    fun `analysis wire citation contract decodes and validates pinned provenance before plan creation`() = runTest {
+        for (mode in listOf("valid", "missing-hash", "stale-hash")) {
+            val state = createTempDirectory("orchard-citation-$mode-")
+            val projects = createTempDirectory("orchard-citation-projects-")
+            val bindings = FileRepositoryBindingStore(state)
+            val workspace = workspace(state, bindings)
+            createProjectAndEpic(workspace)
+            admitGenesis(workspace)
+            val scenario = ScenarioStaffModel()
+            val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
+            val engine = io.ktor.client.engine.mock.MockEngine { request ->
+                val body = Json.parseToJsonElement((request.body as io.ktor.http.content.TextContent).text).jsonObject
+                requests += body
+                val prompt = body.getValue("prompt").jsonPrimitive.content.substringAfter("<|start|>user<|message|>").substringBeforeLast("<|end|><|start|>assistant")
+                val schema = body.getValue("format").jsonObject
+                assertTrue(prompt.contains(schema.toString()))
+                val required = schema.getValue("properties").jsonObject.getValue("evidence").jsonObject.getValue("items").jsonObject.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet()
+                assertEquals(setOf("path", "observation", "contentHash"), required)
+                val generated = scenario.executeRepositoryAnalysis(prompt, 4_000, 28_000)
+                val candidate = Json.parseToJsonElement(generated.text).jsonObject
+                val citation = candidate.getValue("evidence").jsonArray.single().jsonObject
+                val changed = when (mode) {
+                    "missing-hash" -> citation - "contentHash"
+                    "stale-hash" -> citation + ("contentHash" to kotlinx.serialization.json.JsonPrimitive("0".repeat(64)))
+                    else -> citation
+                }
+                val output = kotlinx.serialization.json.JsonObject(candidate + ("evidence" to kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonObject(changed))))).toString()
+                respond("""{"response":${Json.encodeToString(output)},"done":true}""", headers = io.ktor.http.headersOf(io.ktor.http.HttpHeaders.ContentType, "application/json"))
+            }
+            val catalog = com.orchard.backend.vector.defaultLocalModelProviderCatalog()
+            val provider = com.orchard.backend.vector.CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single().copy(model = "gpt-oss:120b"), engine = engine)
+            try {
+                val company = CompanyControlService(workspace, listOf(provider), FileCompanyControlStore(state), bindings)
+                assertEquals(CompanyCircuitStatus.STARTED, CompanyCircuitService(workspace, company, projects).start(1).status)
+                val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+                val gateway = LocalCodingWorkspaceGateway()
+                val revision = gateway.currentRevision(requireNotNull(run.context.repository.path))
+                val settings = TransientModelProfileSettingsStore()
+                val override = ModelProfileOverride(DefaultModelExecutionProfiles.broadRepositoryAnalysis.id, 24_000, 4_000)
+                settings.save(listOf(override))
+                val attempts = TransientRepositoryAnalysisAttemptStore()
+                val plans = TransientRepositoryExecutionPlanStore()
+                val analysis = RepositoryAnalysisService(workspace, listOf(provider), plans, gateway,
+                    companyControl = company, attemptStore = attempts, profileSettingsStore = settings)
+                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { analysis.tick(run.runId) }
+                assertEquals(1, requests.size)
+                assertEquals(listOf(override), settings.load())
+                assertEquals(revision, gateway.currentRevision(requireNotNull(run.context.repository.path)))
+                val observation = workspace.modelExecutions().single()
+                assertEquals(mode != "missing-hash", observation.schemaValid)
+                assertTrue(observation.outputHash != null)
+                assertEquals(if (mode == "valid") com.orchard.backend.attention.ContextQualityStatus.PASS else com.orchard.backend.attention.ContextQualityStatus.FAIL,
+                    observation.qualityReport?.downstream)
+                if (mode == "valid") {
+                    assertEquals(RepositoryAnalysisTickStatus.PLAN_CREATED, result.status, result.diagnostic)
+                    val plan = requireNotNull(result.plan)
+                    val citation = plan.content.evidence.single { it.path == "build.gradle.kts" }
+                    val original = scenario.analysisPrompts.single().substringAfter("Authoritative repository analysis envelope:\n")
+                    val context = Json.parseToJsonElement(original).jsonObject.getValue("repositoryContext").jsonObject
+                    val file = context.getValue("files").jsonArray.single { it.jsonObject.getValue("path").jsonPrimitive.content == citation.path }.jsonObject
+                    assertEquals(file.getValue("contentHash").jsonPrimitive.content, citation.contentHash)
+                } else {
+                    assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, result.status, result.diagnostic)
+                    assertTrue(result.diagnostic.contains(if (mode == "missing-hash") "contentHash" else "wrong content hash"), result.diagnostic)
+                    assertEquals(null, result.plan)
+                    assertTrue(plans.load().isEmpty())
+                    assertEquals(ANALYSIS_ATTEMPT_BLOCKED, attempts.load().last().state)
+                }
+            } finally {
+                provider.close()
+            }
+        }
+    }
+
+    @Test
     fun `real pinned collection and analysis admission share complete Kotlin evidence contract`() = runTest {
         for (hasBehavior in listOf(true, false)) {
             val state = createTempDirectory("orchard-collected-evidence-")
