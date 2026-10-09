@@ -2,6 +2,7 @@ package com.orchard.backend.workspace
 
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelExecutionProfile
+import com.orchard.backend.vector.ModelTokenAccounting
 import com.orchard.backend.vector.modelBindingFingerprint
 import com.orchard.backend.resource.ResourceAdmissionEvidence
 import java.nio.ByteBuffer
@@ -41,6 +42,10 @@ data class ModelExecutionObservation(
     val recordedAt: String = Instant.now().toString(),
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val attentionFrameHash: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val inputAccounting: ModelTokenAccounting? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val qualityReport: com.orchard.backend.attention.ContextQualityReport? = null,
 )
 
 data class ModelExecutionObservationDraft(
@@ -57,6 +62,8 @@ data class ModelExecutionObservationDraft(
     val schemaValid: Boolean,
     val resourceAdmission: ResourceAdmissionEvidence? = null,
     val attentionFrameHash: String? = null,
+    val inputAccounting: ModelTokenAccounting? = null,
+    val qualityReport: com.orchard.backend.attention.ContextQualityReport? = null,
 )
 
 @Serializable

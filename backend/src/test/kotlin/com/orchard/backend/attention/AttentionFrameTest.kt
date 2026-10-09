@@ -26,6 +26,78 @@ import kotlin.test.assertTrue
 
 class AttentionFrameTest {
     @Test
+    fun `quality dimensions and failed compilation reports are independent and reproducible without inference`() {
+        val context = com.orchard.backend.agent.CodingRepositoryContext(listOf(com.orchard.backend.agent.CodingContextFile("src/Main.kt", "fun answer() = 42\n")), 0)
+        val frame = bindRepositoryAnalysisAttentionContext(analysisFrame(), emptyMap(), setOf("src/Main.kt"))
+        val serialized = kotlinx.serialization.json.Json.parseToJsonElement(kotlinx.serialization.json.Json.encodeToString(AnalysisAttentionFrame.serializer(), frame)) as kotlinx.serialization.json.JsonObject
+        val binding = com.orchard.backend.vector.ModelBindingProfile("test", "test", "gpt-oss:120b", 10000, emptySet(), mapOf("protocol" to "OPENAI_COMPATIBLE"))
+        val input = com.orchard.backend.vector.accountModelInput("hello world", binding)
+        val report = compileContextQualityReport(serialized, context, setOf("src/Main.kt", "src/Missing.kt"), input, 1000)
+        assertEquals(ContextQualityStatus.PASS, report.validity)
+        assertEquals(ContextQualityStatus.PASS, report.relevance)
+        assertEquals(ContextQualityStatus.FAIL, report.adequacy)
+        assertEquals(ContextQualityStatus.UNKNOWN, report.capacity)
+        assertEquals(ContextQualityStatus.NOT_ATTEMPTED, report.downstream)
+        assertEquals(listOf("src/Missing.kt"), report.missingPaths)
+        assertEquals(listOf("docs/Contract.md"), report.deferredPaths)
+        assertEquals(listOf("scope-1"), report.evidence.single().supportedScopes)
+        assertEquals(context.files.single().contentHash, report.evidence.single().sourceHash)
+        assertEquals(contextQualityReportHash(report), contextQualityReportHash(compileContextQualityReport(serialized, context, setOf("src/Main.kt", "src/Missing.kt"), input, 1000)))
+        val overBudget = compileContextQualityReport(serialized, context, setOf("src/Main.kt"), com.orchard.backend.vector.accountModelInput("hello world", binding.copy(configuration = emptyMap())), 1)
+        assertEquals(ContextQualityStatus.PASS, overBudget.adequacy)
+        assertEquals(ContextQualityStatus.FAIL, overBudget.capacity)
+        val decoded = kotlinx.serialization.json.Json.decodeFromString(ContextQualityReport.serializer(), kotlinx.serialization.json.Json.encodeToString(ContextQualityReport.serializer(), report))
+        assertEquals(report, decoded)
+    }
+
+    @Test
+    fun `canonical model references preserve pinned authority and reject missing or ambiguous identities`() {
+        val context = com.orchard.backend.agent.CodingRepositoryContext(listOf(
+            com.orchard.backend.agent.CodingContextFile("src/Main.kt", "fun answer() = 42\n"),
+            com.orchard.backend.agent.CodingContextFile("docs/Contract.md", "The answer is forty two.\n"),
+        ), 0)
+        val frame = bindRepositoryAnalysisAttentionContext(analysisFrame(), emptyMap(), context.files.map { it.path }.toSet())
+        val serialized = kotlinx.serialization.json.Json.parseToJsonElement(kotlinx.serialization.json.Json.encodeToString(AnalysisAttentionFrame.serializer(), frame)) as kotlinx.serialization.json.JsonObject
+        val projection = canonicalAttentionProjection(serialized, context)
+        assertEquals(serialized, resolveCanonicalAttention(projection, context))
+        assertEquals(1, projection.hashes.values.count { it == "1".repeat(64) })
+        assertFalse(projection.frame.toString().contains("src/Main.kt"))
+        assertFalse(projection.frame.toString().contains("docs/Contract.md"))
+        assertTrue(runCatching { resolveCanonicalAttention(projection.copy(sources = emptyMap()), context) }.isFailure)
+        assertTrue(runCatching { canonicalAttentionProjection(serialized, context.copy(files = context.files + context.files.first())) }.isFailure)
+        assertTrue(runCatching { resolveCanonicalAttention(projection.copy(authorities = emptyMap()), context) }.isFailure)
+    }
+
+    @Test
+    fun `large admitted analysis scope retains every coordinate through bounded serialized evidence`() {
+        val paths = (1..100).map { "src/Owner$it.kt" }
+        val definition = com.orchard.backend.workspace.WorkDefinitionManifest(
+            definitionId = 8, revision = 1, workItemId = 9, createdAt = "2026-10-04T00:00:00Z",
+            systemWorkflow = com.orchard.backend.workspace.DefaultSystemWorkflow.resolve(com.orchard.backend.workspace.ENTITY_TASK),
+            definition = com.orchard.backend.workspace.WorkDefinitionSubmission(
+                requestedOutcome = "Preserve every admitted scope.", currentBehavior = "Old behavior.", requiredBehavior = "New behavior.",
+                scope = paths.map { "Modify `$it` behavior." }, nonGoals = emptyList(), constraints = emptyList(), acceptanceCriteria = emptyList(),
+                repositoryCoordinates = paths.mapIndexed { index, path -> com.orchard.backend.workspace.RepositoryCoordinate("coordinate-$index", path, listOf(index)) },
+            ),
+            assessment = com.orchard.backend.workspace.DefinitionAssessment("READY", emptyList()), hash = "1".repeat(64),
+        )
+        val frame = compileRepositoryAnalysisAttentionFrame("repository-analysis", "a".repeat(40), definition, paths.indices.toSet())
+        val bound = bindRepositoryAnalysisAttentionContext(frame, emptyMap(), paths.take(24).toSet())
+        val serialized = kotlinx.serialization.json.Json.encodeToString(AnalysisAttentionFrame.serializer(), bound)
+        val restored = kotlinx.serialization.json.Json.decodeFromString(AnalysisAttentionFrame.serializer(), serialized)
+
+        assertEquals(100, restored.correlations.size)
+        assertEquals(frame.correlations.map { it.scope }, restored.correlations.map { it.scope })
+        assertEquals(paths, restored.correlations.flatMap { it.coordinatePaths })
+        assertEquals(paths.take(24), restored.correlations.flatMap { it.evidencePaths })
+        assertEquals(paths.drop(24), restored.correlations.flatMap { it.deferredPaths })
+        assertEquals(76, restored.correlations.count { it.unresolved })
+        assertEquals(listOf("READ_SOURCE", "PROPOSE_ANALYSIS"), restored.allowedActions)
+        assertEquals(analysisAttentionFrameHash(restored), restored.hash)
+        assertTrue(requireNotNull(analysisAttentionCandidateDiagnostic(restored, emptyList(), listOf(paths.last()))).contains("deferred or absent"))
+    }
+
+    @Test
     fun `compiler preserves bidirectional task code correlation and explicit deferred work`() {
         val plan = plan()
         val workPackage = workPackage()
@@ -40,6 +112,20 @@ class AttentionFrameTest {
         assertEquals(listOf("Return forty two."), frame.correlations.map { it.requirement.text })
         assertEquals(frame.hash, compileCodingAttentionFrame("DELIVER_CHANGE:CODING_PATCH", 9, plan, workPackage, scopeKinds()).hash)
         assertTrue(verifyCodingAttentionFrame(frame, plan, workPackage).adequate)
+        assertTrue(codingAttentionContextQuery(frame).contains("Return 42."))
+        assertFalse(codingAttentionContextQuery(frame).contains("Expose the answer through the API."))
+    }
+
+    @Test
+    fun `verifier rejects rehashed changes to the active operation instruction`() {
+        val plan = plan()
+        val workPackage = workPackage()
+        val valid = compileCodingAttentionFrame("DELIVER_CHANGE:CODING_PATCH", 9, plan, workPackage, scopeKinds())
+        val changed = valid.copy(correlations = valid.correlations.map {
+            it.copy(expectedBehavior = listOf("Redesign the entire module."))
+        }).let { it.copy(hash = attentionFrameHash(it)) }
+
+        assertTrue(verifyCodingAttentionFrame(changed, plan, workPackage).diagnostics.contains("Correlation 1 changes admitted behavior."))
     }
 
     @Test
@@ -136,6 +222,13 @@ class AttentionFrameTest {
         assertEquals(null, evidenceOnly.operationOrder)
         assertEquals(listOf("docs/Contract.md"), evidenceOnly.ownerPaths)
         assertTrue(verifyCodingAttentionFrame(frame, plan, packageAuthority).adequate)
+        assertEquals(listOf("src/Main.kt", "docs/Contract.md"), codingAttentionContextPaths(frame, plan))
+        assertEquals(listOf("src/Main.kt"), frame.ownershipPaths)
+        assertEquals(null, codingAttentionContextDiagnostic(frame, plan, setOf("src/Main.kt", "docs/Contract.md")))
+        assertEquals(
+            "Coding context omits Attention evidence: docs/Contract.md.",
+            codingAttentionContextDiagnostic(frame, plan, setOf("src/Main.kt")),
+        )
         assertEquals(
             "Proposed paths do not reverse-trace to the admitted objective: docs/Contract.md.",
             attentionOperationDiagnostic(frame, listOf(
@@ -195,6 +288,100 @@ class AttentionFrameTest {
         assertTrue(verifyCodingAttentionFrame(frame, plan, workPackage, purpose).adequate)
         assertFalse(verifyCodingAttentionFrame(frame, plan, workPackage, projectPurpose("6".repeat(64))).adequate)
     }
+
+    @Test
+    fun `coding context includes prerequisite owners without selecting unrelated deferred work`() {
+        val plan = plan()
+        val original = workPackage()
+        val packageAuthority = original.copy(
+            ownership = original.ownership.copy(paths = listOf("src/Api.kt")),
+            operations = WorkPackageOperationAuthority(listOf(
+                WorkPackageOperation(2, PLAN_OPERATION_MODIFY, "src/Api.kt", "answerApi", "Expose the answer.", listOf("The API returns 42.")),
+            )),
+            evidence = WorkPackageEvidenceAuthority(emptyList()),
+        )
+        val frame = compileCodingAttentionFrame("DELIVER_CHANGE:CODING_PATCH", 9, plan, packageAuthority, scopeKinds())
+
+        assertEquals(listOf(1), frame.slice.prerequisiteOperationOrders)
+        assertEquals(listOf("src/Api.kt", "src/Main.kt"), codingAttentionContextPaths(frame, plan))
+        assertEquals(listOf("src/Api.kt"), frame.ownershipPaths)
+        assertEquals(
+            "Proposed paths do not reverse-trace to the admitted objective: src/Main.kt.",
+            attentionOperationDiagnostic(frame, listOf(
+                AttentionProposedOperation("REPLACE_LITERAL", "src/Api.kt"),
+                AttentionProposedOperation("REWRITE_FILE", "src/Main.kt"),
+            )),
+        )
+    }
+
+    @Test
+    fun `analysis binding preserves scope coverage and excludes unrelated source`() {
+        val frame = analysisFrame()
+        val bound = bindRepositoryAnalysisAttentionContext(
+            frame,
+            mapOf("implementation" to listOf("src/Main.kt", "src/MainTest.kt")),
+            setOf("src/Main.kt", "docs/Contract.md", "src/Unrelated.kt"),
+        )
+
+        assertEquals(listOf("src/Main.kt"), bound.correlations[0].evidencePaths)
+        assertEquals(listOf("src/MainTest.kt"), bound.correlations[0].deferredPaths)
+        assertEquals(listOf("docs/Contract.md"), bound.correlations[1].evidencePaths)
+        assertFalse(bound.correlations.any { it.unresolved })
+        assertEquals(listOf("READ_SOURCE", "PROPOSE_ANALYSIS"), bound.allowedActions)
+        assertEquals(analysisAttentionFrameHash(bound), bound.hash)
+        assertEquals(null, analysisAttentionCandidateDiagnostic(bound, listOf("src/Main.kt"), listOf("docs/Contract.md")))
+        assertEquals(
+            "Analysis source paths do not trace to candidate Attention evidence: docs/Contract.md.",
+            analysisAttentionCandidateDiagnostic(bound, listOf("docs/Contract.md"), emptyList()),
+        )
+        assertEquals(
+            "Analysis source paths do not trace to candidate Attention evidence: src/Unrelated.kt.",
+            analysisAttentionCandidateDiagnostic(bound, listOf("src/Unrelated.kt"), emptyList()),
+        )
+    }
+
+    @Test
+    fun `analysis binding explicitly defers removed evidence and restores it without stale deferrals`() {
+        val bound = bindRepositoryAnalysisAttentionContext(
+            analysisFrame(), emptyMap(), setOf("src/Main.kt", "docs/Contract.md"),
+        )
+        val compacted = bindRepositoryAnalysisAttentionContext(bound, emptyMap(), setOf("src/Main.kt"))
+
+        assertEquals(bound.correlations.map { it.scope }, compacted.correlations.map { it.scope })
+        assertTrue(compacted.correlations[1].unresolved)
+        assertEquals(listOf("docs/Contract.md"), compacted.correlations[1].deferredPaths)
+        assertEquals(
+            "Analysis citations refer to evidence deferred or absent from Attention context: docs/Contract.md.",
+            analysisAttentionCandidateDiagnostic(compacted, listOf("src/Main.kt"), listOf("docs/Contract.md")),
+        )
+        val restored = bindRepositoryAnalysisAttentionContext(compacted, emptyMap(), setOf("src/Main.kt", "docs/Contract.md"))
+        assertFalse(restored.correlations[1].unresolved)
+        assertTrue(restored.correlations[1].deferredPaths.isEmpty())
+        assertEquals(bound.hash, restored.hash)
+    }
+
+    private fun analysisFrame() = AnalysisAttentionFrame(
+        workflowStepId = "repository-analysis",
+        workItemId = 9,
+        repositoryRevision = "a".repeat(40),
+        objective = AttentionAuthorityReference("WORK_DEFINITION", "8", "1".repeat(64), "Return the answer."),
+        correlations = listOf(
+            AnalysisAttentionCorrelation(
+                AttentionAuthorityReference("WORK_DEFINITION_SCOPE", "scope-1", "1".repeat(64), "Return forty two."),
+                AttentionScopeKind.IMPLEMENTATION,
+                ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE,
+                listOf("src/Main.kt"),
+                listOf("implementation"),
+            ),
+            AnalysisAttentionCorrelation(
+                AttentionAuthorityReference("WORK_DEFINITION_SCOPE", "scope-2", "1".repeat(64), "Inspect the compatibility contract."),
+                AttentionScopeKind.DOCUMENTATION,
+                ATTENTION_DISPOSITION_EVIDENCE_ONLY,
+                listOf("docs/Contract.md"),
+                emptyList(),
+            ),
+        ),
+    )
 
     private fun scopeKinds() = mapOf(
         0 to AttentionScopeKind.IMPLEMENTATION,

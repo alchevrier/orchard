@@ -1,9 +1,54 @@
 package com.orchard.backend.vector
 
+import com.knuddels.jtokkit.Encodings
+import com.knuddels.jtokkit.api.EncodingType
 import java.security.MessageDigest
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 const val MODEL_CAPABILITY_STRICT_JSON = "STRICT_JSON"
+
+enum class ModelOutputContract {
+    JSON_OBJECT,
+    REPOSITORY_ANALYSIS_CANDIDATE,
+    BOUNDED_CODING_TOOL_BATCH,
+    BOUNDED_LITERAL_REPLACEMENTS;
+
+    val versionedId: String
+        get() = when (this) {
+            JSON_OBJECT -> "json-object-v1"
+            REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v1"
+            BOUNDED_CODING_TOOL_BATCH -> "bounded-coding-tool-batch-v1"
+            BOUNDED_LITERAL_REPLACEMENTS -> "bounded-literal-replacements-v1"
+        }
+
+    val arrayLimits: Map<String, Int>
+        get() = when (this) {
+            REPOSITORY_ANALYSIS_CANDIDATE -> mapOf("evidence" to 3, "reuse" to 2, "preservedInvariants" to 2, "nonGoals" to 2, "sourcePaths" to 12)
+            BOUNDED_CODING_TOOL_BATCH, BOUNDED_LITERAL_REPLACEMENTS -> mapOf("operations" to 12)
+            JSON_OBJECT -> emptyMap()
+        }
+
+    val instruction: String
+        get() = "Output contract $versionedId. Maximum array lengths: ${arrayLimits.entries.joinToString { "${it.key}=${it.value}" }}. " +
+            if (this == BOUNDED_LITERAL_REPLACEMENTS) "Every operation must use REPLACE_LITERAL. Admitted ownership and action limits still apply."
+            else "Admitted ownership and action limits still apply."
+
+    fun diagnostic(output: JsonObject): String? {
+        for ((field, limit) in arrayLimits) {
+            val values = output[field] as? JsonArray ?: continue
+            if (values.size > limit) return "$versionedId: $field has ${values.size} items; at most $limit are allowed."
+        }
+        if (this == BOUNDED_LITERAL_REPLACEMENTS && (output["operations"] as? JsonArray).orEmpty().any {
+                (it as? JsonObject)?.get("action")?.jsonPrimitive?.content != "REPLACE_LITERAL"
+            }) return "$versionedId requires REPLACE_LITERAL operations."
+        return null
+    }
+}
 
 @Serializable
 data class ModelExecutionProfile(
@@ -182,6 +227,65 @@ object ModelProfileResolver {
 }
 
 fun estimateModelTokens(value: String): Int = value.encodeToByteArray().size
+
+const val MODEL_TOKEN_COUNT_TOKENIZER = "TOKENIZER_WITH_OVERHEAD_RESERVE"
+const val MODEL_TOKEN_COUNT_BYTE_FALLBACK = "UTF8_BYTE_UPPER_BOUND"
+const val MODEL_PROVIDER_OVERHEAD_RESERVE_TOKENS = 0
+const val MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT = "UNVERIFIED_PROVIDER_TEMPLATE"
+
+@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+data class ModelTokenAccounting(
+    val contentBytes: Int,
+    val contentTokens: Int,
+    val providerOverheadTokens: Int,
+    val totalTokens: Int,
+    val method: String,
+    val tokenizerId: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val providerFormat: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val capacityEstablished: Boolean = false,
+)
+
+fun accountModelInput(value: String, binding: ModelBindingProfile): ModelTokenAccounting {
+    val protocol = binding.configuration["protocol"]
+    val raw = protocol == null || protocol == "OLLAMA_NATIVE" && binding.configuration["input.format"] == "raw"
+    val content = accountModelText(value, binding, 0)
+    return content.copy(
+        method = if (raw) content.method else MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT,
+        providerFormat = if (raw) "raw-input-v1" else "unverified-provider-template-v1",
+        capacityEstablished = raw,
+    )
+}
+
+fun accountModelOutput(value: String, binding: ModelBindingProfile): ModelTokenAccounting =
+    accountModelText(value, binding, 0)
+
+private fun accountModelText(value: String, binding: ModelBindingProfile, overheadTokens: Int): ModelTokenAccounting {
+    val declaredEncoding = if (binding.configuration["tokenizer.model"]?.let { it != binding.model } == true) null else binding.configuration["tokenizer.encoding"] ?: when {
+        binding.model.startsWith("gpt-oss") || binding.model.startsWith("gpt-4o") || binding.model.startsWith("gpt-4.1") -> "o200k_base"
+        binding.model.startsWith("gpt-3.5-turbo") || binding.model.startsWith("gpt-4-turbo") -> "cl100k_base"
+        else -> null
+    }
+    val encodingType = when (declaredEncoding) {
+        "o200k_base" -> EncodingType.O200K_BASE
+        "cl100k_base" -> EncodingType.CL100K_BASE
+        else -> null
+    }
+    val bytes = value.encodeToByteArray().size
+    val tokens = encodingType?.let { modelEncodingRegistry.getEncoding(it).countTokensOrdinary(value) } ?: bytes
+    return ModelTokenAccounting(
+        contentBytes = bytes,
+        contentTokens = tokens,
+        providerOverheadTokens = overheadTokens,
+        totalTokens = (tokens.toLong() + overheadTokens).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+        method = if (encodingType == null) MODEL_TOKEN_COUNT_BYTE_FALLBACK else MODEL_TOKEN_COUNT_TOKENIZER,
+        tokenizerId = encodingType?.let { "jtokkit:1.1.0:$declaredEncoding" },
+    )
+}
+
+private val modelEncodingRegistry by lazy { Encodings.newDefaultEncodingRegistry() }
 
 fun modelBindingFingerprint(binding: ModelBindingProfile): String {
     val canonical = buildString {

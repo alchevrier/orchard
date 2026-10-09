@@ -1041,6 +1041,8 @@ class WorkspaceStore(
             latencyMillis = draft.latencyMillis,
             schemaValid = draft.schemaValid,
             resourceAdmission = draft.resourceAdmission,
+            inputAccounting = draft.inputAccounting,
+            qualityReport = draft.qualityReport,
         )
         val event = ModelExperienceEvent(nextModelExperienceEventId, execution = observation)
         return if (appendModelExperienceEvent(event)) observation else null

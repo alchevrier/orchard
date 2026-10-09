@@ -10,6 +10,8 @@ import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.analysis.WorkPackageCheck
 import com.orchard.backend.analysis.WorkPackageEvidenceCitation
 import com.orchard.backend.workspace.ProjectGenesisRevision
+import com.orchard.backend.workspace.WorkDefinitionManifest
+import com.orchard.backend.workspace.compileScopePathEvidenceSelectors
 import com.orchard.backend.workspace.stagedPlanHash
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
@@ -19,6 +21,7 @@ import kotlinx.serialization.json.Json
 const val ATTENTION_FRAME_VERSION = 1
 const val ATTENTION_DISPOSITION_ACTIONABLE = "ACTIONABLE"
 const val ATTENTION_DISPOSITION_EVIDENCE_ONLY = "EVIDENCE_ONLY"
+const val ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE = "ANALYSIS_CANDIDATE"
 
 @Serializable
 enum class AttentionScopeKind {
@@ -95,6 +98,107 @@ data class AttentionAdequacyReport(
     val diagnostics: List<String>,
 )
 
+@Serializable
+data class AnalysisAttentionCorrelation(
+    val scope: AttentionAuthorityReference,
+    val scopeKind: AttentionScopeKind,
+    val disposition: String,
+    val coordinatePaths: List<String>,
+    val selectorIds: List<String>,
+    val evidencePaths: List<String> = emptyList(),
+    val deferredPaths: List<String> = emptyList(),
+    val unresolved: Boolean = true,
+)
+
+@Serializable
+data class AnalysisAttentionFrame(
+    val formatVersion: Int = ATTENTION_FRAME_VERSION,
+    val workflowStepId: String,
+    val workItemId: Int,
+    val repositoryRevision: String,
+    val objective: AttentionAuthorityReference,
+    val correlations: List<AnalysisAttentionCorrelation>,
+    val allowedActions: List<String> = listOf("READ_SOURCE", "PROPOSE_ANALYSIS"),
+    val hash: String = "",
+)
+
+fun compileRepositoryAnalysisAttentionFrame(
+    workflowStepId: String,
+    repositoryRevision: String,
+    definition: WorkDefinitionManifest,
+    sourceScopeIndexes: Set<Int>,
+): AnalysisAttentionFrame {
+    val selectors = compileScopePathEvidenceSelectors(
+        definition.definition.scope,
+        definition.definition.repositoryEvidenceSelectors,
+    )
+    val frame = AnalysisAttentionFrame(
+        workflowStepId = workflowStepId,
+        workItemId = definition.workItemId,
+        repositoryRevision = repositoryRevision,
+        objective = AttentionAuthorityReference(
+            "WORK_DEFINITION", definition.definitionId.toString(), definition.hash, definition.definition.requestedOutcome,
+        ),
+        correlations = definition.definition.scope.mapIndexed { index, scope ->
+            val scopeSelectors = selectors.filter { index in it.scopeIndexes }
+            AnalysisAttentionCorrelation(
+                scope = AttentionAuthorityReference("WORK_DEFINITION_SCOPE", "scope-${index + 1}", definition.hash, scope),
+                scopeKind = attentionScopeKind(scope),
+                disposition = if (index in sourceScopeIndexes) ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE else ATTENTION_DISPOSITION_EVIDENCE_ONLY,
+                coordinatePaths = (definition.definition.repositoryCoordinates.filter { index in it.scopeIndexes }.map { it.path } +
+                    scopeSelectors.flatMap { it.pathGlobs }.filter { path -> path.none { it in "*?[]{}" } }).distinct(),
+                selectorIds = scopeSelectors.map { it.selectorId },
+            )
+        },
+    )
+    return frame.copy(hash = analysisAttentionFrameHash(frame))
+}
+
+fun bindRepositoryAnalysisAttentionContext(
+    frame: AnalysisAttentionFrame,
+    selectedPathsBySelector: Map<String, List<String>>,
+    availablePaths: Set<String>,
+    relatedPathsByScope: Map<String, List<String>> = emptyMap(),
+): AnalysisAttentionFrame {
+    val bound = frame.copy(correlations = frame.correlations.map { correlation ->
+        val paths = (correlation.coordinatePaths + correlation.evidencePaths + correlation.deferredPaths +
+            correlation.selectorIds.flatMap { selectedPathsBySelector[it].orEmpty() } +
+            relatedPathsByScope[correlation.scope.id].orEmpty()).distinct()
+        val candidates = if (paths.isEmpty() && correlation.selectorIds.isEmpty() && correlation.coordinatePaths.isEmpty()) {
+            availablePaths.sorted()
+        } else paths
+        val evidencePaths = candidates.filter { it in availablePaths }
+        correlation.copy(
+            evidencePaths = evidencePaths,
+            deferredPaths = candidates.filterNot { it in availablePaths },
+            unresolved = evidencePaths.isEmpty(),
+        )
+    })
+    return bound.copy(hash = analysisAttentionFrameHash(bound))
+}
+
+fun analysisAttentionFrameHash(frame: AnalysisAttentionFrame): String = stagedPlanHash(
+    attentionJson.encodeToString(frame.copy(hash = ""))
+)
+
+fun analysisAttentionCandidateDiagnostic(
+    frame: AnalysisAttentionFrame,
+    sourcePaths: List<String>,
+    evidencePaths: List<String>,
+): String? {
+    val suppliedPaths = frame.correlations.flatMap { it.evidencePaths }.toSet()
+    val candidatePaths = frame.correlations.filter { it.disposition == ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE }
+        .flatMap { it.evidencePaths }.toSet()
+    val unsupportedSources = sourcePaths.filterNot { it in candidatePaths }.distinct()
+    if (unsupportedSources.isNotEmpty()) {
+        return "Analysis source paths do not trace to candidate Attention evidence: ${unsupportedSources.joinToString()}."
+    }
+    val unsupportedEvidence = evidencePaths.filterNot { it in suppliedPaths }.distinct()
+    return unsupportedEvidence.takeIf { it.isNotEmpty() }?.let {
+        "Analysis citations refer to evidence deferred or absent from Attention context: ${it.joinToString()}."
+    }
+}
+
 data class AttentionProposedOperation(
     val action: String,
     val path: String,
@@ -145,7 +249,7 @@ fun compileCodingAttentionFrame(
                 ownerPaths = listOf(operation.path),
                 allowedActions = boundedActions(operation.action),
                 evidence = workPackage.evidence.citations.filter { it.path in coverage.evidencePaths },
-                expectedBehavior = operation.acceptanceCriteria.distinct(),
+                expectedBehavior = (listOf(operation.instruction) + operation.acceptanceCriteria).distinct(),
                 verificationCriteria = operation.acceptanceCriteria.distinct(),
             )
         }
@@ -268,6 +372,9 @@ fun verifyCodingAttentionFrame(
             if (operation != null && correlation.allowedActions != boundedActions(operation.action)) {
                 add("Correlation ${correlation.operationOrder} changes path-specific action authority.")
             }
+            if (operation != null && correlation.expectedBehavior != (listOf(operation.instruction) + operation.acceptanceCriteria).distinct()) {
+                add("Correlation ${correlation.operationOrder} changes admitted behavior.")
+            }
             if (correlation.verificationCriteria.isEmpty()) {
                 add("Correlation ${correlation.operationOrder} has no verification criterion.")
             }
@@ -310,6 +417,50 @@ fun verifyCodingAttentionFrame(
 fun attentionFrameHash(frame: AttentionFrame): String = stagedPlanHash(
     attentionJson.encodeToString(frame.copy(hash = ""))
 )
+
+fun codingAttentionContextPaths(frame: AttentionFrame, plan: RepositoryExecutionPlan): List<String> {
+    require(frame.executionPlanId == plan.planId && frame.executionPlanHash == plan.hash) {
+        "Attention context does not match the accepted execution plan."
+    }
+    val correlatedPaths = frame.correlations.flatMap { correlation ->
+        correlation.ownerPaths + correlation.evidence.map { it.path }
+    }
+    val prerequisitePaths = frame.slice.prerequisiteOperationOrders.map { order ->
+        requireNotNull(plan.content.operations.singleOrNull { it.order == order }) {
+            "Attention prerequisite $order has no accepted operation."
+        }
+    }.filter { it.action != "VERIFY" }.map { it.path }
+    return (correlatedPaths + prerequisitePaths).distinct()
+}
+
+fun codingAttentionContextDiagnostic(
+    frame: AttentionFrame,
+    plan: RepositoryExecutionPlan,
+    availablePaths: Set<String>,
+): String? {
+    val expectedPaths = codingAttentionContextPaths(frame, plan).toSet()
+    val missing = expectedPaths - availablePaths
+    if (missing.isNotEmpty()) return "Coding context omits Attention evidence: ${missing.sorted().joinToString()}."
+    val unrelated = availablePaths - expectedPaths
+    return unrelated.takeIf { it.isNotEmpty() }?.let {
+        "Coding context contains paths without Attention correlation: ${it.sorted().joinToString()}."
+    }
+}
+
+fun codingAttentionContextQuery(frame: AttentionFrame): String = buildString {
+    appendLine(frame.objective.text)
+    frame.correlations.forEach { correlation ->
+        appendLine(correlation.scope.text)
+        correlation.expectedBehavior.forEach(::appendLine)
+        correlation.evidence.forEach { citation ->
+            citation.symbol?.let(::appendLine)
+            appendLine(citation.observation)
+        }
+    }
+    frame.constraints.forEach(::appendLine)
+    frame.invariants.forEach(::appendLine)
+    frame.nonGoals.forEach(::appendLine)
+}
 
 fun attentionOperationDiagnostic(frame: AttentionFrame, proposedOperations: List<AttentionProposedOperation>): String? {
     val actionable = frame.correlations.asSequence()

@@ -17,6 +17,7 @@ class ModelExperienceStoreTest {
         val encoded = Json.encodeToString(execution)
 
         assertFalse(encoded.contains("attentionFrameHash"))
+        assertFalse(encoded.contains("inputAccounting"))
         assertEquals(execution, Json.decodeFromString<ModelExecutionObservation>(encoded))
     }
 
@@ -29,6 +30,19 @@ class ModelExperienceStoreTest {
         store.appendEvent(ModelExperienceEvent(1, execution = execution))
 
         assertEquals("d".repeat(64), FileModelExperienceStore(directory).loadEvents().single().execution?.attentionFrameHash)
+    }
+
+    @Test
+    fun `model experience replays token accounting without changing legacy records`() {
+        val directory = createTempDirectory("orchard-token-accounting-")
+        val original = execution(null)
+        val accounting = com.orchard.backend.vector.accountModelInput("hello world", original.binding)
+        val counted = original.copy(inputAccounting = accounting)
+        val store = FileModelExperienceStore(directory)
+
+        store.appendEvent(ModelExperienceEvent(1, execution = counted))
+
+        assertEquals(accounting, FileModelExperienceStore(directory).loadEvents().single().execution?.inputAccounting)
     }
 
     private fun execution(attentionFrameHash: String?) = ModelExecutionObservation(

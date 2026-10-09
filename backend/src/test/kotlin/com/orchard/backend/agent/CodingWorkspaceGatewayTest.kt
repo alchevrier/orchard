@@ -8,11 +8,161 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class CodingWorkspaceGatewayTest {
+    @Test
+    fun `provenance annotation changes excerpt integrity but not pinned source identity`() {
+        val source = CodingContextFile("src/Owner.kt", "fun answer() = 42\n")
+        val annotated = source.copy(content = "// Orchard source lines 1-1\n${source.content}")
+        val frame = kotlinx.serialization.json.JsonObject(emptyMap())
+        fun report(file: CodingContextFile) = com.orchard.backend.attention.compileContextQualityReport(
+            frame, CodingRepositoryContext(listOf(file), 0), setOf(source.path), null, 4_096,
+        )
+        val originalReport = report(source)
+        val annotatedReport = report(annotated)
+        val evidence = annotatedReport.evidence.single()
+
+        assertEquals(source.contentHash, annotated.contentHash)
+        assertEquals(source.contentHash, evidence.sourceHash)
+        assertEquals(sha256Content(annotated.content), evidence.excerptHash)
+        assertNotEquals(originalReport.evidence.single().excerptHash, evidence.excerptHash)
+        assertTrue(evidence.excerptBytes > originalReport.evidence.single().excerptBytes)
+        assertEquals(listOf("1-1"), evidence.originalLineRanges)
+        assertNotEquals(com.orchard.backend.attention.contextQualityReportHash(originalReport),
+            com.orchard.backend.attention.contextQualityReportHash(annotatedReport))
+    }
+
+    @Test
+    fun `provenance annotation preserves required declaration and original source comment`() {
+        val preamble = (1..100).joinToString("\n") { "import example.Dependency$it" } + "\n"
+        val source = CodingContextFile("src/Owner.kt", preamble + "// Caller requires a stable answer.\nfun answer() = 42\n")
+        val original = CodingRepositoryContext(listOf(source), 0)
+        val paths = setOf(source.path)
+        val anchors = repositoryEvidenceAnchors(original, paths)
+        val annotated = source.copy(content = contextFileExcerpt(source, setOf("answer"), 256))
+        val excerpt = CodingRepositoryContext(listOf(annotated), 0)
+
+        assertTrue(annotated.content.startsWith("// Orchard source lines "))
+        assertTrue(annotated.content.contains("// Caller requires a stable answer."))
+        assertTrue(annotated.content.contains("fun answer() = 42"))
+        assertEquals(source.contentHash, annotated.contentHash)
+        assertNotEquals(sha256Content(source.content), sha256Content(annotated.content))
+        assertEquals(anchors, repositoryEvidenceAnchors(excerpt, paths))
+        assertEquals(null, repositoryEvidenceRetentionDiagnostic(anchors, excerpt))
+    }
+
+    @Test
+    fun `provenance re-compaction keeps source coordinates without duplicating annotations`() {
+        val preamble = (1..100).joinToString("\n") { "import example.Dependency$it" } + "\n"
+        val source = CodingContextFile("src/Owner.kt", preamble + "// Caller requires a stable answer.\nfun answer() = 42\nfun unrelated() = 0\n")
+        val annotated = source.copy(content = contextFileExcerpt(source, setOf("answer"), 256))
+        val compacted = annotated.copy(content = contextFileExcerpt(annotated, setOf("answer"), 110))
+        val expected = CodingRepositoryContext(listOf(CodingContextFile(source.path, "// Caller requires a stable answer.\nfun answer() = 42\n")), 0)
+        val paths = setOf(source.path)
+
+        assertTrue(compacted.content.startsWith("// Orchard source lines 101-102\n"), compacted.content)
+        assertEquals(1, compacted.content.lineSequence().count { it.startsWith("// Orchard source lines ") })
+        assertTrue(compacted.content.contains("// Caller requires a stable answer."))
+        assertTrue(!compacted.content.contains("unrelated"))
+        assertEquals(source.contentHash, compacted.contentHash)
+        assertNotEquals(sha256Content(annotated.content), sha256Content(compacted.content))
+        assertEquals(repositoryEvidenceAnchors(expected, paths), repositoryEvidenceAnchors(CodingRepositoryContext(listOf(compacted), 0), paths))
+    }
+
+    @Test
+    fun `provenance retention detects original comment edits and behavioral edits independently`() {
+        val source = CodingContextFile("src/Owner.kt", "fun answer(): Int {\n    // Caller requires a stable answer.\n    return 42\n}\n")
+        val original = CodingRepositoryContext(listOf(source), 0)
+        val anchors = repositoryEvidenceAnchors(original, setOf(source.path))
+        for (content in listOf(
+            source.content.replace("stable answer", "different answer"),
+            source.content.replace("return 42", "return 43"),
+        )) {
+            val changed = source.copy(content = content)
+            assertEquals(source.contentHash, changed.contentHash)
+            assertNotEquals(sha256Content(source.content), sha256Content(changed.content))
+            assertTrue(requireNotNull(repositoryEvidenceRetentionDiagnostic(anchors,
+                CodingRepositoryContext(listOf(changed), 0))).contains(source.path))
+        }
+    }
+
+    @Test
+    fun `provenance shaped source comments and string literals remain original evidence`() {
+        for (content in listOf(
+            "// Orchard source lines 10-10\nfun answer() = 42\n",
+            "fun answer(): Int {\n    // Orchard source lines 10-10\n    return 42\n}\n",
+            "fun message() = \"\"\"\n// Orchard source lines 10-10\n\"\"\"\n",
+        )) {
+            val source = CodingContextFile("src/Owner.kt", content)
+            val original = CodingRepositoryContext(listOf(source), 0)
+            val paths = setOf(source.path)
+            val anchors = repositoryEvidenceAnchors(original, paths)
+            val changed = original.copy(files = listOf(source.copy(content = content.replace("10-10", "20-20"))))
+
+            assertNotEquals(anchors, repositoryEvidenceAnchors(changed, paths))
+            assertTrue(requireNotNull(repositoryEvidenceRetentionDiagnostic(anchors, changed)).contains(source.path))
+        }
+    }
+
+    @Test
+    fun `compaction preserves producer consumer and regression declarations or rejects fit`() {
+        val original = CodingRepositoryContext(listOf(
+            CodingContextFile("src/Producer.kt", "fun produce() = 42\nfun unrelated() = 0\n"),
+            CodingContextFile("src/Consumer.kt", "fun consume() = produce() + 1\n"),
+            CodingContextFile("src/ConsumerTest.kt", "fun regression() { check(consume() == 43) }\n"),
+        ), 0)
+        val paths = original.files.mapTo(hashSetOf()) { it.path }
+        val anchors = repositoryEvidenceAnchors(original, paths)
+        assertEquals(null, repositoryEvidenceRetentionDiagnostic(anchors, original))
+        val misleading = original.copy(files = original.files.map { if (it.path == "src/Producer.kt") it.copy(content = "fun unrelated() = 0\n") else it })
+        assertEquals(null, repositoryContextAdequacyDiagnostic(misleading))
+        assertTrue(requireNotNull(repositoryEvidenceRetentionDiagnostic(anchors, misleading)).contains("src/Producer.kt"))
+        assertTrue(requireNotNull(repositoryEvidenceRetentionDiagnostic(anchors, original.copy(files = original.files.dropLast(1)))).contains("ConsumerTest.kt"))
+        val bounded = com.orchard.backend.analysis.compactRepositoryContextToBudget(
+            original, 500, paths,
+            tokenCounter = { if (it.contains("produce() = 42")) 501 else 499 },
+            fileContentCompactor = { file, _ -> if (file.path == "src/Producer.kt") "fun unrelated() = 0\n" else file.content },
+            contextAdequacy = { repositoryContextAdequacyDiagnostic(it) == null && repositoryEvidenceRetentionDiagnostic(anchors, it) == null },
+            promptFor = { contextJson.encodeToString(it) },
+        )
+        assertEquals(null, bounded)
+    }
+
+    @Test
+    fun `Kotlin context selects complete behavior beyond a long import preamble`() {
+        val source = "package example\n" + (1..200).joinToString("\n") { "import example.Dependency$it" } +
+            "\nclass Owner {\n    fun answer(): Int {\n        return 42\n    }\n}\n"
+        val excerpt = kotlinContextExcerpt(source, setOf("answer"), 150)
+
+        assertTrue(excerpt.contains("return 42"))
+        assertTrue(excerpt.encodeToByteArray().size <= 150)
+        val compacted = contextFileExcerpt(CodingContextFile("src/Owner.kt", excerpt, "a".repeat(64)), setOf("answer"), 80)
+        assertTrue(compacted.contains("// Orchard source lines 203-205"), compacted)
+        assertEquals(null, repositoryContextAdequacyDiagnostic(CodingRepositoryContext(listOf(
+            CodingContextFile("src/Owner.kt", excerpt, "a".repeat(64)),
+        ), 0)))
+    }
+
+    @Test
+    fun `Kotlin context rejects headers and partial behavior but allows complete scaffold source`() {
+        val headers = CodingContextFile("src/Owner.kt", "package example\nimport example.Owner\nclass Owner {", "a".repeat(64))
+        assertTrue(requireNotNull(repositoryContextAdequacyDiagnostic(CodingRepositoryContext(listOf(headers), 0))).startsWith("SOURCE_EVIDENCE_INADEQUATE"))
+        assertTrue(kotlinContextExcerpt("fun answer(): Int {\n" + "    println(42)\n".repeat(100) + "    return 42\n}", setOf("answer"), 64).isEmpty())
+        assertEquals(null, repositoryContextAdequacyDiagnostic(CodingRepositoryContext(listOf(
+            CodingContextFile("src/Scaffold.kt", "class Scaffold\n"),
+        ), 0)))
+        assertEquals(null, repositoryContextAdequacyDiagnostic(CodingRepositoryContext(listOf(
+            CodingContextFile("src/.gitkeep", ""),
+        ), 0)))
+        assertTrue(requireNotNull(repositoryContextAdequacyDiagnostic(CodingRepositoryContext(listOf(
+            CodingContextFile("src/Owner.kt", "", "a".repeat(64)),
+        ), 0))).startsWith("SOURCE_EVIDENCE_EMPTY"))
+    }
+
     @Test
     fun `roadmap and documentation indexes remain in bounded foundation context`() {
         val repository = createTempDirectory("orchard-roadmap-context-")

@@ -39,6 +39,14 @@ Run one backend test class:
   --no-daemon
 ```
 
+Run the full ADR 056 completion gate:
+
+```bash
+./gradlew :backend:adrCompletionGate --no-daemon --console=plain
+```
+
+This is separate from ordinary regression success. The gate requires all 14 criteria in [the acceptance manifest](../adrs/056-completion-gate.json), runs the full backend suite without filters, and emits `backend/build/reports/adr-completion/056.json`. Each criterion needs complete acceptance tests and explicit `integrationTests` through the real service/application/provider boundary. An isolated, non-integrated implementation is void as completion evidence. Missing, skipped, failing, or only partial evidence blocks completion. The ADR remains Proposed while this gate is blocked. Once its status is Accepted, backend `check` also requires the gate. Gate self-tests run as part of backend `check` regardless of adoption status. See [ADR 056](../adrs/056-quality-governed-model-context-compilation.md#automated-completion-gate) for proof boundaries and report provenance.
+
 Run frontend desktop tests:
 
 ```bash

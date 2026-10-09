@@ -19,6 +19,20 @@ import java.util.concurrent.TimeUnit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles
+import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment
+import org.jetbrains.kotlin.com.intellij.openapi.util.Disposer
+import org.jetbrains.kotlin.com.intellij.psi.PsiComment
+import org.jetbrains.kotlin.com.intellij.psi.PsiErrorElement
+import org.jetbrains.kotlin.com.intellij.psi.util.PsiTreeUtil
+import org.jetbrains.kotlin.config.CompilerConfiguration
+import org.jetbrains.kotlin.psi.KtClassOrObject
+import org.jetbrains.kotlin.psi.KtDeclaration
+import org.jetbrains.kotlin.psi.KtNamedFunction
+import org.jetbrains.kotlin.psi.KtProperty
+import org.jetbrains.kotlin.psi.KtPsiFactory
+import org.jetbrains.kotlin.psi.KtScriptInitializer
+import org.jetbrains.kotlin.psi.KtTypeAlias
 
 const val CODING_FILE_WRITE = "WRITE"
 const val CODING_FILE_DELETE = "DELETE"
@@ -198,8 +212,11 @@ class LocalCodingWorkspaceGateway(
             )
             return CodingRepositoryContext(
             files = sources.mapIndexed { index, (relative, source) ->
-                val focused = focusedContextExcerpt(source, queryTokens, budgets[index])
-                val content = if ((focused.encodeToByteArray().size < MIN_PLAN_CONTEXT_FILE_BYTES ||
+                val kotlinSource = relative.endsWith(".kt") || relative.endsWith(".kts")
+                val focused = if (kotlinSource) {
+                    kotlinContextExcerpt(source, queryTokens, budgets[index], relative.endsWith(".kts"))
+                } else focusedContextExcerpt(source, queryTokens, budgets[index])
+                val content = if (!kotlinSource && (focused.encodeToByteArray().size < MIN_PLAN_CONTEXT_FILE_BYTES ||
                     source.lineSequence().any { line ->
                         contextTokens(line).any(SOURCE_OWNER_DECLARATION_TOKENS::contains)
                     } && !focused.lineSequence().any { line ->
@@ -234,8 +251,11 @@ class LocalCodingWorkspaceGateway(
             selected = context(totalContentBytes)
             serializedBytes = CONTEXT_JSON.encodeToString(selected).encodeToByteArray().size
         }
-        require(serializedBytes <= maxSerializedBytes && selected.files.all { it.content.isNotEmpty() }) {
-            "Repository plan context does not fit the model input budget"
+        require(selected.files.all { it.content.isNotEmpty() || it.contentHash == sha256Content("") }) {
+            "SOURCE_EVIDENCE_INADEQUATE: complete declarations cannot fit the source excerpt allowance."
+        }
+        require(serializedBytes <= maxSerializedBytes) {
+            "SOURCE_CONTEXT_BYTE_LIMIT: serialized source exceeds the byte guard."
         }
         return selected
     }
@@ -1063,6 +1083,120 @@ internal fun focusedContextExcerpt(content: String, queryTokens: Set<String>, ma
             bytes += lineBytes
         }
     }
+}
+
+internal fun repositoryContextAdequacyDiagnostic(context: CodingRepositoryContext): String? {
+    for (file in context.files) {
+        if (sha256Content(file.content) == file.contentHash) continue
+        if (file.content.isBlank()) return "SOURCE_EVIDENCE_EMPTY: ${file.path}."
+        if (file.path.endsWith(".kt") || file.path.endsWith(".kts")) {
+            if (!hasCompleteKotlinEvidence(file.content, file.path.endsWith(".kts"))) {
+                return "SOURCE_EVIDENCE_INADEQUATE: ${file.path} contains no complete Kotlin declaration or script statement; headers and partial bodies cannot establish behavior."
+            }
+        } else if (file.path.substringAfterLast('.') in setOf("java", "js", "jsx", "ts", "tsx", "py", "rs", "go", "c", "cpp", "h")) {
+            return "SOURCE_EVIDENCE_UNSUPPORTED: ${file.path} requires complete source or a supported declaration parser."
+        }
+    }
+    return null
+}
+
+internal fun contextFileExcerpt(file: CodingContextFile, queryTokens: Set<String>, maxBytes: Int): String =
+    if (file.path.endsWith(".kt") || file.path.endsWith(".kts")) {
+        kotlinContextExcerpt(file.content, queryTokens, maxBytes, file.path.endsWith(".kts"), sha256Content(file.content) != file.contentHash)
+    } else focusedContextExcerpt(file.content, queryTokens, maxBytes)
+
+internal fun kotlinContextExcerpt(content: String, queryTokens: Set<String>, maxBytes: Int, script: Boolean = false, existingExcerpt: Boolean = false): String {
+    require(maxBytes > 0)
+    if (content.encodeToByteArray().size <= maxBytes) return content
+    return synchronized(kotlinContextLock) {
+        val file = kotlinContextFactory.createFile(if (script) "Context.kts" else "Context.kt", content)
+        val declarations = PsiTreeUtil.collectElementsOfType(file, KtDeclaration::class.java)
+            .filter { declaration ->
+                completeKotlinEvidence(declaration) || declaration is KtClassOrObject && declaration.body == null &&
+                    PsiTreeUtil.findChildOfType(declaration, PsiErrorElement::class.java) == null
+            }
+            .sortedWith(compareBy<KtDeclaration> { it !is KtClassOrObject || it.body != null }.thenByDescending { declaration ->
+                val text = declaration.text.lowercase()
+                queryTokens.count { it.lowercase() in text }
+            }.thenBy { it.textRange.startOffset })
+        val selected = mutableListOf<IntRange>()
+        var selectedBytes = 0
+        for (declaration in declarations) {
+            val range = kotlinDeclarationSourceStart(declaration, existingExcerpt) until declaration.textRange.endOffset
+            if (selected.any { range.first <= it.last && it.first <= range.last }) continue
+            val section = kotlinEvidenceSection(content, range, existingExcerpt)
+            val bytes = section.encodeToByteArray().size
+            if (selectedBytes + bytes <= maxBytes) {
+                selected += range
+                selectedBytes += bytes
+            }
+        }
+        selected.sortedBy { it.first }.joinToString("") { kotlinEvidenceSection(content, it, existingExcerpt) }
+    }
+}
+
+private fun kotlinDeclarationSourceStart(declaration: KtDeclaration, existingExcerpt: Boolean): Int {
+    val marker = if (existingExcerpt && declaration.firstChild is PsiComment) {
+        KOTLIN_SOURCE_LINE_MARKER.matchAt(declaration.text, 0)
+    } else null
+    return declaration.textRange.startOffset + (marker?.value?.length ?: 0)
+}
+
+private fun kotlinEvidenceSection(content: String, range: IntRange, existingExcerpt: Boolean): String {
+    val localLine = content.take(range.first).count { it == '\n' } + 1
+    val origin = if (existingExcerpt) KOTLIN_SOURCE_LINE_MARKER.findAll(content.take(range.first)).lastOrNull() else null
+    val firstLine = if (origin == null) localLine else {
+        origin.groupValues[1].toInt() + localLine - content.take(origin.range.last + 1).count { it == '\n' } - 1
+    }
+    val lastLine = firstLine + content.substring(range).count { it == '\n' }
+    return "// Orchard source lines $firstLine-$lastLine\n${content.substring(range)}\n"
+}
+
+private fun hasCompleteKotlinEvidence(content: String, script: Boolean): Boolean = synchronized(kotlinContextLock) {
+    val file = kotlinContextFactory.createFile(if (script) "Context.kts" else "Context.kt", content)
+    PsiTreeUtil.collectElementsOfType(file, KtDeclaration::class.java).any(::completeKotlinEvidence)
+}
+
+internal fun repositoryEvidenceAnchors(context: CodingRepositoryContext, requiredPaths: Set<String>): Map<String, Set<String>> =
+    context.files.filter { it.path in requiredPaths && (it.path.endsWith(".kt") || it.path.endsWith(".kts")) }.associate { source ->
+        source.path to synchronized(kotlinContextLock) {
+            val parsed = kotlinContextFactory.createFile(if (source.path.endsWith(".kts")) "Context.kts" else "Context.kt", source.content)
+            val existingExcerpt = sha256Content(source.content) != source.contentHash
+            PsiTreeUtil.collectElementsOfType(parsed, KtDeclaration::class.java)
+                .filter { completeKotlinEvidence(it) && (it !is KtClassOrObject || PsiTreeUtil.collectElementsOfType(it, KtNamedFunction::class.java).isEmpty()) }
+                .mapTo(hashSetOf()) { declaration ->
+                    sha256Content(source.content.substring(kotlinDeclarationSourceStart(declaration, existingExcerpt), declaration.textRange.endOffset))
+                }
+        }
+    }
+
+internal fun repositoryEvidenceRetentionDiagnostic(anchors: Map<String, Set<String>>, candidate: CodingRepositoryContext): String? {
+    val retained = repositoryEvidenceAnchors(candidate, anchors.keys)
+    val lost = anchors.filter { (path, required) -> !retained[path].orEmpty().containsAll(required) }
+    return if (lost.isEmpty()) null else "SOURCE_EVIDENCE_RELATIONSHIP_LOST: complete declaration evidence removed from ${lost.keys.sorted().joinToString()}."
+}
+
+private fun completeKotlinEvidence(declaration: KtDeclaration): Boolean {
+    if (PsiTreeUtil.findChildOfType(declaration, PsiErrorElement::class.java) != null) return false
+    return when (declaration) {
+        is KtNamedFunction -> declaration.bodyExpression != null
+        is KtProperty -> declaration.initializer != null || declaration.accessors.any { it.bodyExpression != null }
+        is KtClassOrObject -> declaration.body != null || declaration is org.jetbrains.kotlin.psi.KtClass && declaration.primaryConstructor != null
+        is KtScriptInitializer -> true
+        is KtTypeAlias -> true
+        else -> false
+    }
+}
+
+private val kotlinContextLock = Any()
+private val KOTLIN_SOURCE_LINE_MARKER = Regex("(?m)^// Orchard source lines (\\d+)-\\d+\\n")
+private val kotlinContextFactory by lazy {
+    val environment = KotlinCoreEnvironment.createForProduction(
+        Disposer.newDisposable("orchard-context-parser"),
+        CompilerConfiguration(),
+        EnvironmentConfigFiles.JVM_CONFIG_FILES,
+    )
+    KtPsiFactory(environment.project, false)
 }
 
 internal fun planContextFileBudgets(sourceBytes: List<Int>, totalBytes: Int, minimumBytes: Int): List<Int> {

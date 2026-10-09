@@ -1,6 +1,7 @@
 package com.orchard.backend.analysis
 
 import com.orchard.backend.workspace.stagedPlanHash
+import com.orchard.backend.vector.ModelTokenAccounting
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -28,6 +29,7 @@ data class RepositoryAnalysisContextFileSelection(
     val admittedToModel: Boolean,
 )
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class RepositoryAnalysisContextSelection(
     val modelInputBudgetTokens: Int,
@@ -35,6 +37,20 @@ data class RepositoryAnalysisContextSelection(
     val omittedFileCount: Int,
     val requiredPathCount: Int,
     val files: List<RepositoryAnalysisContextFileSelection>,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val tokenAccounting: ModelTokenAccounting? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val componentAccounting: Map<String, ModelTokenAccounting> = emptyMap(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val budgetPolicy: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val minimumEnvelopeAccounting: ModelTokenAccounting? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val qualityPolicy: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val evidenceDiagnostics: List<String> = emptyList(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val qualityReport: com.orchard.backend.attention.ContextQualityReport? = null,
 )
 
 @OptIn(ExperimentalSerializationApi::class)

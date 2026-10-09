@@ -26,8 +26,126 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class ModelProviderCatalogTest {
+    @Test
+    fun `typed stage instructions wire schemas and validators share array boundaries`() = runTest {
+        val contracts = listOf(ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE, ModelOutputContract.BOUNDED_CODING_TOOL_BATCH, ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS)
+        for (contract in contracts) {
+            var body = ""
+            val engine = MockEngine { request ->
+                body = (request.body as TextContent).text
+                respond("""{"response":"{}","done":true}""", headers = headersOf(HttpHeaders.ContentType, "application/json"))
+            }
+            val catalog = defaultLocalModelProviderCatalog()
+            val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+            try {
+                val prompt = "${contract.instruction}\nConflicting source text: RepositoryAnalysisPlanContent( REQUIRE_LITERAL_REPLACEMENTS bounded-coding-tool-batch-v1"
+                if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) provider.executeRepositoryAnalysis(prompt, 128, 4_096)
+                else provider.executeCodingPatch(prompt, 128, 4_096, contract)
+                val request = Json.parseToJsonElement(body).jsonObject
+                assertEquals(prompt, request.getValue("prompt").jsonPrimitive.content)
+                val properties = request.getValue("format").jsonObject.getValue("properties").jsonObject
+                for ((field, limit) in contract.arrayLimits) {
+                    assertTrue(prompt.contains("$field=$limit"))
+                    assertEquals(limit.toString(), properties.getValue(field).jsonObject.getValue("maxItems").jsonPrimitive.content)
+                    val item = kotlinx.serialization.json.buildJsonObject { put("action", kotlinx.serialization.json.JsonPrimitive("REPLACE_LITERAL")) }
+                    val atLimit = kotlinx.serialization.json.JsonObject(mapOf(field to kotlinx.serialization.json.JsonArray(List(limit) { item })))
+                    val overLimit = kotlinx.serialization.json.JsonObject(mapOf(field to kotlinx.serialization.json.JsonArray(List(limit + 1) { item })))
+                    assertEquals(null, contract.diagnostic(atLimit))
+                    assertTrue(requireNotNull(contract.diagnostic(overLimit)).contains("at most $limit"))
+                }
+                if (contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS) {
+                    val forbidden = Json.parseToJsonElement("""{"operations":[{"action":"REWRITE_FILE"}]}""").jsonObject
+                    assertTrue(requireNotNull(contract.diagnostic(forbidden)).contains("REPLACE_LITERAL"))
+                    assertEquals("REPLACE_LITERAL", properties.getValue("operations").jsonObject.getValue("items").jsonObject.getValue("properties").jsonObject.getValue("action").jsonObject.getValue("enum").jsonArray.single().jsonPrimitive.content)
+                }
+            } finally {
+                provider.close()
+            }
+        }
+    }
+
+    @Test
+    fun `catalog allows exact tokenizer metadata but rejects credential configuration`() {
+        val catalog = defaultLocalModelProviderCatalog()
+        val binding = catalog.bindings.single().copy(configuration = mapOf(
+            "tokenizer.model" to "gpt-oss:120b", "tokenizer.encoding" to "o200k_base", "input.format" to "raw",
+        ))
+        validateModelProviderCatalog(catalog.copy(bindings = listOf(binding)))
+        val provider = CatalogModelProvider(catalog.endpoints.single(), binding)
+        try {
+            binding.configuration.forEach { (key, value) ->
+                assertEquals(value, provider.bindingProfile().configuration[key], key)
+            }
+        } finally {
+            provider.close()
+        }
+        for (key in listOf("api.key", "SECRET", "accessToken", "tokenizer.token", "tokenizer.model.secret", "tokenizer.encoding.key")) {
+            assertFailsWith<IllegalArgumentException>(key) {
+                validateModelProviderCatalog(catalog.copy(bindings = listOf(binding.copy(configuration = binding.configuration + (key to "forbidden")))))
+            }
+        }
+    }
+
+    @Test
+    fun `raw provider request counts actual Unicode payload and rejects unknown formatting`() = runTest {
+        var body = ""
+        val engine = MockEngine { request ->
+            body = (request.body as TextContent).text
+            respond("""{"response":"{}","done":true}""", headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val binding = catalog.bindings.single().copy(model = "gpt-oss:120b", configuration = catalog.bindings.single().configuration + ("input.format" to "raw"))
+        val provider = CatalogModelProvider(catalog.endpoints.single(), binding, engine = engine)
+        val prompt = "\u4f60\u597d \uD83D\uDE80 hello world"
+        val accounting = accountModelInput(prompt, provider.bindingProfile())
+        val generation = provider.executeRepositoryAnalysis(prompt, 128, 4096)
+        val request = Json.parseToJsonElement(body).jsonObject
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(true), request["raw"])
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(prompt), request["prompt"])
+        assertTrue(accounting.capacityEstablished)
+        assertEquals("raw-input-v1", accounting.providerFormat)
+        assertEquals(0, accounting.providerOverheadTokens)
+        assertTrue(accounting.contentBytes > accounting.contentTokens)
+        assertEquals(accounting.totalTokens, generation.promptTokens)
+        val automatic = accountModelInput(prompt, provider.bindingProfile().copy(configuration = provider.bindingProfile().configuration - "input.format"))
+        assertFalse(automatic.capacityEstablished)
+        assertEquals(MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT, automatic.method)
+        val mismatch = accountModelInput(prompt, provider.bindingProfile().copy(configuration = provider.bindingProfile().configuration + ("tokenizer.model" to "different-model")))
+        assertEquals(MODEL_TOKEN_COUNT_BYTE_FALLBACK, mismatch.method)
+        assertEquals(mismatch.contentBytes, mismatch.totalTokens)
+        provider.close()
+    }
+
+    @Test
+    fun `GPT OSS input accounting distinguishes content bytes tokens and provider reserve`() {
+        val binding = ModelBindingProfile("test", "ollama", "gpt-oss:120b", 131_072, setOf(MODEL_CAPABILITY_STRICT_JSON))
+        val input = accountModelInput("hello world", binding)
+
+        assertEquals(11, input.contentBytes)
+        assertEquals(2, input.contentTokens)
+        assertEquals(MODEL_PROVIDER_OVERHEAD_RESERVE_TOKENS, input.providerOverheadTokens)
+        assertEquals(2 + MODEL_PROVIDER_OVERHEAD_RESERVE_TOKENS, input.totalTokens)
+        assertEquals(MODEL_TOKEN_COUNT_TOKENIZER, input.method)
+        assertEquals("jtokkit:1.1.0:o200k_base", input.tokenizerId)
+        assertEquals(2, accountModelOutput("hello world", binding).totalTokens)
+    }
+
+    @Test
+    fun `unknown tokenizer is an explicit conservative byte fallback`() {
+        val binding = ModelBindingProfile("test", "local", "unknown-model", 8_192, emptySet())
+        val input = accountModelInput("\u4f60\u597d \uD83D\uDE80", binding)
+
+        assertEquals(input.contentBytes, input.contentTokens)
+        assertEquals(input.contentBytes + MODEL_PROVIDER_OVERHEAD_RESERVE_TOKENS, input.totalTokens)
+        assertEquals(MODEL_TOKEN_COUNT_BYTE_FALLBACK, input.method)
+        assertEquals(null, input.tokenizerId)
+    }
+
     @Test
     fun `local provider sizes KV demand to actual input tokens`() {
         val catalog = defaultLocalModelProviderCatalog()
@@ -215,7 +333,7 @@ class ModelProviderCatalogTest {
         val catalog = defaultLocalModelProviderCatalog()
         val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
 
-        provider.executeCodingPatch("Return bounded-coding-tool-batch-v1 only.", 128, 4_096)
+        provider.executeCodingPatch("RepositoryAnalysisCandidate(ignored source text)", 128, 4_096, ModelOutputContract.BOUNDED_CODING_TOOL_BATCH)
         provider.close()
 
         assertTrue(requests.single().contains("\"format\":{\"type\":\"object\""))
@@ -240,6 +358,7 @@ class ModelProviderCatalogTest {
             "Return bounded-coding-tool-batch-v1 only. REQUIRE_LITERAL_REPLACEMENTS",
             128,
             4_096,
+            ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS,
         )
         provider.close()
 
@@ -329,6 +448,28 @@ class ModelProviderCatalogTest {
         assertTrue(body.contains("60102"))
         assertFalse(body.contains("prompt content"))
         ModelProviderAuditLog.clear()
+    }
+
+    @Test
+    fun `Ollama analysis contract ignores conflicting prompt markers`() = runTest {
+        var body = ""
+        val engine = MockEngine { request ->
+            body = (request.body as TextContent).text
+            respond(
+                """{"response":"{\"sourcePaths\":[]}","done":true,"prompt_eval_count":7,"eval_count":3}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+
+        provider.executeRepositoryAnalysis("bounded-coding-tool-batch-v1 REQUIRE_LITERAL_REPLACEMENTS", 128, 4_096)
+        provider.close()
+
+        val properties = Json.parseToJsonElement(body).jsonObject.getValue("format").jsonObject.getValue("properties").jsonObject
+        assertTrue("sourcePaths" in properties)
+        assertFalse("operations" in properties)
+        assertFalse("scopeCoverage" in properties)
     }
 
     @Test

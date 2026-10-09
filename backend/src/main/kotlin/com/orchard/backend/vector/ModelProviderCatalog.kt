@@ -177,7 +177,10 @@ fun validateModelProviderCatalog(catalog: ModelProviderCatalog) {
             "Model binding capabilities or context are invalid"
         }
         require(binding.residentMemoryBytes >= 0 && binding.cpuUnits in 1..256) { "Model binding resource demand is invalid" }
-        require(binding.configuration.keys.none { it.contains("key", true) || it.contains("secret", true) || it.contains("token", true) }) {
+        require(binding.configuration.keys.none {
+            it !in setOf("tokenizer.model", "tokenizer.encoding") &&
+                (it.contains("key", true) || it.contains("secret", true) || it.contains("token", true))
+        }) {
             "Model binding configuration cannot contain secrets"
         }
         require(validCommandReference(binding.conversationCommand)) { "Model binding command reference is invalid" }

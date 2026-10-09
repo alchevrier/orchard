@@ -160,10 +160,13 @@ class CatalogModelProvider(
         generate(prompt, maxOutputTokens, contextWindowTokens)
 
     override suspend fun executeRepositoryAnalysis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
-        generate(prompt, maxOutputTokens, contextWindowTokens)
+        generate(prompt, maxOutputTokens, contextWindowTokens, ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE)
 
     override suspend fun executeCodingPatch(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         generate(prompt, maxOutputTokens, contextWindowTokens)
+
+    override suspend fun executeCodingPatch(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, contract: ModelOutputContract): ModelGeneration =
+        generate(prompt, maxOutputTokens, contextWindowTokens, contract)
 
     override fun modelIdentity(): String = binding.model
 
@@ -220,12 +223,12 @@ class CatalogModelProvider(
         ModelEndpointInspection(endpoint.endpointId, false, diagnostic = error.message.orEmpty().take(512))
     }
 
-    private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int): ModelGeneration {
+    private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int, contract: ModelOutputContract = ModelOutputContract.JSON_OBJECT): ModelGeneration {
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
         if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
-            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true)
+            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true, contract = contract)
             val completed = if (structured.done != true || !isJsonObject(structured.response)) {
-                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false)
+                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false, contract = contract)
             } else {
                 structured
             }
@@ -235,8 +238,8 @@ class CatalogModelProvider(
             }
             return ModelGeneration(
                 completed.response,
-                completed.promptEvalCount ?: estimateModelTokens(prompt),
-                completed.evalCount ?: estimateModelTokens(completed.response),
+                completed.promptEvalCount ?: accountModelInput(prompt, bindingProfile()).totalTokens,
+                completed.evalCount ?: accountModelOutput(completed.response, bindingProfile()).totalTokens,
             )
         }
         val response = when (endpoint.protocol) {
@@ -265,7 +268,7 @@ class CatalogModelProvider(
             }
             val text = completion.message.content
                 ?: error("Provider returned no single completion")
-            ModelGeneration(text, decoded.usage?.promptTokens ?: estimateModelTokens(prompt), decoded.usage?.completionTokens ?: estimateModelTokens(text))
+            ModelGeneration(text, decoded.usage?.promptTokens ?: accountModelInput(prompt, bindingProfile()).totalTokens, decoded.usage?.completionTokens ?: accountModelOutput(text, bindingProfile()).totalTokens)
         }
     }
 
@@ -274,10 +277,11 @@ class CatalogModelProvider(
         maxOutputTokens: Int?,
         contextWindowTokens: Int,
         structured: Boolean,
+        contract: ModelOutputContract,
     ): OllamaCatalogResponse {
         val startedAt = nanoTime()
         val promptHash = providerPromptHash(prompt)
-        val promptTokens = estimateModelTokens(prompt)
+        val promptTokens = accountModelInput(prompt, bindingProfile()).totalTokens
         val think = ollamaThinkControl(structured)
         val options = OllamaCatalogOptions(
             temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
@@ -295,12 +299,13 @@ class CatalogModelProvider(
                     setBody(OllamaCatalogRequest(
                         binding.model,
                         prompt,
-                        format = ollamaResponseFormat(prompt),
+                        format = ollamaResponseFormat(contract),
                         think = think,
                         options = options,
+                        raw = binding.configuration["input.format"] == "raw",
                     ))
                 } else {
-                    setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options))
+                    setBody(OllamaCatalogPlainRequest(binding.model, prompt, think = think, options = options, raw = binding.configuration["input.format"] == "raw"))
                 }
             }
         } catch (error: Exception) {
@@ -592,6 +597,9 @@ class ModelProviderRegistry(
     override suspend fun executeCodingPatch(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         primary().executeCodingPatch(prompt, maxOutputTokens, contextWindowTokens)
 
+    override suspend fun executeCodingPatch(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, contract: ModelOutputContract): ModelGeneration =
+        primary().executeCodingPatch(prompt, maxOutputTokens, contextWindowTokens, contract)
+
     override fun modelIdentity(): String = primary().modelIdentity()
 
     override fun bindingProfile(): ModelBindingProfile = primary().bindingProfile()
@@ -610,7 +618,7 @@ class ModelProviderRegistry(
     override fun close() = activeProviders.forEach(ModelProvider::close)
 }
 
-private fun ollamaResponseFormat(prompt: String): JsonElement = if ("RepositoryAnalysisPlanContent(" in prompt) {
+private fun ollamaResponseFormat(contract: ModelOutputContract): JsonElement = if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
     buildJsonObject {
         put("type", "object")
         put("additionalProperties", false)
@@ -622,13 +630,15 @@ private fun ollamaResponseFormat(prompt: String): JsonElement = if ("RepositoryA
             put("disposition", buildJsonObject { put("type", "string") })
             put("summary", buildJsonObject { put("type", "string") })
             listOf("evidence", "reuse", "preservedInvariants", "nonGoals", "sourcePaths", "unresolvedQuestions").forEach { name ->
-                put(name, buildJsonObject { put("type", "array") })
+                put(name, buildJsonObject {
+                    put("type", "array")
+                    contract.arrayLimits[name]?.let { put("maxItems", it) }
+                })
             }
         })
     }
-} else if ("bounded-coding-tool-batch-v1" in prompt) {
-    val requiresLiteralReplacements = "appears truncated; use bounded replacements" in prompt ||
-        "REQUIRE_LITERAL_REPLACEMENTS" in prompt
+} else if (contract == ModelOutputContract.BOUNDED_CODING_TOOL_BATCH || contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS) {
+    val requiresLiteralReplacements = contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS
     buildJsonObject {
         put("type", "object")
         put("additionalProperties", false)
@@ -643,6 +653,7 @@ private fun ollamaResponseFormat(prompt: String): JsonElement = if ("RepositoryA
             put("operations", buildJsonObject {
                 put("type", "array")
                 put("minItems", 1)
+                put("maxItems", contract.arrayLimits.getValue("operations"))
                 put("items", buildJsonObject {
                     put("type", "object")
                     put("required", buildJsonArray {
@@ -683,6 +694,7 @@ private data class OllamaCatalogRequest(
     val format: JsonElement = JsonPrimitive("json"),
     val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
+    val raw: Boolean = false,
 )
 
 @Serializable
@@ -692,6 +704,7 @@ private data class OllamaCatalogPlainRequest(
     val stream: Boolean = true,
     val think: JsonElement = JsonPrimitive(false),
     val options: OllamaCatalogOptions,
+    val raw: Boolean = false,
 )
 
 @Serializable

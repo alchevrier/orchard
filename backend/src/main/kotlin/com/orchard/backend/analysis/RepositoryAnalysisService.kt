@@ -14,6 +14,12 @@ import com.orchard.backend.agent.CODING_EXECUTION_FAILED
 import com.orchard.backend.agent.LocalCodingWorkspaceGateway
 import com.orchard.backend.agent.codingWorkerExecutions
 import com.orchard.backend.agent.focusedContextExcerpt
+import com.orchard.backend.agent.contextFileExcerpt
+import com.orchard.backend.agent.repositoryContextAdequacyDiagnostic
+import com.orchard.backend.attention.AnalysisAttentionFrame
+import com.orchard.backend.attention.analysisAttentionCandidateDiagnostic
+import com.orchard.backend.attention.bindRepositoryAnalysisAttentionContext
+import com.orchard.backend.attention.compileRepositoryAnalysisAttentionFrame
 import com.orchard.backend.company.CompanyControlService
 import com.orchard.backend.company.CompanyMutationStatus
 import com.orchard.backend.company.RISK_HIGH
@@ -26,6 +32,10 @@ import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProfileResolver
 import com.orchard.backend.vector.ModelProfileSettingsStore
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.ModelTokenAccounting
+import com.orchard.backend.vector.MODEL_TOKEN_COUNT_BYTE_FALLBACK
+import com.orchard.backend.vector.accountModelInput
+import com.orchard.backend.vector.accountModelOutput
 import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.vector.effectiveModelExecutionProfile
 import com.orchard.backend.vector.estimateModelTokens
@@ -121,14 +131,11 @@ internal data class RepositoryForbiddenLiteralFact(
 private data class RepositoryAnalysisEnvelope(
     val executionProfileId: String,
     val baseRevision: String,
+    val attention: com.orchard.backend.attention.CanonicalAttentionProjection,
     val task: RepositoryAnalysisTaskContext,
     val repositoryContext: CodingRepositoryContext,
     val allowedDispositions: List<String>,
     val requiredOutputSchema: String,
-    val requiredEvidence: List<RequiredRepositoryEvidence>,
-    val requiredScope: List<String>,
-    val requiredEvidencePathGroups: List<RequiredEvidencePathGroup>,
-    val requiredScopeEvidencePathGroupIds: List<List<String>>,
     val forbiddenLiteralFacts: List<RepositoryForbiddenLiteralFact>,
     val priorRejectedAnalysisDiagnostic: String?,
     val priorRejectedCodingPlanDiagnostic: String?,
@@ -521,6 +528,18 @@ class RepositoryAnalysisService(
         val coordinateResolutions = coordinateAdmission?.resolutions.orEmpty().map {
             RepositoryCoordinateResolution(it.coordinateId, it.path, it.nodeId, it.sourceHash)
         }
+        val definition = run.workDefinition ?: return RepositoryAnalysisTickResult(
+            RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+            run.runId,
+            diagnostic = "Repository analysis has no admitted work-definition authority.",
+        )
+        val analysisAttention = compileRepositoryAnalysisAttentionFrame(
+            DefaultModelExecutionProfiles.broadRepositoryAnalysis.id,
+            baseRevision,
+            definition,
+            definition.definition.scope.indices.filter { requiresSourceOperation(definition.definition.scope[it]) }.toSet(),
+        )
+        val attentionRoots = analysisAttention.correlations.flatMap { it.coordinatePaths }.toSet()
         val graphTraceId = intelligenceGraph?.let {
             newRepositoryIntelligenceTraceId("graph-local-analysis", run.context.projectId, baseRevision, run.runId)
         }
@@ -529,7 +548,7 @@ class RepositoryAnalysisService(
             graphLocalRepositoryAnalysisSelection(
                 it,
                 run.workDefinition?.definition?.scope.orEmpty(),
-                coordinatePaths = coordinateResolutions.map { it.path },
+                coordinatePaths = coordinateResolutions.map { it.path }.filter { it in attentionRoots },
             )
         }
         if (graphSelection != null && graphTraceId != null) {
@@ -570,7 +589,7 @@ class RepositoryAnalysisService(
                 diagnostic = blocked.diagnostic,
             )
         }
-        val query = analysisQuery(run)
+        val query = analysisQuery(run, analysisAttention)
         val configuredSelectors = effectiveRepositoryEvidenceSelectors(run)
         val graphPaths = graphSelection?.selectedPaths
         val selectors = graphPaths?.let { paths -> configuredSelectors.filter { selector ->
@@ -583,7 +602,20 @@ class RepositoryAnalysisService(
             ?.rejectedPlan
             ?.let(::focusedCorrectionContextPathsOrNull)
         val contextCompileStartedAt = System.nanoTime()
-        val context = runCatching {
+        fun unavailableContext(diagnostic: String, failedContext: CodingRepositoryContext = CodingRepositoryContext(emptyList(), 0)): RepositoryAnalysisTickResult {
+            val failedAllowance = runCatching {
+                val default = DefaultModelExecutionProfiles.broadRepositoryAnalysis
+                effectiveModelExecutionProfile(default, profileSettingsStore.load().singleOrNull { it.profileId == default.id }).inputBudgetTokens * 70 / 100
+            }.getOrElse { return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty()) }
+            val failedFrame = bindRepositoryAnalysisAttentionContext(analysisAttention, emptyMap(), failedContext.files.mapTo(hashSetOf()) { it.path })
+            val required = attentionRoots + graphPaths.orEmpty()
+            val report = com.orchard.backend.attention.compileContextQualityReport(
+                json.encodeToJsonElement(AnalysisAttentionFrame.serializer(), failedFrame).jsonObject, failedContext, required, null, failedAllowance,
+            ).let { it.copy(adequacy = com.orchard.backend.attention.ContextQualityStatus.FAIL, diagnostics = it.diagnostics + diagnostic) }
+            return blockAttempt(run.runId, baseRevision, null, RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, diagnostic,
+                contextSelection = repositoryAnalysisContextSelection(failedContext, required, failedAllowance, emptySet()).copy(qualityReport = report))
+        }
+        val collectedContext = runCatching {
             if (correctionPaths == null && graphPaths != null) {
                 graphLocalAnalysisContext(workspacePath, baseRevision, graphPaths, query, selectors)
             } else if (correctionPaths == null) {
@@ -615,8 +647,29 @@ class RepositoryAnalysisService(
                     diagnostic = it.message.orEmpty(),
                 )
             }
-            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = it.message.orEmpty())
+            return unavailableContext(it.message.orEmpty())
         }
+        val relatedPathsByScope = intelligenceGraph?.let { graph ->
+            analysisAttention.correlations.associate { correlation ->
+                correlation.scope.id to graphLocalRepositoryAnalysisSelection(
+                    graph,
+                    listOf(correlation.scope.text),
+                    coordinatePaths = correlation.coordinatePaths.filter { path -> coordinateResolutions.any { it.path == path } },
+                ).let { selection -> selection.selectedPaths + selection.omittedPaths }
+            }
+        }.orEmpty()
+        val selectedPathsBySelector = requiredRepositoryPathsBySelector(selectors, collectedContext)
+        val collectedAttention = bindRepositoryAnalysisAttentionContext(
+            analysisAttention,
+            selectedPathsBySelector,
+            collectedContext.files.mapTo(hashSetOf()) { it.path },
+            relatedPathsByScope,
+        )
+        val correlatedPaths = collectedAttention.correlations.flatMap { it.evidencePaths }.toSet()
+        val context = collectedContext.copy(
+            files = collectedContext.files.filter { it.path in correlatedPaths },
+            omittedFileCount = collectedContext.omittedFileCount + collectedContext.files.count { it.path !in correlatedPaths },
+        )
         if (correctionPaths == null && graphPaths != null && graphTraceId != null) {
             repositoryIntelligenceImporter?.emitTrace(
                 traceId = graphTraceId,
@@ -636,7 +689,7 @@ class RepositoryAnalysisService(
             )
         }
         if (context.files.isEmpty()) {
-            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = "No repository evidence was selected.")
+            return unavailableContext("No repository evidence was selected.", context)
         }
         val authorityContext = if (correctionPaths == null) context else runCatching {
             workspaceGateway.collectAnalysisContext(workspacePath, query, selectors)
@@ -652,7 +705,7 @@ class RepositoryAnalysisService(
             selectors,
             authorityContext,
         )?.let { diagnostic ->
-            return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, run.runId, diagnostic = diagnostic)
+            return unavailableContext(diagnostic, authorityContext)
         }
         val codingWorkerEvents = codingWorkerStore?.loadEvents().orEmpty()
         val externalVerificationModule = failedCandidateExternalVerificationModule(baseRevision, codingWorkerEvents)
@@ -706,20 +759,24 @@ class RepositoryAnalysisService(
             ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.NO_COMPATIBLE_MODEL, run.runId)
         val acceptedScope = run.workDefinition?.definition?.scope.orEmpty()
         val analysisPaths = correctionPaths?.toSet() ?: boundedRepositoryAnalysisPaths(acceptedScope, selectors, context)
+        val binding = provider.bindingProfile()
+        val requiredEvidenceAnchors = com.orchard.backend.agent.repositoryEvidenceAnchors(context, analysisPaths)
+        val contextTransformations = mutableListOf<com.orchard.backend.attention.ContextTransformation>()
+        val inputAllowance = if (correctionPaths == null) profile.inputBudgetTokens * 70 / 100 else profile.inputBudgetTokens
+        val budgetPolicy = if (correctionPaths == null) "analysis-input-allocation-v1:70-percent" else "focused-correction-input-v1:100-percent"
         fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryAnalysisEnvelope(
             profile.id,
             baseRevision,
+            com.orchard.backend.attention.canonicalAttentionProjection(json.encodeToJsonElement(AnalysisAttentionFrame.serializer(), bindRepositoryAnalysisAttentionContext(
+                collectedAttention,
+                selectedPathsBySelector,
+                candidate.files.mapTo(hashSetOf()) { it.path },
+                relatedPathsByScope,
+            )).jsonObject, candidate),
             taskContext(run),
             candidate,
             DISPOSITIONS,
             OUTPUT_SCHEMA,
-            authorityContext.files.map { RequiredRepositoryEvidence(it.path, it.contentHash) },
-            run.workDefinition?.definition?.scope.orEmpty(),
-            requiredRepositoryEvidencePathGroups(selectors, authorityContext),
-            requiredRepositoryScopeEvidencePathGroupIds(
-                run.workDefinition?.definition?.scope.orEmpty(),
-                selectors,
-            ),
             repositoryForbiddenLiteralFacts(
                 run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
                 complianceContext,
@@ -729,31 +786,86 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.description }.orEmpty(),
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
+        fun promptFor(candidate: CodingRepositoryContext): String =
+            "$systemPrompt\n${com.orchard.backend.vector.ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE.instruction}\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
+        val minimumEnvelopeAccounting = accountModelInput(promptFor(context.copy(files = context.files.filter { it.path in analysisPaths }.map {
+            it.copy(content = "", matchedDeclarations = emptyList())
+        })), binding)
+        fun selectionFor(candidate: CodingRepositoryContext, admitted: Boolean = false): RepositoryAnalysisContextSelection {
+            val components = json.parseToJsonElement(json.encodeToString(envelopeFor(candidate))).jsonObject
+                .mapValues { (_, value) -> accountModelOutput(value.toString(), binding) } +
+                ("systemInstructions" to accountModelOutput(systemPrompt, binding))
+            return repositoryAnalysisContextSelection(
+                candidate,
+                analysisPaths,
+                inputAllowance,
+                if (admitted) candidate.files.mapTo(hashSetOf()) { it.path } else emptySet(),
+            ).copy(
+                tokenAccounting = accountModelInput(promptFor(candidate), binding),
+                componentAccounting = components,
+                budgetPolicy = budgetPolicy,
+                minimumEnvelopeAccounting = minimumEnvelopeAccounting,
+                qualityPolicy = "complete-kotlin-declarations-v1",
+                evidenceDiagnostics = listOfNotNull(repositoryContextAdequacyDiagnostic(candidate)),
+                qualityReport = com.orchard.backend.attention.compileContextQualityReport(
+                    json.encodeToJsonElement(AnalysisAttentionFrame.serializer(), bindRepositoryAnalysisAttentionContext(
+                        collectedAttention, selectedPathsBySelector, candidate.files.mapTo(hashSetOf()) { it.path }, relatedPathsByScope,
+                    )).jsonObject,
+                    candidate, analysisPaths, accountModelInput(promptFor(candidate), binding), inputAllowance,
+                    requiredEvidenceAnchors, contextTransformations.toList(),
+                ),
+            )
+        }
+        if (!accountModelInput(promptFor(context), binding).capacityEstablished) return blockAttempt(
+            run.runId, baseRevision, null, RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+            "PROVIDER_FORMAT_UNAVAILABLE: automatic provider templates have no verified accounting; configure a raw input binding or a supported formatter.",
+            contextSelection = selectionFor(context),
+        )
+        val missingPaths = analysisPaths - context.files.mapTo(hashSetOf()) { it.path }
+        if (missingPaths.isNotEmpty()) return blockAttempt(
+            run.runId, baseRevision, null, RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+            "Required repository evidence is unavailable: ${missingPaths.sorted().joinToString()}.",
+            contextSelection = selectionFor(context),
+        )
+        repositoryContextAdequacyDiagnostic(context)?.let { diagnostic ->
+            return blockAttempt(
+                run.runId, baseRevision, null, RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE,
+                diagnostic, contextSelection = selectionFor(context),
+            )
+        }
         val queryTokens = repositoryAnalysisTokens(query)
+        val evidenceAnchors = com.orchard.backend.agent.repositoryEvidenceAnchors(context, analysisPaths)
         val boundedContext = compactRepositoryContextToBudget(
             context,
-            if (correctionPaths == null) profile.inputBudgetTokens * 70 / 100 else profile.inputBudgetTokens,
+            inputAllowance,
             analysisPaths,
             contentCompactor = { content, maxBytes -> focusedContextExcerpt(content, queryTokens, maxBytes) },
-        ) { candidate ->
-            "$systemPrompt\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
-        } ?: return blockAttempt(
+            fileContentCompactor = { file, maxBytes -> contextFileExcerpt(file, queryTokens, maxBytes) },
+            contextAdequacy = { repositoryContextAdequacyDiagnostic(it) == null && com.orchard.backend.agent.repositoryEvidenceRetentionDiagnostic(evidenceAnchors, it) == null },
+            tokenCounter = { accountModelInput(it, binding).totalTokens },
+            onCandidate = { stage, candidate, fits, adequate -> contextTransformations += com.orchard.backend.attention.ContextTransformation(
+                stage, candidate.files.sumOf { it.content.encodeToByteArray().size }, candidate.files.map { it.path }, fits, adequate,
+                com.orchard.backend.agent.repositoryEvidenceRetentionDiagnostic(requiredEvidenceAnchors, candidate),
+            ) },
+            promptFor = ::promptFor,
+        ) ?: return blockAttempt(
             run.runId,
             baseRevision,
             null,
-            RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
-            "The minimum repository evidence envelope exceeds the analysis model input budget.",
-            contextSelection = repositoryAnalysisContextSelection(
-                context,
-                analysisPaths,
-                if (correctionPaths == null) profile.inputBudgetTokens * 70 / 100 else profile.inputBudgetTokens,
-            ),
+            if (minimumEnvelopeAccounting.totalTokens <= inputAllowance || minimumEnvelopeAccounting.method == MODEL_TOKEN_COUNT_BYTE_FALLBACK) {
+                RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE
+            } else RepositoryAnalysisTickStatus.CONTEXT_BUDGET_EXCEEDED,
+            if (minimumEnvelopeAccounting.totalTokens <= inputAllowance) {
+                "SOURCE_EVIDENCE_INADEQUATE: metadata fits, but complete required source evidence cannot fit the analysis allowance."
+            } else if (minimumEnvelopeAccounting.method == MODEL_TOKEN_COUNT_BYTE_FALLBACK) {
+                "Input capacity could not be established under UTF-8 byte upper-bound fallback; the binding has no supported tokenizer."
+            } else "The minimum repository evidence envelope exceeds the tokenizer-counted analysis allowance of $inputAllowance tokens, including provider overhead reserve.",
+            contextSelection = selectionFor(context),
         )
         val envelope = envelopeFor(boundedContext)
         val envelopeJson = json.encodeToString(envelope)
-        val prompt = "$systemPrompt\n\nAuthoritative repository analysis envelope:\n$envelopeJson"
-        val binding = provider.bindingProfile()
-        val promptTokens = estimateRepositoryAnalysisTokens(prompt)
+        val prompt = promptFor(boundedContext)
+        val promptTokens = accountModelInput(prompt, binding).totalTokens
         val admission = resourceController.acquire(
             provider.resourceDemand(profile, promptTokens),
             ModelWorkPriority.DELIVERY,
@@ -770,12 +882,7 @@ class RepositoryAnalysisService(
             profile.id,
             binding,
             promptTokens,
-            repositoryAnalysisContextSelection(
-                context,
-                analysisPaths,
-                profile.inputBudgetTokens,
-                boundedContext.files.mapTo(hashSetOf()) { it.path },
-            ),
+            selectionFor(boundedContext, admitted = true),
         ) == null) {
             return RepositoryAnalysisTickResult(
                 RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE,
@@ -793,7 +900,7 @@ class RepositoryAnalysisService(
                 )
             }
         } catch (exception: CancellationException) {
-            recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence)
+            recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence, selectionFor(boundedContext, true).qualityReport)
             blockAttempt(
                 run.runId,
                 baseRevision,
@@ -803,7 +910,7 @@ class RepositoryAnalysisService(
             )
             throw exception
         } catch (error: Exception) {
-            recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence)
+            recordExecution(profile.id, profile, binding, run, envelopeJson, prompt, null, startedAt, false, admission.evidence, selectionFor(boundedContext, true).qualityReport)
                 ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
             return blockAttempt(
                 run.runId,
@@ -823,7 +930,15 @@ class RepositoryAnalysisService(
                 )
             }
         }
-        val output = decodedOutput?.getOrNull()?.let {
+        val attentionDiagnostic = decodedOutput?.getOrNull()?.let {
+            com.orchard.backend.vector.ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE.diagnostic(
+                json.encodeToJsonElement(RepositoryAnalysisCandidate.serializer(), it).jsonObject,
+            ) ?: analysisAttentionCandidateDiagnostic(
+                bindRepositoryAnalysisAttentionContext(collectedAttention, selectedPathsBySelector, boundedContext.files.mapTo(hashSetOf()) { file -> file.path }, relatedPathsByScope),
+                it.sourcePaths, it.evidence.map { citation -> citation.path },
+            )
+        }
+        val output = decodedOutput?.getOrNull()?.takeIf { attentionDiagnostic == null }?.let {
             compileRepositoryAnalysisCandidate(
                 it,
                 authorityContext,
@@ -834,14 +949,14 @@ class RepositoryAnalysisService(
             )
         }
         val execution = recordExecution(
-            profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence
+            profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence, selectionFor(boundedContext, true).qualityReport
         ) ?: return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, run.runId)
         if (output == null) return blockAttempt(
             run.runId,
             baseRevision,
             prompt,
             RepositoryAnalysisTickStatus.INVALID_ANALYSIS,
-            repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
+            attentionDiagnostic ?: repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
         )
         repositoryAnalysisIdentityDiagnostic(authorityContext, output)?.let {
             return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
@@ -1011,6 +1126,7 @@ class RepositoryAnalysisService(
         startedAt: Long,
         schemaValid: Boolean,
         admission: com.orchard.backend.resource.ResourceAdmissionEvidence,
+        qualityReport: com.orchard.backend.attention.ContextQualityReport? = null,
     ) = workspace.recordModelExecution(
         ModelExecutionObservationDraft(
             profile = profile,
@@ -1020,7 +1136,13 @@ class RepositoryAnalysisService(
             envelopeHash = sha256(envelopeJson),
             promptHash = sha256(prompt),
             outputHash = generation?.text?.let(::sha256),
-            inputTokens = generation?.promptTokens ?: estimateRepositoryAnalysisTokens(prompt),
+            inputTokens = generation?.promptTokens ?: accountModelInput(prompt, binding).totalTokens,
+            inputAccounting = accountModelInput(prompt, binding),
+            qualityReport = qualityReport?.copy(downstream = when {
+                generation == null -> com.orchard.backend.attention.ContextQualityStatus.NOT_ATTEMPTED
+                schemaValid -> com.orchard.backend.attention.ContextQualityStatus.PASS
+                else -> com.orchard.backend.attention.ContextQualityStatus.FAIL
+            }),
             outputTokens = generation?.completionTokens ?: 0,
             latencyMillis = (System.nanoTime() - startedAt) / 1_000_000,
             schemaValid = schemaValid,
@@ -1113,20 +1235,25 @@ class RepositoryAnalysisService(
         }
     }
 
-    private fun analysisQuery(run: WorkflowRunView): String = buildString {
-        appendLine(run.context.title)
-        appendLine(run.context.content)
+    private fun analysisQuery(run: WorkflowRunView, attention: AnalysisAttentionFrame? = null): String = buildString {
+        if (attention == null) {
+            appendLine(run.context.title)
+            appendLine(run.context.content)
+            appendLine(run.workDefinition?.definition?.scope.orEmpty().joinToString(" "))
+            run.workDefinition?.definition?.acceptanceCriteria.orEmpty().forEach { appendLine(it.verification) }
+            run.context.recalledEpisodes.forEach { appendLine("${it.problem} ${it.resolution} ${it.evidenceSummary}") }
+        } else {
+            appendLine(attention.objective.text)
+            attention.correlations.forEach { appendLine(it.scope.text) }
+        }
         run.workDefinition?.definition?.let {
             appendLine(it.currentBehavior)
             appendLine(it.requiredBehavior)
-            appendLine(it.scope.joinToString(" "))
             appendLine(it.constraints.joinToString(" "))
             it.acceptanceCriteria.forEach { criterion ->
                 appendLine(criterion.description)
-                appendLine(criterion.verification)
             }
         }
-        run.context.recalledEpisodes.forEach { appendLine("${it.problem} ${it.resolution} ${it.evidenceSummary}") }
     }
 
     private fun repositoryAnalysisContextSelection(
@@ -1227,7 +1354,7 @@ class RepositoryAnalysisService(
             DISPOSITION_COMPLETE,
             DISPOSITION_CONFLICTING,
         )
-        const val OUTPUT_SCHEMA = "RepositoryAnalysisPlanContent(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, scopeCoverage(scope, evidencePaths, operationOrders, compliantEvidencePaths), operations, verificationCommands, unresolvedQuestions)"
+        const val OUTPUT_SCHEMA = "RepositoryAnalysisCandidate(disposition, summary, evidence, reuse, preservedInvariants, nonGoals, sourcePaths, unresolvedQuestions)"
         const val LEGACY_IDENTICAL_OUTCOME_BLOCK_THRESHOLD = 2
 
         fun loadPrompt(): String = requireNotNull(
@@ -2201,7 +2328,7 @@ private val FORBIDDEN_CONTAINS_LITERAL = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-internal const val MAX_SOURCE_OPERATIONS_PER_PLAN = 12
+internal val MAX_SOURCE_OPERATIONS_PER_PLAN = com.orchard.backend.vector.ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE.arrayLimits.getValue("sourcePaths")
 private const val MAX_ANALYSIS_CONTEXT_PATHS = 24
 private const val ANALYSIS_TICK_TIMEOUT_MILLIS = 900_000L
 private const val MAX_AUTOMATIC_ANALYSIS_CORRECTIONS = 3
@@ -2294,6 +2421,10 @@ internal fun compactRepositoryContextToBudget(
     inputBudgetTokens: Int,
     requiredPaths: Set<String> = emptySet(),
     contentCompactor: ((String, Int) -> String)? = null,
+    tokenCounter: (String) -> Int = ::estimateRepositoryAnalysisTokens,
+    fileContentCompactor: ((CodingContextFile, Int) -> String)? = null,
+    contextAdequacy: (CodingRepositoryContext) -> Boolean = { true },
+    onCandidate: ((String, CodingRepositoryContext, Boolean, Boolean) -> Unit)? = null,
     promptFor: (CodingRepositoryContext) -> String,
 ): CodingRepositoryContext? {
     if (context.files.isEmpty()) return null
@@ -2309,8 +2440,8 @@ internal fun compactRepositoryContextToBudget(
             optionalFiles = emptyList(),
             declarationLimit = 0,
         )
-        if (estimateRepositoryAnalysisTokens(promptFor(requiredWithNoDeclarations)) > inputBudgetTokens) {
-            val compactContent = contentCompactor ?: return null
+        if (tokenCounter(promptFor(requiredWithNoDeclarations)) > inputBudgetTokens) {
+            if (contentCompactor == null && fileContentCompactor == null) return null
             var lowerContentBytes = 1
             var upperContentBytes = context.files.filter { it.path in requiredPaths }
                 .maxOf { it.content.encodeToByteArray().size }
@@ -2323,10 +2454,16 @@ internal fun compactRepositoryContextToBudget(
                     optionalFiles = emptyList(),
                     declarationLimit = 0,
                     contentByteLimit = candidateBytes,
-                    contentCompactor = compactContent,
+                    contentCompactor = contentCompactor,
+                    fileContentCompactor = fileContentCompactor,
                 )
-                if (candidate.files.all { it.content.isNotEmpty() } && estimateRepositoryAnalysisTokens(promptFor(candidate)) <= inputBudgetTokens) {
+                val fits = tokenCounter(promptFor(candidate)) <= inputBudgetTokens
+                val adequate = candidate.files.all { it.content.isNotEmpty() } && contextAdequacy(candidate)
+                onCandidate?.invoke("required-source-compaction", candidate, fits, adequate)
+                if (fits && adequate) {
                     fittedContentBytes = candidateBytes
+                    lowerContentBytes = candidateBytes + 1
+                } else if (fits) {
                     lowerContentBytes = candidateBytes + 1
                 } else {
                     upperContentBytes = candidateBytes - 1
@@ -2346,8 +2483,12 @@ internal fun compactRepositoryContextToBudget(
                 declarationLimit = candidateLimit,
                 contentByteLimit = contentByteLimit,
                 contentCompactor = contentCompactor,
+                fileContentCompactor = fileContentCompactor,
             )
-            if (estimateRepositoryAnalysisTokens(promptFor(candidate)) <= inputBudgetTokens) {
+            val fits = tokenCounter(promptFor(candidate)) <= inputBudgetTokens
+            val adequate = contextAdequacy(candidate)
+            onCandidate?.invoke("declaration-metadata-compaction", candidate, fits, adequate)
+            if (fits && adequate) {
                 fittedDeclarationLimit = candidateLimit
                 lowerDeclarations = candidateLimit + 1
             } else {
@@ -2368,8 +2509,12 @@ internal fun compactRepositoryContextToBudget(
             declarationLimit,
             contentByteLimit,
             contentCompactor,
+            fileContentCompactor,
         )
-        if (estimateRepositoryAnalysisTokens(promptFor(candidate)) <= inputBudgetTokens) {
+        val fits = tokenCounter(promptFor(candidate)) <= inputBudgetTokens
+        val adequate = contextAdequacy(candidate)
+        onCandidate?.invoke("optional-evidence-selection", candidate, fits, adequate)
+        if (fits && adequate) {
             best = candidate
             lower = retainedOptional + 1
         } else {
@@ -2386,12 +2531,15 @@ private fun compactRepositoryContext(
     declarationLimit: Int,
     contentByteLimit: Int? = null,
     contentCompactor: ((String, Int) -> String)? = null,
+    fileContentCompactor: ((CodingContextFile, Int) -> String)? = null,
 ): CodingRepositoryContext {
     val selectedPaths = requiredPaths + optionalFiles.map { it.path }
     return context.copy(
         files = context.files.filter { it.path in selectedPaths }.map { file ->
             file.copy(
-                content = contentByteLimit?.let { requireNotNull(contentCompactor)(file.content, it) } ?: file.content,
+                content = contentByteLimit?.let { bytes ->
+                    fileContentCompactor?.invoke(file, bytes) ?: requireNotNull(contentCompactor)(file.content, bytes)
+                } ?: file.content,
                 matchedDeclarations = file.matchedDeclarations.take(declarationLimit),
             )
         },

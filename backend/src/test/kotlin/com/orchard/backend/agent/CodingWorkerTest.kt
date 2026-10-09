@@ -8,6 +8,7 @@ import com.orchard.backend.analysis.repositoryPlanRequiresRevision
 import com.orchard.backend.api.DocumentIntent
 import com.orchard.backend.vector.MODEL_CAPABILITY_STRICT_JSON
 import com.orchard.backend.vector.ModelBindingProfile
+import com.orchard.backend.vector.ModelExecutionProfile
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProvider
@@ -51,6 +52,17 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class CodingWorkerTest {
+    @Test
+    fun `output rejection uses binding tokens rather than response bytes`() {
+        val profile = ModelExecutionProfile("test", 1, "CODING", 1000, 2, emptySet())
+        val binding = ModelBindingProfile("test", "test", "gpt-oss:120b", 10000, emptySet())
+        val generation = ModelGeneration("hello world", 1, 2)
+        val diagnostic = codingModelOutputDiagnostic(generation, profile, "test", null, binding)
+        assertTrue(diagnostic.contains("not valid strict JSON"))
+        val fallbackDiagnostic = codingModelOutputDiagnostic(generation, profile, "test", null, binding.copy(model = "unknown"))
+        assertTrue(fallbackDiagnostic.contains("11 (UTF8_BYTE_UPPER_BOUND)"))
+    }
+
     @Test
     fun `candidate run waits for review instead of freezing another corrective candidate`() {
         val candidate = CandidatePullRequest(

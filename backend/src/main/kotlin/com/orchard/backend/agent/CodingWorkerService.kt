@@ -11,6 +11,7 @@ import com.orchard.backend.analysis.RepositoryAnalysisService
 import com.orchard.backend.analysis.RepositoryExecutionPlan
 import com.orchard.backend.analysis.TransientExecutableWorkPackageStore
 import com.orchard.backend.analysis.compileExecutableWorkPackage
+import com.orchard.backend.analysis.compactRepositoryContextToBudget
 import com.orchard.backend.attention.AttentionFrame
 import com.orchard.backend.attention.AttentionProposedOperation
 import com.orchard.backend.attention.AttemptBasis
@@ -23,6 +24,9 @@ import com.orchard.backend.attention.TransientPersistenceStopStore
 import com.orchard.backend.attention.attentionOperationDiagnostic
 import com.orchard.backend.attention.attentionScopeKinds
 import com.orchard.backend.attention.attemptBasisFingerprint
+import com.orchard.backend.attention.codingAttentionContextPaths
+import com.orchard.backend.attention.codingAttentionContextDiagnostic
+import com.orchard.backend.attention.codingAttentionContextQuery
 import com.orchard.backend.attention.compileCodingAttentionFrame
 import com.orchard.backend.attention.evaluatePersistence
 import com.orchard.backend.attention.newPersistenceStopRecord
@@ -38,6 +42,7 @@ import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
 import com.orchard.backend.vector.ModelExecutionProfile
 import com.orchard.backend.vector.ModelGeneration
+import com.orchard.backend.vector.ModelOutputContract
 import com.orchard.backend.vector.ModelProfileOverride
 import com.orchard.backend.vector.ModelProfileResolver
 import com.orchard.backend.vector.ModelProfileSettingsStore
@@ -45,6 +50,9 @@ import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.vector.TransientModelProfileSettingsStore
 import com.orchard.backend.vector.effectiveModelExecutionProfile
 import com.orchard.backend.vector.estimateModelTokens
+import com.orchard.backend.vector.accountModelInput
+import com.orchard.backend.vector.accountModelOutput
+import com.orchard.backend.vector.MODEL_TOKEN_COUNT_BYTE_FALLBACK
 import com.orchard.backend.vector.modelBindingFingerprint
 import com.orchard.backend.workspace.CRITERION_HUMAN
 import com.orchard.backend.workspace.EvidenceRequirement
@@ -105,7 +113,7 @@ private data class CodingWorkerModelEnvelope(
     val currentRevision: String,
     val run: CodingWorkerRunAuthority,
     val executionPlan: RepositoryExecutionPlan? = null,
-    val attention: AttentionFrame? = null,
+    val attention: com.orchard.backend.attention.CanonicalAttentionProjection? = null,
     val persistence: PersistenceDecision? = null,
     val priorRejectedCodingDiagnostic: String? = null,
     val repositoryContext: CodingRepositoryContext,
@@ -538,8 +546,16 @@ class CodingWorkerService(
             "No valid toolchain policy matches the reserved repository.",
         )
 
-        val contextQuery = codingContextQuery(run, executionPlan)
-        val contextPaths = workPackage?.ownership?.paths ?: codingPlanContextPaths(executionPlan)
+        val contextQuery = attention?.let(::codingAttentionContextQuery) ?: codingContextQuery(run, executionPlan)
+        val contextPaths = attention?.let {
+            codingAttentionContextPaths(it, requireNotNull(executionPlan))
+        } ?: codingPlanContextPaths(executionPlan)
+        fun outputContract(retryDiagnostic: String?): ModelOutputContract = when {
+            workPackage == null -> ModelOutputContract.JSON_OBJECT
+            workPackage.ownership.paths.isNotEmpty() && workPackage.ownership.paths.all(::isCandidateTestSourcePath) ||
+                retryDiagnostic?.contains("appears truncated; use bounded replacements") == true -> ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS
+            else -> ModelOutputContract.BOUNDED_CODING_TOOL_BATCH
+        }
         fun envelope(
             repositoryContext: CodingRepositoryContext,
             retryDiagnostic: String? = priorRejectedCodingDiagnostic,
@@ -553,7 +569,11 @@ class CodingWorkerService(
             currentRevision = requireNotNull(currentRevision),
             run = codingWorkerRunProjection(run),
             executionPlan = if (workPackage == null) executionPlan?.let(::codingExecutionPlanProjection) else null,
-            attention = attention,
+            attention = attention?.let {
+                com.orchard.backend.attention.canonicalAttentionProjection(
+                    json.encodeToJsonElement(AttentionFrame.serializer(), it) as kotlinx.serialization.json.JsonObject, repositoryContext,
+                )
+            },
             persistence = persistence,
             priorRejectedCodingDiagnostic = retryDiagnostic,
             repositoryContext = repositoryContext,
@@ -568,45 +588,70 @@ class CodingWorkerService(
                 ?.takeIf { it.isNotEmpty() && it.all(::isCandidateTestSourcePath) }
                 ?.let { "\nREQUIRE_LITERAL_REPLACEMENTS" }
                 .orEmpty()
-            return "$promptPolicy$literalOnlyMarker\n\nAuthoritative coding execution envelope:\n$envelopeJson"
+            return "$promptPolicy$literalOnlyMarker\n${outputContract(retryDiagnostic).instruction}\nAttention is a canonical projection: frame contains relationships, sources maps references to repositoryContext.files fileIndex or deferred path, authorities resolves authorityRef, and hashes resolves hashRef. sourceHashRef resolves the supplied file hash. Only supplied source references establish behavior; deferred references do not grant mutation authority.\n\nAuthoritative coding execution envelope:\n$envelopeJson"
         }
-        val planContextBudget = executionPlan?.let {
-            val emptyContext = CodingRepositoryContext(emptyList(), 0)
-            profile.inputBudgetTokens - estimateModelTokens(prompt(emptyContext)) +
-                estimateModelTokens(json.encodeToString(emptyContext)) -
-                if (priorRejectedCodingDiagnostic == null) 0 else SOURCE_GROUNDING_CONTEXT_RESERVE_BYTES
+        val emptyInputAccounting = accountModelInput(prompt(CodingRepositoryContext(emptyList(), 0)), binding)
+        if (!emptyInputAccounting.capacityEstablished) {
+            return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL,
+                "PROVIDER_FORMAT_UNAVAILABLE: automatic provider templates have no verified input accounting.")
         }
-        if (planContextBudget != null && planContextBudget <= 0) {
-            return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding envelope exceeds the model input budget.")
+        if (emptyInputAccounting.totalTokens > profile.inputBudgetTokens) {
+            val diagnostic = if (emptyInputAccounting.method == MODEL_TOKEN_COUNT_BYTE_FALLBACK) {
+                "Coding input capacity could not be established under UTF-8 byte upper-bound fallback."
+            } else "Coding envelope exceeds the tokenizer-counted model input budget."
+            return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, diagnostic)
         }
-        val repositoryContext = runCatching {
+        val collectedContext = runCatching {
             executionPlan?.let { plan ->
                 workspaceGateway.collectPlanContext(
                     workspacePath = workspacePath,
                     repositoryRevision = requireNotNull(currentRevision),
                     paths = contextPaths,
                     query = contextQuery,
-                    maxSerializedBytes = requireNotNull(planContextBudget),
+                    maxSerializedBytes = 256 * 1024,
                 )
             } ?: workspaceGateway.collectContext(workspacePath, contextQuery)
         }.getOrElse { error ->
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.APPLICATION_FAILED, error.message)
         }
+        repositoryContextAdequacyDiagnostic(collectedContext)?.let { diagnostic ->
+            return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.APPLICATION_FAILED, diagnostic)
+        }
+        val queryTokens = contextQuery.lowercase().split(Regex("[^a-z0-9_]+")).filter { it.length >= 3 }.toSet()
+        val evidenceAnchors = repositoryEvidenceAnchors(collectedContext, contextPaths.toSet())
+        val repositoryContext = compactRepositoryContextToBudget(
+            collectedContext,
+            profile.inputBudgetTokens,
+            if (executionPlan == null) emptySet() else contextPaths.toSet(),
+            tokenCounter = { accountModelInput(it, binding).totalTokens },
+            fileContentCompactor = { file, bytes -> contextFileExcerpt(file, queryTokens, bytes) },
+            contextAdequacy = { repositoryContextAdequacyDiagnostic(it) == null && repositoryEvidenceRetentionDiagnostic(evidenceAnchors, it) == null },
+            promptFor = { prompt(it) },
+        ) ?: return finish(
+            claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.APPLICATION_FAILED,
+            "SOURCE_EVIDENCE_INADEQUATE: complete coding evidence cannot fit the admitted input allowance.",
+        )
         if (executionPlan != null && repositoryContext.omittedFileCount != 0) return finish(
             claim,
             CODING_EXECUTION_BLOCKED,
             CodingWorkerTickStatus.APPLICATION_FAILED,
             "Accepted execution-plan paths are missing from the pinned coding context.",
         )
+        attention?.let { frame ->
+            codingAttentionContextDiagnostic(frame, requireNotNull(executionPlan), repositoryContext.files.mapTo(hashSetOf()) { it.path })
+        }?.let { diagnostic ->
+            return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.APPLICATION_FAILED, diagnostic)
+        }
         val groundedRetryDiagnostic = sourceGroundedRetryDiagnostic(priorRejectedCodingDiagnostic, repositoryContext)
         val envelope = envelope(repositoryContext, groundedRetryDiagnostic)
         val envelopeJson = json.encodeToString(envelope)
         val prompt = prompt(repositoryContext, groundedRetryDiagnostic)
-        if (estimateModelTokens(prompt) > profile.inputBudgetTokens) {
+        val inputAccounting = accountModelInput(prompt, binding)
+        if (inputAccounting.totalTokens > profile.inputBudgetTokens) {
             return finish(claim, CODING_EXECUTION_BLOCKED, CodingWorkerTickStatus.INVALID_PROPOSAL, "Coding context exceeds the model input budget.")
         }
         val admission = resourceController.acquire(
-            modelProvider.resourceDemand(profile, estimateModelTokens(prompt)),
+            modelProvider.resourceDemand(profile, inputAccounting.totalTokens),
             ModelWorkPriority.DELIVERY,
         )
         val lease = admission.lease
@@ -628,6 +673,7 @@ class CodingWorkerService(
                     prompt,
                     profile.outputBudgetTokens,
                     profile.inputBudgetTokens + profile.outputBudgetTokens,
+                    outputContract(groundedRetryDiagnostic),
                 )
             }
         } catch (exception: CancellationException) {
@@ -656,7 +702,7 @@ class CodingWorkerService(
         }
         val outputWithinBudget = generation.promptTokens <= profile.inputBudgetTokens &&
             generation.completionTokens <= profile.outputBudgetTokens &&
-            estimateModelTokens(generation.text) <= profile.outputBudgetTokens
+            accountModelOutput(generation.text, binding).totalTokens <= profile.outputBudgetTokens
         val proposalDecode = if (outputWithinBudget && workPackage == null) {
             runCatching { strictOutputJson.decodeFromString<CodingPatchProposal>(generation.text) }
         } else null
@@ -666,6 +712,12 @@ class CodingWorkerService(
         val proposal = proposalDecode?.getOrNull()
         val toolBatch = toolBatchDecode?.getOrNull()
         val schemaValid = proposal != null || toolBatch != null
+        val toolBatchBehaviorDiagnostic = toolBatch?.let { batch ->
+            outputContract(groundedRetryDiagnostic).diagnostic(strictOutputJson.encodeToJsonElement(BoundedCodingToolBatch.serializer(), batch) as kotlinx.serialization.json.JsonObject) ?: attentionOperationDiagnostic(
+                requireNotNull(attention),
+                batch.operations.map { AttentionProposedOperation(it.action, it.path) },
+            ) ?: boundedCodingToolBehaviorDiagnostic(batch)
+        }
         val modelExecution = recordModelExecution(
             profile,
             binding,
@@ -677,6 +729,8 @@ class CodingWorkerService(
             elapsedMillis(startedAt),
             schemaValid,
             admission.evidence,
+            if (!schemaValid || toolBatchBehaviorDiagnostic != null) com.orchard.backend.attention.ContextQualityStatus.FAIL
+            else com.orchard.backend.attention.ContextQualityStatus.UNKNOWN,
         ) ?: return finish(
             claim,
             CODING_EXECUTION_FAILED,
@@ -692,6 +746,7 @@ class CodingWorkerService(
                 profile = profile,
                 expectedSchema = if (workPackage == null) CODING_PROPOSAL_SCHEMA else BOUNDED_TOOL_BATCH_SCHEMA,
                 decodeFailure = (proposalDecode ?: toolBatchDecode)?.exceptionOrNull(),
+                binding = binding,
             ),
             modelExecutionId = modelExecution.executionId,
         )
@@ -699,13 +754,6 @@ class CodingWorkerService(
             proposal?.let { strictOutputJson.encodeToString(it) }
                 ?: strictOutputJson.encodeToString(requireNotNull(toolBatch))
         )
-        val toolBatchBehaviorDiagnostic = toolBatch?.let { batch ->
-            attentionOperationDiagnostic(
-                requireNotNull(attention),
-                batch.operations.map { AttentionProposedOperation(it.action, it.path) },
-            )
-                ?: boundedCodingToolBehaviorDiagnostic(batch)
-        }
         if (toolBatchBehaviorDiagnostic != null) {
             return finish(
                 claim,
@@ -1304,6 +1352,7 @@ class CodingWorkerService(
         latencyMillis: Long,
         schemaValid: Boolean,
         admission: com.orchard.backend.resource.ResourceAdmissionEvidence,
+        downstream: com.orchard.backend.attention.ContextQualityStatus? = null,
     ) = workspace.recordModelExecution(
         ModelExecutionObservationDraft(
             profile = profile,
@@ -1314,7 +1363,17 @@ class CodingWorkerService(
             promptHash = sha256(prompt),
             attentionFrameHash = attentionFrameHash,
             outputHash = generation?.text?.let(::sha256),
-            inputTokens = generation?.promptTokens ?: estimateModelTokens(prompt),
+            inputTokens = generation?.promptTokens ?: accountModelInput(prompt, binding).totalTokens,
+            inputAccounting = accountModelInput(prompt, binding),
+            qualityReport = com.orchard.backend.attention.envelopeContextQualityReport(
+                json.parseToJsonElement(envelopeJson) as kotlinx.serialization.json.JsonObject,
+                accountModelInput(prompt, binding), profile.inputBudgetTokens,
+                downstream ?: when {
+                    generation == null -> com.orchard.backend.attention.ContextQualityStatus.NOT_ATTEMPTED
+                    schemaValid -> com.orchard.backend.attention.ContextQualityStatus.UNKNOWN
+                    else -> com.orchard.backend.attention.ContextQualityStatus.FAIL
+                },
+            ),
             outputTokens = generation?.completionTokens ?: 0,
             latencyMillis = latencyMillis,
             schemaValid = schemaValid,
@@ -2350,14 +2409,16 @@ internal fun codingModelOutputDiagnostic(
     profile: ModelExecutionProfile,
     expectedSchema: String,
     decodeFailure: Throwable?,
+    binding: ModelBindingProfile,
 ): String {
+    val responseAccounting = accountModelOutput(generation.text, binding)
     val budgetFailure = when {
         generation.promptTokens > profile.inputBudgetTokens ->
             "prompt tokens ${generation.promptTokens} exceed input budget ${profile.inputBudgetTokens}"
         generation.completionTokens > profile.outputBudgetTokens ->
             "completion tokens ${generation.completionTokens} exceed output budget ${profile.outputBudgetTokens}"
-        estimateModelTokens(generation.text) > profile.outputBudgetTokens ->
-            "serialized response estimate ${estimateModelTokens(generation.text)} exceeds output budget ${profile.outputBudgetTokens}"
+        responseAccounting.totalTokens > profile.outputBudgetTokens ->
+            "serialized response count ${responseAccounting.totalTokens} (${responseAccounting.method}) exceeds output budget ${profile.outputBudgetTokens}"
         else -> null
     }
     if (budgetFailure != null) {

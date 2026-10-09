@@ -36,7 +36,7 @@ interface ModelProvider : AutoCloseable {
     )
     suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int): ModelGeneration {
         val output = proposeWorkDefinition(prompt)
-        return ModelGeneration(output, estimateModelTokens(prompt), estimateModelTokens(output))
+        return ModelGeneration(output, accountModelInput(prompt, bindingProfile()).totalTokens, accountModelOutput(output, bindingProfile()).totalTokens)
     }
     suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         executeWorkDefinition(prompt, maxOutputTokens)
@@ -55,6 +55,12 @@ interface ModelProvider : AutoCloseable {
         maxOutputTokens: Int,
         contextWindowTokens: Int,
     ): ModelGeneration = executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
+    suspend fun executeCodingPatch(
+        prompt: String,
+        maxOutputTokens: Int,
+        contextWindowTokens: Int,
+        contract: ModelOutputContract,
+    ): ModelGeneration = executeCodingPatch(prompt, maxOutputTokens, contextWindowTokens)
     suspend fun executeConversation(
         prompt: String,
         maxOutputTokens: Int,
@@ -189,8 +195,8 @@ class OllamaClient(
         }
         return ModelGeneration(
             text = decoded.response,
-            promptTokens = decoded.promptEvalCount ?: estimateModelTokens(prompt),
-            completionTokens = decoded.evalCount ?: estimateModelTokens(decoded.response),
+            promptTokens = decoded.promptEvalCount ?: accountModelInput(prompt, bindingProfile()).totalTokens,
+            completionTokens = decoded.evalCount ?: accountModelOutput(decoded.response, bindingProfile()).totalTokens,
         )
     }
 
