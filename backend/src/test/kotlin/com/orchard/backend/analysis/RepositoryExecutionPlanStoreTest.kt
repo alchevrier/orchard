@@ -1550,6 +1550,23 @@ class RepositoryExecutionPlanStoreTest {
             "Required repository paths omit source operations or explicit compliant evidence: frontend/src/main/Inbox.kt.",
             repositoryUniversalScopeCoverageDiagnostic(scope, selectors, context, complete.copy(operations = complete.operations.filter { it.order != 2 })),
         )
+        val inspectionScope = "Inspect `frontend/src/main/Inbox.kt` provenance."
+        assertEquals(
+            "Required repository paths omit source operations or explicit compliant evidence: frontend/src/main/Inbox.kt.",
+            repositoryUniversalScopeCoverageDiagnostic(
+                scope + inspectionScope,
+                selectors,
+                context,
+                complete.copy(
+                    operations = complete.operations.filter { it.order != 2 },
+                    scopeCoverage = complete.scopeCoverage + ExecutionPlanScopeCoverage(
+                        scope = inspectionScope,
+                        evidencePaths = listOf("frontend/src/main/Inbox.kt"),
+                        operationOrders = listOf(4),
+                    ),
+                ),
+            ),
+        )
         val missingPinnedOwner = complete.copy(
             evidence = complete.evidence.take(1),
             operations = complete.operations.filter { it.order != 2 },

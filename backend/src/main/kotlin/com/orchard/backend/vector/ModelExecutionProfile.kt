@@ -15,9 +15,19 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 const val MODEL_CAPABILITY_STRICT_JSON = "STRICT_JSON"
+
+data class RepositoryAnalysisOutputDomain(
+    val sourcePaths: Set<String>,
+    val evidencePaths: Set<String>,
+) {
+    init {
+        require(evidencePaths.containsAll(sourcePaths)) { "Analysis source choices must be supplied evidence" }
+    }
+}
 
 enum class ModelOutputContract {
     JSON_OBJECT,
@@ -28,7 +38,7 @@ enum class ModelOutputContract {
     val versionedId: String
         get() = when (this) {
             JSON_OBJECT -> "json-object-v1"
-            REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v2"
+            REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v3"
             BOUNDED_CODING_TOOL_BATCH -> "bounded-coding-tool-batch-v1"
             BOUNDED_LITERAL_REPLACEMENTS -> "bounded-literal-replacements-v1"
         }
@@ -41,17 +51,37 @@ enum class ModelOutputContract {
         }
 
     val instruction: String
-        get() = "Output contract $versionedId. Maximum array lengths: ${arrayLimits.entries.joinToString { "${it.key}=${it.value}" }}. " +
+        get() = instructionFor(null)
+
+    fun instructionFor(outputDomain: RepositoryAnalysisOutputDomain?): String =
+        "Output contract $versionedId. Maximum array lengths: ${arrayLimits.entries.joinToString { "${it.key}=${it.value}" }}. " +
             when (this) {
-                REPOSITORY_ANALYSIS_CANDIDATE -> "Return JSON matching $structuredSchema. Each evidence contentHash must be copied from that path's pinned repository source hash, not its excerpt hash. Admitted ownership and action limits still apply."
+                REPOSITORY_ANALYSIS_CANDIDATE -> "Return JSON matching ${schemaFor(outputDomain)}. Each evidence contentHash must be copied from that path's pinned repository source hash, not its excerpt hash. Admitted ownership and action limits still apply."
                 BOUNDED_LITERAL_REPLACEMENTS -> "Every operation must use REPLACE_LITERAL. Admitted ownership and action limits still apply."
                 else -> "Admitted ownership and action limits still apply."
             }
 
     internal val structuredSchema: JsonObject?
-        get() = if (this == REPOSITORY_ANALYSIS_CANDIDATE) {
-            serializedOutputSchema(com.orchard.backend.analysis.RepositoryAnalysisCandidate.serializer().descriptor, arrayLimits)
-        } else null
+        get() = schemaFor(null)
+
+    internal fun schemaFor(outputDomain: RepositoryAnalysisOutputDomain?): JsonObject? {
+        if (this != REPOSITORY_ANALYSIS_CANDIDATE) return null
+        val schema = serializedOutputSchema(com.orchard.backend.analysis.RepositoryAnalysisCandidate.serializer().descriptor, arrayLimits)
+        if (outputDomain == null) return schema
+        val properties = schema.getValue("properties").jsonObject.toMutableMap()
+        val sources = properties.getValue("sourcePaths").jsonObject
+        properties["sourcePaths"] = if (outputDomain.sourcePaths.isEmpty()) JsonObject(sources + ("maxItems" to JsonPrimitive(0))) else {
+            JsonObject(sources + ("items" to JsonObject(sources.getValue("items").jsonObject + ("enum" to JsonArray(outputDomain.sourcePaths.sorted().map(::JsonPrimitive))))))
+        }
+        val evidence = properties.getValue("evidence").jsonObject
+        properties["evidence"] = if (outputDomain.evidencePaths.isEmpty()) JsonObject(evidence + ("maxItems" to JsonPrimitive(0))) else {
+            val citation = evidence.getValue("items").jsonObject
+            val fields = citation.getValue("properties").jsonObject
+            val path = JsonObject(fields.getValue("path").jsonObject + ("enum" to JsonArray(outputDomain.evidencePaths.sorted().map(::JsonPrimitive))))
+            JsonObject(evidence + ("items" to JsonObject(citation + ("properties" to JsonObject(fields + ("path" to path))))))
+        }
+        return JsonObject(schema + ("properties" to JsonObject(properties)))
+    }
 
     fun diagnostic(output: JsonObject): String? {
         for ((field, limit) in arrayLimits) {

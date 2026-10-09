@@ -163,6 +163,9 @@ class CatalogModelProvider(
     override suspend fun executeRepositoryAnalysis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         generate(prompt, maxOutputTokens, contextWindowTokens, ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE)
 
+    override suspend fun executeRepositoryAnalysis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, outputDomain: RepositoryAnalysisOutputDomain): ModelGeneration =
+        generate(prompt, maxOutputTokens, contextWindowTokens, ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE, outputDomain)
+
     override suspend fun executeCodingPatch(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         generate(prompt, maxOutputTokens, contextWindowTokens)
 
@@ -231,12 +234,12 @@ class CatalogModelProvider(
         ModelEndpointInspection(endpoint.endpointId, false, diagnostic = error.message.orEmpty().take(512))
     }
 
-    private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int, contract: ModelOutputContract = ModelOutputContract.JSON_OBJECT): ModelGeneration {
+    private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int, contract: ModelOutputContract = ModelOutputContract.JSON_OBJECT, outputDomain: RepositoryAnalysisOutputDomain? = null): ModelGeneration {
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
         if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
-            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true, contract = contract)
+            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true, contract = contract, outputDomain = outputDomain)
             val completed = if (structured.done != true || !isJsonObject(structured.response)) {
-                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false, contract = contract)
+                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false, contract = contract, outputDomain = outputDomain)
             } else {
                 structured
             }
@@ -286,6 +289,7 @@ class CatalogModelProvider(
         contextWindowTokens: Int,
         structured: Boolean,
         contract: ModelOutputContract,
+        outputDomain: RepositoryAnalysisOutputDomain?,
     ): OllamaCatalogResponse {
         val startedAt = nanoTime()
         val formattedInput = formatModelInput(prompt, bindingProfile())
@@ -309,7 +313,7 @@ class CatalogModelProvider(
                     setBody(OllamaCatalogRequest(
                         binding.model,
                         wirePrompt,
-                        format = ollamaResponseFormat(contract),
+                        format = ollamaResponseFormat(contract, outputDomain),
                         think = think,
                         options = options,
                         raw = formattedInput != null,
@@ -604,6 +608,9 @@ class ModelProviderRegistry(
     override suspend fun executeRepositoryAnalysis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         primary().executeRepositoryAnalysis(prompt, maxOutputTokens, contextWindowTokens)
 
+    override suspend fun executeRepositoryAnalysis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, outputDomain: RepositoryAnalysisOutputDomain): ModelGeneration =
+        primary().executeRepositoryAnalysis(prompt, maxOutputTokens, contextWindowTokens, outputDomain)
+
     override suspend fun executeCodingPatch(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         primary().executeCodingPatch(prompt, maxOutputTokens, contextWindowTokens)
 
@@ -628,8 +635,8 @@ class ModelProviderRegistry(
     override fun close() = activeProviders.forEach(ModelProvider::close)
 }
 
-private fun ollamaResponseFormat(contract: ModelOutputContract): JsonElement = if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
-    requireNotNull(contract.structuredSchema)
+private fun ollamaResponseFormat(contract: ModelOutputContract, outputDomain: RepositoryAnalysisOutputDomain? = null): JsonElement = if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
+    requireNotNull(contract.schemaFor(outputDomain))
 } else if (contract == ModelOutputContract.BOUNDED_CODING_TOOL_BATCH || contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS) {
     val requiresLiteralReplacements = contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS
     buildJsonObject {

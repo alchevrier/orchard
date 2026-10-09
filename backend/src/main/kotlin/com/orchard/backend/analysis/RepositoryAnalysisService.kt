@@ -764,6 +764,9 @@ class RepositoryAnalysisService(
         val contextTransformations = mutableListOf<com.orchard.backend.attention.ContextTransformation>()
         val inputAllowance = if (correctionPaths == null) profile.inputBudgetTokens * 70 / 100 else profile.inputBudgetTokens
         val budgetPolicy = if (correctionPaths == null) "analysis-input-allocation-v1:70-percent" else "focused-correction-input-v1:100-percent"
+        fun outputDomainFor(candidate: CodingRepositoryContext) = com.orchard.backend.attention.compileAnalysisOutputDomain(
+            bindRepositoryAnalysisAttentionContext(collectedAttention, selectedPathsBySelector, candidate.files.mapTo(hashSetOf()) { it.path }, relatedPathsByScope),
+        )
         fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryAnalysisEnvelope(
             profile.id,
             baseRevision,
@@ -787,7 +790,7 @@ class RepositoryAnalysisService(
             run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
         )
         fun promptFor(candidate: CodingRepositoryContext): String =
-            "$systemPrompt\n${com.orchard.backend.vector.ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE.instruction}\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
+            "$systemPrompt\n${com.orchard.backend.vector.ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE.instructionFor(outputDomainFor(candidate))}\n\nAuthoritative repository analysis envelope:\n${json.encodeToString(envelopeFor(candidate))}"
         val minimumEnvelopeAccounting = accountModelInput(promptFor(context.copy(files = context.files.filter { it.path in analysisPaths }.map {
             it.copy(content = "", matchedDeclarations = emptyList())
         })), binding)
@@ -897,6 +900,7 @@ class RepositoryAnalysisService(
                     prompt,
                     minOf(profile.outputBudgetTokens, REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS),
                     profile.inputBudgetTokens + profile.outputBudgetTokens,
+                    outputDomainFor(boundedContext),
                 )
             }
         } catch (exception: CancellationException) {
@@ -2059,7 +2063,16 @@ internal fun repositoryUniversalScopeCoverageDiagnostic(
         .filter { it.action in setOf(PLAN_OPERATION_CREATE, PLAN_OPERATION_MODIFY) && isTestSourcePath(it.path) }
         .mapTo(hashSetOf()) { it.path }
     val compliantEvidencePaths = output.scopeCoverage.flatMapTo(hashSetOf()) { it.compliantEvidencePaths }
-    val unsatisfiedPaths = requiredPaths - sourceOperationPaths - compliantEvidencePaths
+    val sourceScopedPaths = output.scopeCoverage.asSequence()
+        .filter { requiresSourceOperation(it.scope) }
+        .flatMap { it.evidencePaths.asSequence() }
+        .toSet()
+    val evidenceOnlyPaths = output.scopeCoverage.asSequence()
+        .filterNot { requiresSourceOperation(it.scope) }
+        .flatMap { it.evidencePaths.asSequence() }
+        .filter { it in citedPaths && it !in sourceScopedPaths }
+        .toSet()
+    val unsatisfiedPaths = requiredPaths - sourceOperationPaths - compliantEvidencePaths - evidenceOnlyPaths
     acceptedScope.forEachIndexed { index, scope ->
         if (!requiresTestSource(scope)) return@forEachIndexed
         val coverage = output.scopeCoverage[index]
@@ -2296,7 +2309,7 @@ internal fun compileRepositoryScopeAuthority(
             val sourceOperationPaths = compiledOperations.asSequence()
                 .filter { it.action != PLAN_OPERATION_VERIFY }
                 .mapTo(hashSetOf()) { it.path }
-            val verificationOperationOrders = if (canonicalAuthorityText(scope) !in coverageByScope) {
+            val verificationOperationOrders = if (!requiresSourceOperation(scope) || canonicalAuthorityText(scope) !in coverageByScope) {
                 compiledOperations.asSequence()
                     .filter { it.action == PLAN_OPERATION_VERIFY }
                     .map { it.order }

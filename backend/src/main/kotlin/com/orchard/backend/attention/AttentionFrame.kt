@@ -181,19 +181,23 @@ fun analysisAttentionFrameHash(frame: AnalysisAttentionFrame): String = stagedPl
     attentionJson.encodeToString(frame.copy(hash = ""))
 )
 
+fun compileAnalysisOutputDomain(frame: AnalysisAttentionFrame): com.orchard.backend.vector.RepositoryAnalysisOutputDomain =
+    com.orchard.backend.vector.RepositoryAnalysisOutputDomain(
+        sourcePaths = frame.correlations.filter { it.disposition == ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE }.flatMap { it.evidencePaths }.toSet(),
+        evidencePaths = frame.correlations.flatMap { it.evidencePaths }.toSet(),
+    )
+
 fun analysisAttentionCandidateDiagnostic(
     frame: AnalysisAttentionFrame,
     sourcePaths: List<String>,
     evidencePaths: List<String>,
 ): String? {
-    val suppliedPaths = frame.correlations.flatMap { it.evidencePaths }.toSet()
-    val candidatePaths = frame.correlations.filter { it.disposition == ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE }
-        .flatMap { it.evidencePaths }.toSet()
-    val unsupportedSources = sourcePaths.filterNot { it in candidatePaths }.distinct()
+    val outputDomain = compileAnalysisOutputDomain(frame)
+    val unsupportedSources = sourcePaths.filterNot { it in outputDomain.sourcePaths }.distinct()
     if (unsupportedSources.isNotEmpty()) {
         return "Analysis source paths do not trace to candidate Attention evidence: ${unsupportedSources.joinToString()}."
     }
-    val unsupportedEvidence = evidencePaths.filterNot { it in suppliedPaths }.distinct()
+    val unsupportedEvidence = evidencePaths.filterNot { it in outputDomain.evidencePaths }.distinct()
     return unsupportedEvidence.takeIf { it.isNotEmpty() }?.let {
         "Analysis citations refer to evidence deferred or absent from Attention context: ${it.joinToString()}."
     }
