@@ -183,6 +183,38 @@ Full source bytes remain in the revision-pinned repository context. The frame ca
 
 The frame must distinguish executable authority from descriptive context. Deferred work may be shown so the model understands the complete objective, but deferred nodes do not grant actions. Evidence-only nodes may explain compliant owners, but they do not grant mutation authority.
 
+### Cross-Component Coherence Obligations
+
+Internally valid components and invocation frames do not establish that their boundaries agree. Attention must expose producer-consumer compatibility obligations for the active admitted scope, using the existing owner, dependency, verification-method and verification-evidence relationships. A frame remains an invocation projection, not a separate component authority or an independent coherence engine.
+
+Each affected boundary obligation must identify:
+
+- its admitted requirement, producer owner and consumer owner;
+- the shared executable contract identity, version and canonical hash;
+- the required structure, behavior, units, failure semantics, provenance and authority that cross the boundary;
+- any admitted transformation between the producer representation and consumer representation, including what it must preserve;
+- an admitted integrated verification method with positive and negative cases; and
+- the verification result, target repository and authority revisions, observation hash and invalidation dependencies.
+
+Producer and consumer descriptions alone cannot establish compatibility. Prefer one reusable or mechanically derived executable contract over independently maintained schema, prompt and parser descriptions. Where representations necessarily differ, their transformation must have an explicit preservation obligation and an integrated check. A path relationship or a matching name does not prove that a value produced at one boundary can be consumed at the next.
+
+Compatibility has three derived states: `UNKNOWN` when a required proof is absent or stale, `MISMATCH` when a deterministic check finds incompatible contracts or behavior, and `VERIFIED` when the admitted method produced passing evidence for the stated boundary and revisions. `VERIFIED` is bounded by that method's coverage; it does not prove every possible execution or grant acceptance authority. A model assertion, successful isolated unit test or passing compilation cannot substitute for the required integrated proof.
+
+Before inference, the invocation projection must expose applicable obligations, their current states and unresolved work. A mismatch prevents dispatch through an incompatible runtime contract; unknown behavior may be investigated through an admitted bounded operation, but cannot be presented as verified. Before acceptance, every required boundary obligation must have current integrated evidence or an explicitly admitted deferred disposition that does not claim objective completion. Changing either owner, contract, transformation, relevant source revision or authority invalidates the affected result and requires a successor projection or proof.
+
+The 2026-10-09 repository-analysis failures illustrate this obligation: collection could return Kotlin fragments that submission rejected, and the provider's evidence-array schema did not require citation fields that the decoder required. Fail-closed rejection contained those failures but did not establish coherent delivery. Passing a gate with fixtures that bypassed those boundaries did not prove their agreement.
+
+This extension is proposed policy, not a claim that typed boundary obligations are already implemented. Its implementation completion requires an automated gate with executed integrated proofs for:
+
+1. Shared contract identity across producer and consumer, including detection of nested required-field mismatches.
+2. Real collection, serialization, provider formatting, decoding and provenance validation under unchanged admitted apertures, with both a valid path and fail-closed negative cases.
+3. Explicit transformations that preserve required meaning, units, source identity and authority without stripping materialized evidence from integrity accounting.
+4. Missing or stale proofs remaining `UNKNOWN`, incompatible proofs becoming `MISMATCH`, and passing bounded evidence becoming `VERIFIED` without self-authorized acceptance.
+5. Invalidation when either boundary owner, contract or admitted dependency changes, including durable replay of historical results without rewriting them.
+6. Required active-boundary coverage: non-integrated obligations cannot satisfy completion, and explicitly deferred boundaries cannot silently disappear or count as delivered.
+
+The existing ADR 056 gate is evidence only for its registered criteria; it does not grant completion of this extension. Keep the immediate citation-contract integration repair separate from implementation or adoption of these broader obligations.
+
 ### Deterministic Compilation and Repair
 
 The compiler may automatically repair only derived or mechanical defects, such as:
