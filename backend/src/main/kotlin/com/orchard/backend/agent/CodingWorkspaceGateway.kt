@@ -254,6 +254,8 @@ class LocalCodingWorkspaceGateway(
         require(selected.files.all { it.content.isNotEmpty() || it.contentHash == sha256Content("") }) {
             "SOURCE_EVIDENCE_INADEQUATE: complete declarations cannot fit the source excerpt allowance."
         }
+        val adequacyDiagnostic = repositoryContextAdequacyDiagnostic(selected)
+        require(adequacyDiagnostic == null) { requireNotNull(adequacyDiagnostic) }
         require(serializedBytes <= maxSerializedBytes) {
             "SOURCE_CONTEXT_BYTE_LIMIT: serialized source exceeds the byte guard."
         }
@@ -456,8 +458,10 @@ class LocalCodingWorkspaceGateway(
             val bytes = runCatching { Files.readAllBytes(path) }.getOrNull() ?: return@mapNotNull null
             if (bytes.any { it == 0.toByte() }) return@mapNotNull null
             val source = bytes.toString(Charsets.UTF_8)
-            val content = focusedContextExcerpt(source, queryTokens, maxFileBytes)
             val relative = root.relativize(path).toString().replace('\\', '/')
+            val content = if (relative.endsWith(".kt") || relative.endsWith(".kts")) {
+                kotlinContextExcerpt(source, queryTokens, maxFileBytes, relative.endsWith(".kts"))
+            } else focusedContextExcerpt(source, queryTokens, maxFileBytes)
             val selectorIds = selectorMatchers.mapNotNull { (selector, matchers) ->
                 selector.selectorId.takeIf {
                     matchers.any { it.matches(Path.of(relative)) } && selectorMatchesSource(selector, source)
@@ -492,7 +496,10 @@ class LocalCodingWorkspaceGateway(
                 bytesUsed += bytes
             }
         }
-        return CodingRepositoryContext(selected, (tracked.size - selected.size).coerceAtLeast(0))
+        val context = CodingRepositoryContext(selected, (tracked.size - selected.size).coerceAtLeast(0))
+        val adequacyDiagnostic = repositoryContextAdequacyDiagnostic(context)
+        require(adequacyDiagnostic == null) { requireNotNull(adequacyDiagnostic) }
+        return context
     }
 
     private fun isGenesisImplementationPath(path: String): Boolean = path
@@ -1113,6 +1120,7 @@ internal fun kotlinContextExcerpt(content: String, queryTokens: Set<String>, max
         val declarations = PsiTreeUtil.collectElementsOfType(file, KtDeclaration::class.java)
             .filter { declaration ->
                 completeKotlinEvidence(declaration) || declaration is KtClassOrObject && declaration.body == null &&
+                    declaration !is org.jetbrains.kotlin.psi.KtEnumEntry &&
                     PsiTreeUtil.findChildOfType(declaration, PsiErrorElement::class.java) == null
             }
             .sortedWith(compareBy<KtDeclaration> { it !is KtClassOrObject || it.body != null }.thenByDescending { declaration ->
@@ -1177,6 +1185,7 @@ internal fun repositoryEvidenceRetentionDiagnostic(anchors: Map<String, Set<Stri
 }
 
 private fun completeKotlinEvidence(declaration: KtDeclaration): Boolean {
+    if (declaration is org.jetbrains.kotlin.psi.KtEnumEntry) return false
     if (PsiTreeUtil.findChildOfType(declaration, PsiErrorElement::class.java) != null) return false
     return when (declaration) {
         is KtNamedFunction -> declaration.bodyExpression != null

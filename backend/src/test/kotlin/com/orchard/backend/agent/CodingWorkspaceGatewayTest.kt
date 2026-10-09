@@ -15,6 +15,55 @@ import kotlinx.serialization.json.Json
 
 class CodingWorkspaceGatewayTest {
     @Test
+    fun `analysis collection uses complete Kotlin declarations before admission`() {
+        val repository = createTempDirectory("orchard-analysis-declarations-")
+        git(repository, "init")
+        Files.createDirectories(repository.resolve("src"))
+        val path = "src/Owner.kt"
+        val entries = (1..1_000).joinToString(",\n") { "    STATUS_$it" }
+        val source = "enum class Status {\n$entries\n}\nclass Owner {\n    fun answer(): Int {\n        return 42\n    }\n}\n"
+        Files.writeString(repository.resolve(path), source)
+        git(repository, "add", ".")
+        val context = LocalCodingWorkspaceGateway().collectAnalysisContext(repository.toString(), "answer",
+            compileScopePathEvidenceSelectors(listOf("Implement `$path` answer behavior."), emptyList()))
+
+        assertEquals(null, repositoryContextAdequacyDiagnostic(context), context.files.single().content)
+        assertTrue(context.files.single().content.contains("return 42"))
+        assertEquals(sha256Content(source), context.files.single().contentHash)
+        assertTrue(context.files.single().content.encodeToByteArray().size <= 12 * 1024)
+    }
+
+    @Test
+    fun `pinned Kotlin collection supplies complete behavior instead of standalone enum entries`() {
+        val repository = createTempDirectory("orchard-enum-evidence-")
+        git(repository, "init")
+        Files.createDirectories(repository.resolve("src"))
+        val entries = (1..250).joinToString(",\n") { "    STATUS_$it" }
+        val path = "src/Owner.kt"
+        val source = "enum class Status {\n$entries\n}\nclass Owner {\n    fun answer(): Int {\n        return 42\n    }\n}\n"
+        Files.writeString(repository.resolve(path), source)
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Initial")
+        val gateway = LocalCodingWorkspaceGateway()
+        val revision = gitOutput(repository, "rev-parse", "HEAD")
+        val context = gateway.collectPlanContext(repository.toString(), revision, listOf(path), "answer", 768)
+
+        assertEquals(null, repositoryContextAdequacyDiagnostic(context), context.files.single().content)
+        assertTrue(context.files.single().content.contains("return 42"))
+        assertEquals(sha256Content(source), context.files.single().contentHash)
+        assertTrue(context.files.single().content.contains("// Orchard source lines "))
+        assertTrue(contextJson.encodeToString(context).encodeToByteArray().size <= 768)
+
+        Files.writeString(repository.resolve(path), "enum class Status {\n$entries\n}\n")
+        git(repository, "add", ".")
+        git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "No fitting behavior")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            gateway.collectPlanContext(repository.toString(), gitOutput(repository, "rev-parse", "HEAD"), listOf(path), "status", 768)
+        }
+        assertTrue(failure.message.orEmpty().contains("SOURCE_EVIDENCE_INADEQUATE"), failure.message)
+    }
+
+    @Test
     fun `provenance annotation changes excerpt integrity but not pinned source identity`() {
         val source = CodingContextFile("src/Owner.kt", "fun answer() = 42\n")
         val annotated = source.copy(content = "// Orchard source lines 1-1\n${source.content}")

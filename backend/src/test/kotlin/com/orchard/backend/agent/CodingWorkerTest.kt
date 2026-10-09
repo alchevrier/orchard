@@ -1470,10 +1470,11 @@ class CodingWorkerTest {
 
         assertTrue(excerpt.encodeToByteArray().size < content.encodeToByteArray().size)
         assertTrue(secondaryExcerpt.encodeToByteArray().size < content.encodeToByteArray().size)
-        assertTrue(excerpt.contains("[Orchard excerpt lines"))
-        assertTrue(excerpt.contains("FontFamily.Serif"))
-        assertTrue(excerpt.contains("FontFamily.Monospace"))
-        assertTrue(secondaryExcerpt.contains("FontFamily.Monospace"))
+        assertTrue(excerpt.contains("// Orchard source lines "))
+        assertTrue(excerpt.contains("val heading = FontFamily.Serif"))
+        assertTrue(excerpt.contains("val telemetry = FontFamily.Monospace"))
+        assertTrue(secondaryExcerpt.contains("val telemetry = FontFamily.Monospace"))
+        assertEquals(null, repositoryContextAdequacyDiagnostic(context))
         assertTrue(context.files.single { it.path == "src/Main.kt" }.matchedDeclarations.any { "FontFamily.Serif" in it })
         assertEquals(listOf("font-owners"), context.files.single { it.path == "src/Main.kt" }.matchedEvidenceSelectorIds)
     }

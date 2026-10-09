@@ -104,6 +104,71 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class CompanyCircuitTest {
     @Test
+    fun `real pinned collection and analysis admission share complete Kotlin evidence contract`() = runTest {
+        for (hasBehavior in listOf(true, false)) {
+            val state = createTempDirectory("orchard-collected-evidence-")
+            val projects = createTempDirectory("orchard-collected-projects-")
+            val bindings = FileRepositoryBindingStore(state)
+            val workspace = workspace(state, bindings)
+            createProjectAndEpic(workspace)
+            admitGenesis(workspace, repositoryPath = "build.gradle.kts")
+            val model = RejectingAnalysisModel()
+            val company = CompanyControlService(workspace, listOf(model), FileCompanyControlStore(state), bindings)
+            assertEquals(CompanyCircuitStatus.STARTED, CompanyCircuitService(workspace, company, projects).start(1).status)
+            val run = workspace.snapshot(MESSAGE_READY).workflowRuns.single()
+            val workspacePath = requireNotNull(run.context.repository.path)
+            val entries = (1..250).joinToString(",\n") { "    STATUS_$it" }
+            val source = "enum class Status {\n$entries\n}\n" + if (hasBehavior) "class Owner {\n    fun answer(): Int {\n        return 42\n    }\n}\n" else ""
+            Files.writeString(Path.of(workspacePath).resolve("build.gradle.kts"), source)
+            val commit = ProcessBuilder("git", "-C", workspacePath, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test",
+                "commit", "-am", "Pinned evidence fixture").redirectErrorStream(true).start()
+            assertTrue(commit.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(0, commit.exitValue(), commit.inputStream.bufferedReader().use { it.readText() })
+            val local = LocalCodingWorkspaceGateway()
+            val revision = requireNotNull(local.currentRevision(workspacePath))
+            val gateway = object : CodingWorkspaceGateway by local {
+                override fun collectAnalysisContext(workspacePath: String, query: String, selectors: List<com.orchard.backend.workspace.RepositoryEvidenceSelector>): CodingRepositoryContext {
+                    val collected = local.collectPlanContext(workspacePath, revision, listOf("build.gradle.kts"), query, 768)
+                    return collected.copy(files = collected.files.map { file -> file.copy(
+                        matchedEvidenceSelectorIds = selectors.filter { file.path in it.pathGlobs }.map { it.selectorId },
+                    ) })
+                }
+            }
+            val settings = TransientModelProfileSettingsStore()
+            val override = ModelProfileOverride(DefaultModelExecutionProfiles.broadRepositoryAnalysis.id, 24_000, 4_000)
+            settings.save(listOf(override))
+            val attempts = TransientRepositoryAnalysisAttemptStore()
+            val analysis = RepositoryAnalysisService(workspace, listOf(model), TransientRepositoryExecutionPlanStore(), gateway,
+                companyControl = company, attemptStore = attempts, profileSettingsStore = settings)
+            val result = analysis.tick(run.runId)
+            assertEquals(listOf(override), settings.load())
+            assertEquals(revision, local.currentRevision(workspacePath))
+            val attempt = attempts.load().single { it.contextSelection != null }
+            assertEquals(revision, attempt.baseRevision)
+            val report = requireNotNull(attempt.contextSelection?.qualityReport)
+            if (hasBehavior) {
+                assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, result.status, result.diagnostic)
+                assertEquals(1, model.analysisCallCount)
+                val envelope = Json.parseToJsonElement(model.analysisPrompts.single().substringAfter("Authoritative repository analysis envelope:\n")).jsonObject
+                val supplied = Json.decodeFromJsonElement(CodingRepositoryContext.serializer(), envelope.getValue("repositoryContext"))
+                assertEquals(null, com.orchard.backend.agent.repositoryContextAdequacyDiagnostic(supplied))
+                val file = supplied.files.single()
+                assertTrue(file.content.contains("return 42"))
+                assertTrue(file.content.contains("// Orchard source lines "))
+                assertEquals(CodingContextFile(file.path, source).contentHash, file.contentHash)
+                assertEquals(com.orchard.backend.attention.ContextQualityStatus.PASS, report.adequacy)
+            } else {
+                assertEquals(RepositoryAnalysisTickStatus.CONTEXT_UNAVAILABLE, result.status, result.diagnostic)
+                assertTrue(result.diagnostic.contains("SOURCE_EVIDENCE_INADEQUATE"), result.diagnostic)
+                assertEquals(0, model.analysisCallCount)
+                assertEquals(null, attempt.promptHash)
+                assertEquals(com.orchard.backend.attention.ContextQualityStatus.FAIL, report.adequacy)
+                assertEquals(com.orchard.backend.attention.ContextQualityStatus.NOT_ATTEMPTED, report.downstream)
+            }
+        }
+    }
+
+    @Test
     fun `governed coding rejects oversized typed batch before repository mutation`() = runTest {
         val state = createTempDirectory("orchard-typed-batch-")
         val projects = createTempDirectory("orchard-typed-projects-")
