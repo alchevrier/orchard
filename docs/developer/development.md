@@ -86,6 +86,26 @@ ORCHARD_OPERATION_MODE=PILOTED ./gradlew :backend:jvmRun --no-daemon
 
 `ORCHARD_OPERATION_MODE` accepts `AUTONOMOUS` (the default) or `PILOTED`. Piloted mode preserves read-only projections and explicit API actions while suppressing background model-backed analysis, coding, review, audit, campaign, and pending-command execution. Direct `jvmRun` does not start a model provider.
 
+### Local Analysis Boundary Traces
+
+Provider audit events normally retain hashes, counts and phases, not request/response payloads. To diagnose a new repository-analysis attempt, opt in before starting the backend:
+
+```bash
+ORCHARD_OPERATION_MODE=PILOTED \
+ORCHARD_MODEL_TRACE_DIR="$HOME/.orchard/diagnostics/model-boundaries" \
+./gradlew :backend:jvmRun --no-daemon --console=plain
+```
+
+The trace directory must be an absolute, dedicated private directory on a POSIX filesystem. Capture is disabled when the variable is absent. Enabling capture does not authorize or start a retry; use the pilot's exact authorized action separately.
+
+Each `analysis-<runId>-<UUID>.jsonl` file correlates the final `ANALYSIS_REQUEST`, prepared `PROVIDER_REQUEST`, UTF-8 `PROVIDER_RESPONSE` body, reconciled `MODEL_GENERATION`, `NORMALIZED_CANDIDATE`, `ANALYSIS_DECODE`, candidate validation and final `ANALYSIS_RESULT`. Provider request/response pairs have their own request IDs so structured/plain fallback remains distinguishable. Requests contain the actual serialized body, including the rendered prompt and schema, but not HTTP headers or resolved credentials. Ollama response capture preserves UTF-8 body text, including line endings, before stream reconciliation; this is not a network packet capture.
+
+Payloads may contain source code and provider-generated text. They remain local, are not exposed through HTTP projections, and must not be uploaded or committed. Directories use owner-only permissions and files use `0600`. Each event retains at most 256 KiB of a UTF-8-safe prefix, with explicit truncation, original byte count and full-payload hash. Limits are 4 MiB per trace and 32 trace files; archive or remove specific old diagnostic files before exceeding those limits. No automatic deletion is performed.
+
+Opted-in capture errors are logged and surfaced as `STORAGE_UNAVAILABLE`, not hidden as successful capture. A pre-dispatch capture failure prevents inference; a later failure cannot undo an already recorded plan. Missing terminal events identify interrupted or incomplete traces. Historical records containing only hashes cannot reconstruct an exact old prompt or response.
+
+To locate a failure, compare the response body with `MODEL_GENERATION`, then the normalized/decoded candidate, then the candidate check and final result. An invalid question present in raw provider output is a generation-side finding; a change introduced during reconciliation or decoding is an adapter/parser finding. Neither finding alone establishes a model-capability limit.
+
 Run the desktop only after the backend is ready:
 
 ```bash

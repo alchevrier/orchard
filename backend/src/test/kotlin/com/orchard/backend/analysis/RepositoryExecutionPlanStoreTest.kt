@@ -546,7 +546,8 @@ class RepositoryExecutionPlanStoreTest {
             ),
         )
         assertEquals(
-            "Repository evidence citation 1 has the wrong content hash for src/Main.kt.",
+            "Repository evidence citation 1 has the wrong content hash for src/Main.kt " +
+                "(expected ${"c".repeat(64)}; received \"${"d".repeat(64)}\").",
             repositoryEvidenceDiagnostic(
                 context,
                 valid.copy(evidence = valid.evidence.map { it.copy(contentHash = "d".repeat(64)) }),

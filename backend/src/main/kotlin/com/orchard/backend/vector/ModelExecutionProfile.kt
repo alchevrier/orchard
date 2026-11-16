@@ -22,8 +22,10 @@ const val MODEL_CAPABILITY_STRICT_JSON = "STRICT_JSON"
 
 data class RepositoryAnalysisOutputDomain(
     val sourcePaths: Set<String>,
-    val evidencePaths: Set<String>,
+    val evidenceHashes: Map<String, String>,
 ) {
+    val evidencePaths: Set<String> get() = evidenceHashes.keys
+
     init {
         require(evidencePaths.containsAll(sourcePaths)) { "Analysis source choices must be supplied evidence" }
     }
@@ -38,7 +40,7 @@ enum class ModelOutputContract {
     val versionedId: String
         get() = when (this) {
             JSON_OBJECT -> "json-object-v1"
-            REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v3"
+            REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v4"
             BOUNDED_CODING_TOOL_BATCH -> "bounded-coding-tool-batch-v1"
             BOUNDED_LITERAL_REPLACEMENTS -> "bounded-literal-replacements-v1"
         }
@@ -67,8 +69,12 @@ enum class ModelOutputContract {
     internal fun schemaFor(outputDomain: RepositoryAnalysisOutputDomain?): JsonObject? {
         if (this != REPOSITORY_ANALYSIS_CANDIDATE) return null
         val schema = serializedOutputSchema(com.orchard.backend.analysis.RepositoryAnalysisCandidate.serializer().descriptor, arrayLimits)
-        if (outputDomain == null) return schema
         val properties = schema.getValue("properties").jsonObject.toMutableMap()
+        val questions = properties.getValue("unresolvedQuestions").jsonObject
+        properties["unresolvedQuestions"] = JsonObject(questions + ("items" to JsonObject(
+            questions.getValue("items").jsonObject + ("minLength" to JsonPrimitive(1)),
+        )))
+        if (outputDomain == null) return JsonObject(schema + ("properties" to JsonObject(properties)))
         val sources = properties.getValue("sourcePaths").jsonObject
         properties["sourcePaths"] = if (outputDomain.sourcePaths.isEmpty()) JsonObject(sources + ("maxItems" to JsonPrimitive(0))) else {
             JsonObject(sources + ("items" to JsonObject(sources.getValue("items").jsonObject + ("enum" to JsonArray(outputDomain.sourcePaths.sorted().map(::JsonPrimitive))))))
@@ -77,8 +83,13 @@ enum class ModelOutputContract {
         properties["evidence"] = if (outputDomain.evidencePaths.isEmpty()) JsonObject(evidence + ("maxItems" to JsonPrimitive(0))) else {
             val citation = evidence.getValue("items").jsonObject
             val fields = citation.getValue("properties").jsonObject
-            val path = JsonObject(fields.getValue("path").jsonObject + ("enum" to JsonArray(outputDomain.evidencePaths.sorted().map(::JsonPrimitive))))
-            JsonObject(evidence + ("items" to JsonObject(citation + ("properties" to JsonObject(fields + ("path" to path))))))
+            val choices = outputDomain.evidenceHashes.toSortedMap().map { (path, hash) ->
+                JsonObject(citation + ("properties" to JsonObject(fields + mapOf(
+                    "path" to JsonObject(fields.getValue("path").jsonObject + ("enum" to JsonArray(listOf(JsonPrimitive(path))))),
+                    "contentHash" to JsonObject(fields.getValue("contentHash").jsonObject + ("enum" to JsonArray(listOf(JsonPrimitive(hash))))),
+                ))))
+            }
+            JsonObject(evidence + ("items" to JsonObject(mapOf("oneOf" to JsonArray(choices)))))
         }
         return JsonObject(schema + ("properties" to JsonObject(properties)))
     }
@@ -88,6 +99,9 @@ enum class ModelOutputContract {
             val values = output[field] as? JsonArray ?: continue
             if (values.size > limit) return "$versionedId: $field has ${values.size} items; at most $limit are allowed."
         }
+        if (this == REPOSITORY_ANALYSIS_CANDIDATE && (output["unresolvedQuestions"] as? JsonArray).orEmpty().any {
+                it.jsonPrimitive.content.isBlank()
+            }) return "$versionedId: unresolvedQuestions contains a blank question; supply a concrete question or an empty array."
         if (this == BOUNDED_LITERAL_REPLACEMENTS && (output["operations"] as? JsonArray).orEmpty().any {
                 (it as? JsonObject)?.get("action")?.jsonPrimitive?.content != "REPLACE_LITERAL"
             }) return "$versionedId requires REPLACE_LITERAL operations."

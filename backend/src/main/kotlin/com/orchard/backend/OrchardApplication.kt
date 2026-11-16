@@ -210,6 +210,11 @@ fun main() {
         LocalModelSetupRecommendations.detectPlatform(),
         machineCapacity.totalMemoryBytes,
     )
+    val modelBoundaryTraces = System.getenv("ORCHARD_MODEL_TRACE_DIR")?.let {
+        com.orchard.backend.vector.ModelBoundaryTraceStore(java.nio.file.Path.of(it)).also { store ->
+            println("Orchard model boundary traces enabled at ${store.directory} (local sensitive payloads)")
+        }
+    }
     val modelProviderRegistry = ModelProviderRegistry(modelProviderCatalogStore)
     val modelProviders = modelProviderRegistry.providers()
     val resourceController = MachineResourceController(
@@ -342,6 +347,7 @@ fun main() {
         codingWorkerStore = codingWorkerStore,
         profileSettingsStore = modelProfileSettingsStore,
         repositoryIntelligenceImporter = repositoryIntelligenceImporter,
+        modelBoundaryTraces = modelBoundaryTraces,
     )
     val engineeringStandardsStore = FileEngineeringStandardsStore(OrchardPaths.WORKSPACE_DIR)
     val standardsPolicy = StandardsPolicyService(

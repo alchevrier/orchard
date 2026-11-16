@@ -34,9 +34,12 @@ class ModelProviderCatalogTest {
     @Test
     fun `default GPT OSS catalog formats identical raw wire input across structured fallback`() = runTest {
         val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
+        val responses = mutableListOf<String>()
         val engine = MockEngine { request ->
             requests += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
-            respond(if (requests.size == 1) """{"response":"{","done":false}""" else """{"response":"{}","done":true}""",
+            val body = if (requests.size == 1) """{"response":"{","done":false}""" + "\r\n" else """{"response":"{}","done":true}"""
+            responses += body
+            respond(body,
                 headers = headersOf(HttpHeaders.ContentType, "application/json"))
         }
         val catalog = defaultLocalModelProviderCatalog()
@@ -49,7 +52,9 @@ class ModelProviderCatalogTest {
             assertEquals(MODEL_INPUT_FORMAT_GPT_OSS_HARMONY, profile.configuration["input.format"])
             val expected = requireNotNull(formatModelInput(prompt, profile))
             val accounting = accountModelInput(prompt, profile)
-            val result = provider.executeRepositoryAnalysis(prompt, 128, 4_096)
+            val traceDirectory = createTempDirectory("orchard-provider-fallback-trace-")
+            val trace = ModelBoundaryTraceStore(traceDirectory).newTrace(34)
+            val result = kotlinx.coroutines.withContext(trace) { provider.executeRepositoryAnalysis(prompt, 128, 4_096) }
             assertEquals(2, requests.size)
             requests.forEach {
                 assertEquals(expected.prompt, it.getValue("prompt").jsonPrimitive.content)
@@ -62,6 +67,12 @@ class ModelProviderCatalogTest {
             assertEquals(com.orchard.backend.workspace.stagedPlanHash(expected.prompt), accounting.serializedInputHash)
             assertEquals(profile, provider.bindingProfile())
             assertFalse("input.format" in saved.configuration)
+            val events = Files.readAllLines(Files.list(traceDirectory).use { it.toList().single() }).map { Json.decodeFromString<ModelBoundaryTraceEvent>(it) }
+            assertEquals(listOf("PROVIDER_REQUEST", "PROVIDER_RESPONSE", "PROVIDER_REQUEST", "PROVIDER_RESPONSE"), events.map { it.stage })
+            assertEquals(responses, events.filter { it.stage == "PROVIDER_RESPONSE" }.map { it.payload })
+            assertEquals(listOf("true", "false"), events.filter { it.stage == "PROVIDER_REQUEST" }.map { it.details["structured"] })
+            assertEquals(2, events.map { it.details["requestId"] }.distinct().size)
+            events.chunked(2).forEach { pair -> assertEquals(pair.first().details["requestId"], pair.last().details["requestId"]) }
         } finally {
             provider.close()
         }
@@ -683,10 +694,13 @@ class ModelProviderCatalogTest {
     @Test
     fun `remote OpenAI compatible adapter resolves environment reference without persisting the secret`() = runTest {
         var authorization: String? = null
+        var requestBody = ""
+        val responseBody = """{"choices":[{"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}"""
         val engine = MockEngine { request ->
             authorization = request.headers[HttpHeaders.Authorization]
+            requestBody = (request.body as TextContent).text
             respond(
-                """{"choices":[{"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}""",
+                responseBody,
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
@@ -703,11 +717,18 @@ class ModelProviderCatalogTest {
             "runtime-secret"
         }, engine = engine)
 
-        provider.executeCodingPatch("code", 128, 4_096)
+        val traceDirectory = createTempDirectory("orchard-compatible-provider-trace-")
+        val trace = ModelBoundaryTraceStore(traceDirectory).newTrace(34)
+        kotlinx.coroutines.withContext(trace) { provider.executeCodingPatch("code", 128, 4_096) }
         provider.close()
 
         assertEquals("Bearer runtime-secret", authorization)
         assertFalse(endpoint.toString().contains("runtime-secret"))
+        val traceText = Files.readString(Files.list(traceDirectory).use { it.toList().single() })
+        val events = traceText.lineSequence().filter { it.isNotBlank() }.map { Json.decodeFromString<ModelBoundaryTraceEvent>(it) }.toList()
+        assertEquals(listOf(requestBody, responseBody), events.map { it.payload })
+        assertFalse(traceText.contains("runtime-secret"))
+        assertFalse(traceText.contains(HttpHeaders.Authorization))
     }
 
     @Test

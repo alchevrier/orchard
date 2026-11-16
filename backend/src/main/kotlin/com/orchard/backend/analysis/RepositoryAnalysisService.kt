@@ -28,6 +28,9 @@ import com.orchard.backend.resource.MachineResourceController
 import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelBindingProfile
+import com.orchard.backend.vector.ModelBoundaryTrace
+import com.orchard.backend.vector.ModelBoundaryTraceException
+import com.orchard.backend.vector.ModelBoundaryTraceStore
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProfileResolver
 import com.orchard.backend.vector.ModelProfileSettingsStore
@@ -55,7 +58,9 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -186,6 +191,7 @@ class RepositoryAnalysisService(
     private val codingWorkerStore: CodingWorkerStore? = null,
     private val profileSettingsStore: ModelProfileSettingsStore = TransientModelProfileSettingsStore(),
     private val repositoryIntelligenceImporter: RepositoryIntelligenceImporter? = null,
+    private val modelBoundaryTraces: ModelBoundaryTraceStore? = null,
 ) {
     private val runMutexes = ConcurrentHashMap<Long, Mutex>()
 
@@ -423,7 +429,7 @@ class RepositoryAnalysisService(
         val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
         if (!mutex.tryLock()) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.BUSY, runId)
         return try {
-            withTimeout(ANALYSIS_TICK_TIMEOUT_MILLIS) { analyze(runId) }
+            withTimeout(ANALYSIS_TICK_TIMEOUT_MILLIS) { analyzeWithTrace(runId) }
         } finally {
             mutex.unlock()
         }
@@ -436,7 +442,7 @@ class RepositoryAnalysisService(
         val mutex = runMutexes.computeIfAbsent(runId) { Mutex() }
         if (!mutex.tryLock()) return RepositoryAnalysisTickResult(RepositoryAnalysisTickStatus.BUSY, runId)
         return try {
-            withTimeout(ANALYSIS_TICK_TIMEOUT_MILLIS) { analyze(runId, admittedDesign) }
+            withTimeout(ANALYSIS_TICK_TIMEOUT_MILLIS) { analyzeWithTrace(runId, admittedDesign) }
         } finally {
             mutex.unlock()
         }
@@ -488,6 +494,34 @@ class RepositoryAnalysisService(
                 )
             },
         )
+    }
+
+    private suspend fun analyzeWithTrace(
+        runId: Long,
+        admittedDesign: com.orchard.backend.workspace.DesignAuthorityReference? = null,
+    ): RepositoryAnalysisTickResult {
+        val trace = modelBoundaryTraces?.newTrace(runId) ?: return analyze(runId, admittedDesign)
+        var completed: RepositoryAnalysisTickResult? = null
+        return try {
+            withContext(trace) {
+                analyze(runId, admittedDesign).also {
+                    completed = it
+                    trace.record("ANALYSIS_RESULT", json.encodeToString(it))
+                }
+            }
+        } catch (error: ModelBoundaryTraceException) {
+            val latest = attemptStore.load().lastOrNull { it.runId == runId }
+            if (completed == null && latest?.state == ANALYSIS_ATTEMPT_RUNNING) {
+                return blockAttempt(
+                    runId, latest.baseRevision, null, RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE,
+                    requireNotNull(error.message), contextSelection = latest.contextSelection,
+                )
+            }
+            RepositoryAnalysisTickResult(
+                RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, runId,
+                plan = completed?.plan, diagnostic = requireNotNull(error.message),
+            )
+        }
     }
 
     private suspend fun analyze(
@@ -766,6 +800,7 @@ class RepositoryAnalysisService(
         val budgetPolicy = if (correctionPaths == null) "analysis-input-allocation-v1:70-percent" else "focused-correction-input-v1:100-percent"
         fun outputDomainFor(candidate: CodingRepositoryContext) = com.orchard.backend.attention.compileAnalysisOutputDomain(
             bindRepositoryAnalysisAttentionContext(collectedAttention, selectedPathsBySelector, candidate.files.mapTo(hashSetOf()) { it.path }, relatedPathsByScope),
+            candidate,
         )
         fun envelopeFor(candidate: CodingRepositoryContext) = RepositoryAnalysisEnvelope(
             profile.id,
@@ -878,7 +913,7 @@ class RepositoryAnalysisService(
             run.runId,
             diagnostic = admission.evidence.reason,
         )
-        if (recordRunningAttempt(
+        val runningAttempt = recordRunningAttempt(
             run.runId,
             baseRevision,
             prompt,
@@ -886,16 +921,20 @@ class RepositoryAnalysisService(
             binding,
             promptTokens,
             selectionFor(boundedContext, admitted = true),
-        ) == null) {
-            return RepositoryAnalysisTickResult(
-                RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE,
-                run.runId,
-                diagnostic = "The repository analysis execution could not record its durable running attempt.",
-            )
-        }
+        ) ?: return RepositoryAnalysisTickResult(
+            RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE,
+            run.runId,
+            diagnostic = "The repository analysis execution could not record its durable running attempt.",
+        )
+        val trace = currentCoroutineContext()[ModelBoundaryTrace]
         val startedAt = System.nanoTime()
         val generation = try {
             lease.use {
+                trace?.record("ANALYSIS_REQUEST", prompt, mapOf(
+                    "attemptId" to runningAttempt.attemptId.toString(), "baseRevision" to baseRevision,
+                    "executionProfileId" to profile.id, "bindingFingerprint" to modelBindingFingerprint(binding),
+                    "promptHash" to sha256(prompt), "envelopeHash" to sha256(envelopeJson),
+                ))
                 provider.executeRepositoryAnalysis(
                     prompt,
                     minOf(profile.outputBudgetTokens, REPOSITORY_ANALYSIS_CANDIDATE_OUTPUT_TOKENS),
@@ -920,20 +959,35 @@ class RepositoryAnalysisService(
                 run.runId,
                 baseRevision,
                 prompt,
-                RepositoryAnalysisTickStatus.MODEL_FAILED,
+                if (error is ModelBoundaryTraceException) RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE else RepositoryAnalysisTickStatus.MODEL_FAILED,
                 error.message.orEmpty().ifBlank { "The repository analysis model failed." },
             )
         }
+        trace?.record("MODEL_GENERATION", generation.text, mapOf(
+            "inputTokens" to generation.promptTokens.toString(), "outputTokens" to generation.completionTokens.toString(),
+        ))
         val boundedGeneration = generation.takeIf {
             repositoryAnalysisGenerationWithinBudget(it, profile.inputBudgetTokens, profile.outputBudgetTokens)
         }
-        val decodedOutput = boundedGeneration?.let {
-            runCatching {
-                json.decodeFromString<RepositoryAnalysisCandidate>(
-                    normalizeRepositoryAnalysisCandidateJson(it.text, json),
-                )
+        val normalizedOutput = boundedGeneration?.let {
+            normalizeRepositoryAnalysisCandidateJson(it.text, json).also { normalized ->
+                trace?.record("NORMALIZED_CANDIDATE", normalized)
             }
         }
+        val decodedOutput = normalizedOutput?.let {
+            runCatching {
+                json.decodeFromString<RepositoryAnalysisCandidate>(it)
+            }
+        }
+        trace?.record(
+            "ANALYSIS_DECODE",
+            decodedOutput?.getOrNull()?.let { json.encodeToString(it) } ?: decodedOutput?.exceptionOrNull()?.message.orEmpty(),
+            mapOf("status" to when {
+                boundedGeneration == null -> "NOT_ATTEMPTED"
+                decodedOutput?.isSuccess == true -> "PASS"
+                else -> "FAIL"
+            }),
+        )
         val attentionDiagnostic = decodedOutput?.getOrNull()?.let {
             com.orchard.backend.vector.ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE.diagnostic(
                 json.encodeToJsonElement(RepositoryAnalysisCandidate.serializer(), it).jsonObject,
@@ -953,6 +1007,15 @@ class RepositoryAnalysisService(
             )
         }
         val identityDiagnostic = output?.let { repositoryAnalysisIdentityDiagnostic(authorityContext, it) }
+        trace?.record(
+            "ANALYSIS_CANDIDATE_VALIDATION",
+            output?.let { json.encodeToString(it) }.orEmpty(),
+            mapOf(
+                "status" to if (output != null && identityDiagnostic == null) "PASS" else "FAIL",
+                "diagnostic" to (attentionDiagnostic ?: identityDiagnostic
+                    ?: if (output == null) repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()) else ""),
+            ),
+        )
         val execution = recordExecution(
             profile.id, profile, binding, run, envelopeJson, prompt, generation, startedAt, output != null, admission.evidence, selectionFor(boundedContext, true).qualityReport,
             downstreamValid = output != null && identityDiagnostic == null,
@@ -965,7 +1028,13 @@ class RepositoryAnalysisService(
             attentionDiagnostic ?: repositoryAnalysisDecodeDiagnostic(boundedGeneration, decodedOutput?.exceptionOrNull()),
         )
         identityDiagnostic?.let {
-            return blockAttempt(run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it)
+            val selection = selectionFor(boundedContext, admitted = true)
+            return blockAttempt(
+                run.runId, baseRevision, prompt, RepositoryAnalysisTickStatus.INVALID_ANALYSIS, it,
+                contextSelection = selection.copy(
+                    qualityReport = selection.qualityReport?.copy(downstream = com.orchard.backend.attention.ContextQualityStatus.FAIL),
+                ),
+            )
         }
         val createResolvedOutput = compileResolvedCreateQuestions(output)
         val retainedOutput = attemptStore.compileRetainedExactPathOperations(
@@ -2398,7 +2467,8 @@ internal fun repositoryEvidenceDiagnostic(
         val file = files[citation.path]
             ?: return "Repository evidence citation ${index + 1} uses unavailable path ${citation.path}."
         if (file.contentHash != citation.contentHash) {
-            return "Repository evidence citation ${index + 1} has the wrong content hash for ${citation.path}."
+            return "Repository evidence citation ${index + 1} has the wrong content hash for ${citation.path} " +
+                "(expected ${file.contentHash}; received ${Json.encodeToString(citation.contentHash.take(128))})."
         }
         if (citation.observation.isBlank()) return "Repository evidence citation ${index + 1} has no observation."
     }

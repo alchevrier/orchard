@@ -2,6 +2,7 @@
 
 package com.orchard.backend.attention
 
+import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.analysis.ExecutableWorkPackage
 import com.orchard.backend.analysis.PLAN_OPERATION_CREATE
 import com.orchard.backend.analysis.PLAN_OPERATION_DELETE
@@ -181,23 +182,31 @@ fun analysisAttentionFrameHash(frame: AnalysisAttentionFrame): String = stagedPl
     attentionJson.encodeToString(frame.copy(hash = ""))
 )
 
-fun compileAnalysisOutputDomain(frame: AnalysisAttentionFrame): com.orchard.backend.vector.RepositoryAnalysisOutputDomain =
-    com.orchard.backend.vector.RepositoryAnalysisOutputDomain(
+fun compileAnalysisOutputDomain(
+    frame: AnalysisAttentionFrame,
+    context: CodingRepositoryContext,
+): com.orchard.backend.vector.RepositoryAnalysisOutputDomain {
+    val suppliedHashes = context.files.associate { it.path to it.contentHash }
+    return com.orchard.backend.vector.RepositoryAnalysisOutputDomain(
         sourcePaths = frame.correlations.filter { it.disposition == ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE }.flatMap { it.evidencePaths }.toSet(),
-        evidencePaths = frame.correlations.flatMap { it.evidencePaths }.toSet(),
+        evidenceHashes = frame.correlations.flatMap { it.evidencePaths }.distinct().associateWith { path ->
+            requireNotNull(suppliedHashes[path]) { "Attention evidence has no supplied source hash: $path" }
+        },
     )
+}
 
 fun analysisAttentionCandidateDiagnostic(
     frame: AnalysisAttentionFrame,
     sourcePaths: List<String>,
     evidencePaths: List<String>,
 ): String? {
-    val outputDomain = compileAnalysisOutputDomain(frame)
-    val unsupportedSources = sourcePaths.filterNot { it in outputDomain.sourcePaths }.distinct()
+    val candidatePaths = frame.correlations.filter { it.disposition == ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE }.flatMap { it.evidencePaths }.toSet()
+    val suppliedPaths = frame.correlations.flatMap { it.evidencePaths }.toSet()
+    val unsupportedSources = sourcePaths.filterNot { it in candidatePaths }.distinct()
     if (unsupportedSources.isNotEmpty()) {
         return "Analysis source paths do not trace to candidate Attention evidence: ${unsupportedSources.joinToString()}."
     }
-    val unsupportedEvidence = evidencePaths.filterNot { it in outputDomain.evidencePaths }.distinct()
+    val unsupportedEvidence = evidencePaths.filterNot { it in suppliedPaths }.distinct()
     return unsupportedEvidence.takeIf { it.isNotEmpty() }?.let {
         "Analysis citations refer to evidence deferred or absent from Attention context: ${it.joinToString()}."
     }

@@ -29,13 +29,16 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.currentCoroutineContext
 import java.net.HttpURLConnection
 import java.net.URI
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
-import io.ktor.utils.io.readUTF8Line
+import io.ktor.utils.io.readAvailable
 
 @Serializable
 data class ModelProviderAuditEvent(
@@ -253,22 +256,29 @@ class CatalogModelProvider(
                 completed.evalCount ?: accountModelOutput(completed.response, bindingProfile()).totalTokens,
             )
         }
+        val trace = currentCoroutineContext()[ModelBoundaryTrace]
+        val requestId = UUID.randomUUID().toString()
+        val traceDetails = mapOf(
+            "requestId" to requestId, "endpointId" to endpoint.endpointId, "bindingId" to binding.bindingId,
+            "protocol" to endpoint.protocol, "logicalPromptHash" to providerPromptHash(prompt),
+        )
+        val requestBody = json.encodeToString(OpenAiChatRequest(
+            model = binding.model,
+            messages = listOf(OpenAiMessage("user", prompt)),
+            maxTokens = maxOutputTokens,
+            temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
+        ))
+        trace?.record("PROVIDER_REQUEST", requestBody, traceDetails)
         val response = when (endpoint.protocol) {
             PROVIDER_PROTOCOL_OPENAI_COMPATIBLE -> client.post(url("/v1/chat/completions")) {
                 authorize()
                 header(HttpHeaders.ContentType, ContentType.Application.Json)
-                setBody(
-                    OpenAiChatRequest(
-                        model = binding.model,
-                        messages = listOf(OpenAiMessage("user", prompt)),
-                        maxTokens = maxOutputTokens,
-                        temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
-                    )
-                )
+                setBody(requestBody)
             }
             else -> error("Unsupported provider protocol ${endpoint.protocol}")
         }
         val body = response.bodyAsText()
+        trace?.record("PROVIDER_RESPONSE", body, traceDetails + ("httpStatus" to response.status.value.toString()))
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
         check(body.encodeToByteArray().size <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
         return json.decodeFromString<OpenAiChatResponse>(body).let { decoded ->
@@ -304,23 +314,26 @@ class CatalogModelProvider(
             numContext = contextWindowTokens,
             numThread = binding.cpuUnits,
         )
+        val trace = currentCoroutineContext()[ModelBoundaryTrace]
+        val traceDetails = mapOf(
+            "requestId" to UUID.randomUUID().toString(), "endpointId" to endpoint.endpointId,
+            "bindingId" to binding.bindingId, "protocol" to endpoint.protocol,
+            "structured" to structured.toString(), "contract" to contract.versionedId,
+            "logicalPromptHash" to providerPromptHash(prompt), "wirePromptHash" to promptHash,
+        )
+        val requestBody = if (structured) json.encodeToString(OllamaCatalogRequest(
+            binding.model, wirePrompt, format = ollamaResponseFormat(contract, outputDomain),
+            think = think, options = options, raw = formattedInput != null,
+        )) else json.encodeToString(OllamaCatalogPlainRequest(
+            binding.model, wirePrompt, think = think, options = options, raw = formattedInput != null,
+        ))
+        trace?.record("PROVIDER_REQUEST", requestBody, traceDetails)
         recordProviderAudit("REQUEST_STARTED", startedAt, promptHash, promptTokens, contextWindowTokens, maxOutputTokens, structured)
         val response = try {
             client.post(url("/api/generate")) {
                 authorize()
                 header(HttpHeaders.ContentType, ContentType.Application.Json)
-                if (structured) {
-                    setBody(OllamaCatalogRequest(
-                        binding.model,
-                        wirePrompt,
-                        format = ollamaResponseFormat(contract, outputDomain),
-                        think = think,
-                        options = options,
-                        raw = formattedInput != null,
-                    ))
-                } else {
-                    setBody(OllamaCatalogPlainRequest(binding.model, wirePrompt, think = think, options = options, raw = formattedInput != null))
-                }
+                setBody(requestBody)
             }
         } catch (error: Exception) {
             recordProviderAudit(
@@ -362,6 +375,9 @@ class CatalogModelProvider(
                 done = decoded?.done,
             )
         }
+        trace?.record("PROVIDER_RESPONSE", body, traceDetails + mapOf(
+            "httpStatus" to response.status.value.toString(), "framing" to "UTF8_BODY",
+        ))
         check(response.status.isSuccess()) { "Provider ${endpoint.endpointId} returned HTTP ${response.status.value}: ${body.take(512)}" }
         val streamed = runCatching { reconcileOllamaStream(body, json) }.getOrElse { error ->
             recordProviderAudit(
@@ -521,7 +537,6 @@ class CatalogModelProvider(
 
     private companion object {
         const val ARCHITECT_CONTEXT = 8_192
-        const val MAX_RESPONSE_BYTES = 2 * 1024 * 1024
         const val MAX_DISCOVERY_BYTES = 512 * 1024
         const val KV_CACHE_BYTES_PER_TOKEN = 393_216L
         val OPENAI_TERMINAL_FINISH_REASONS = setOf("stop")
@@ -744,21 +759,38 @@ private data class OllamaAttemptDiagnostic(
     val think: JsonElement,
 )
 
+private const val MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
 private suspend fun io.ktor.client.statement.HttpResponse.bodyAsOllamaStream(
     onLine: (line: String, frames: Int, bytes: Int) -> Unit = { _, _, _ -> },
-): String = buildString {
+): String {
     val channel = bodyAsChannel()
+    val body = ByteArrayOutputStream()
+    val line = ByteArrayOutputStream()
+    val buffer = ByteArray(8192)
     var frames = 0
     var bytes = 0
-    while (!channel.isClosedForRead) {
-        channel.readUTF8Line()?.let {
-            frames++
-            append(it)
-            append('\n')
-            bytes += it.encodeToByteArray().size + 1
-            onLine(it, frames, bytes)
+    while (true) {
+        val count = channel.readAvailable(buffer)
+        if (count < 0) break
+        if (count == 0) {
+            if (!channel.awaitContent()) break
+            continue
+        }
+        check(bytes + count <= MAX_RESPONSE_BYTES) { "Provider response exceeded $MAX_RESPONSE_BYTES bytes" }
+        body.write(buffer, 0, count)
+        for (index in 0 until count) {
+            bytes++
+            if (buffer[index] == '\n'.code.toByte()) {
+                onLine(line.toString(Charsets.UTF_8).removeSuffix("\r"), ++frames, bytes)
+                line.reset()
+            } else {
+                line.write(buffer[index].toInt())
+            }
         }
     }
+    if (line.size() > 0) onLine(line.toString(Charsets.UTF_8), ++frames, bytes)
+    return body.toString(Charsets.UTF_8)
 }
 
 @Serializable

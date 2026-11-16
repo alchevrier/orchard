@@ -106,7 +106,7 @@ import kotlinx.serialization.json.jsonPrimitive
 class CompanyCircuitTest {
     @Test
     fun `analysis wire citation contract decodes and validates pinned provenance before plan creation`() = runTest {
-        for (mode in listOf("valid", "missing-hash", "stale-hash", "placeholder", "read-only-source", "absent-source")) {
+        for (mode in listOf("valid", "scalar-reuse", "missing-hash", "stale-hash", "wrong-file-hash", "blank-question", "whitespace-question", "placeholder", "read-only-source", "absent-source", "trace-quota")) {
             val state = createTempDirectory("orchard-citation-$mode-")
             val projects = createTempDirectory("orchard-citation-projects-")
             val bindings = FileRepositoryBindingStore(state)
@@ -130,8 +130,12 @@ class CompanyCircuitTest {
                 )).status)
             val scenario = ScenarioStaffModel()
             val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
+            val requestBodies = mutableListOf<String>()
+            val responseBodies = mutableListOf<String>()
             val engine = io.ktor.client.engine.mock.MockEngine { request ->
-                val body = Json.parseToJsonElement((request.body as io.ktor.http.content.TextContent).text).jsonObject
+                val requestBody = (request.body as io.ktor.http.content.TextContent).text
+                requestBodies += requestBody
+                val body = Json.parseToJsonElement(requestBody).jsonObject
                 requests += body
                 val prompt = body.getValue("prompt").jsonPrimitive.content.substringAfter("<|start|>user<|message|>").substringBeforeLast("<|end|><|start|>assistant")
                 val schema = body.getValue("format").jsonObject
@@ -141,25 +145,35 @@ class CompanyCircuitTest {
                 val projection = Json.decodeFromJsonElement(com.orchard.backend.attention.CanonicalAttentionProjection.serializer(), envelope.getValue("attention"))
                 val frame = Json.decodeFromJsonElement(com.orchard.backend.attention.AnalysisAttentionFrame.serializer(), com.orchard.backend.attention.resolveCanonicalAttention(projection, supplied))
                 val properties = schema.getValue("properties").jsonObject
+                assertEquals("1", properties.getValue("unresolvedQuestions").jsonObject.getValue("items").jsonObject.getValue("minLength").jsonPrimitive.content)
                 val sourceChoices = properties.getValue("sourcePaths").jsonObject.getValue("items").jsonObject.getValue("enum").jsonArray.map { it.jsonPrimitive.content }.toSet()
                 assertEquals(frame.correlations.filter { it.disposition == com.orchard.backend.attention.ATTENTION_DISPOSITION_ANALYSIS_CANDIDATE }.flatMap { it.evidencePaths }.toSet(), sourceChoices)
-                val citationChoices = properties.getValue("evidence").jsonObject.getValue("items").jsonObject.getValue("properties").jsonObject.getValue("path").jsonObject.getValue("enum").jsonArray.map { it.jsonPrimitive.content }.toSet()
+                val citationSchemas = properties.getValue("evidence").jsonObject.getValue("items").jsonObject.getValue("oneOf").jsonArray.map { it.jsonObject }
+                val citationChoices = citationSchemas.map { it.getValue("properties").jsonObject.getValue("path").jsonObject.getValue("enum").jsonArray.single().jsonPrimitive.content }.toSet()
                 assertEquals(frame.correlations.flatMap { it.evidencePaths }.toSet(), citationChoices)
                 assertTrue("README.md" in citationChoices)
                 assertTrue("README.md" !in sourceChoices, Json.encodeToString(frame))
                 assertTrue(listOf("...", "src/Absent.kt").none { it in sourceChoices || it in citationChoices })
-                val required = schema.getValue("properties").jsonObject.getValue("evidence").jsonObject.getValue("items").jsonObject.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet()
-                assertEquals(setOf("path", "observation", "contentHash"), required)
+                assertEquals(citationChoices.size, citationSchemas.size)
+                citationSchemas.forEach { citationSchema ->
+                    val fields = citationSchema.getValue("properties").jsonObject
+                    val path = fields.getValue("path").jsonObject.getValue("enum").jsonArray.single().jsonPrimitive.content
+                    val hash = fields.getValue("contentHash").jsonObject.getValue("enum").jsonArray.single().jsonPrimitive.content
+                    assertEquals(supplied.files.single { it.path == path }.contentHash, hash)
+                    val required = citationSchema.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet()
+                    assertEquals(setOf("path", "observation", "contentHash"), required)
+                }
                 val generated = scenario.executeRepositoryAnalysis(prompt, 4_000, 28_000)
                 val candidate = Json.parseToJsonElement(generated.text).jsonObject
                 val citation = candidate.getValue("evidence").jsonArray.single().jsonObject
+                val readme = supplied.files.single { it.path == "README.md" }
                 val changed = when (mode) {
                     "missing-hash" -> citation - "contentHash"
                     "stale-hash" -> citation + ("contentHash" to kotlinx.serialization.json.JsonPrimitive("0".repeat(64)))
+                    "wrong-file-hash" -> citation + ("contentHash" to kotlinx.serialization.json.JsonPrimitive(readme.contentHash))
                     else -> citation
                 }
                 val citations = mutableListOf(kotlinx.serialization.json.JsonObject(changed))
-                val readme = supplied.files.single { it.path == "README.md" }
                 citations += Json.encodeToJsonElement(RepositoryEvidenceCitation.serializer(), RepositoryEvidenceCitation(readme.path,
                     observation = "The pinned README remains read-only verification evidence.", contentHash = readme.contentHash)).jsonObject
                 val paths = when (mode) {
@@ -170,9 +184,17 @@ class CompanyCircuitTest {
                 }
                 val output = kotlinx.serialization.json.JsonObject(candidate + mapOf(
                     "evidence" to kotlinx.serialization.json.JsonArray(citations),
+                    "reuse" to if (mode == "scalar-reuse") kotlinx.serialization.json.JsonPrimitive("Reuse the existing owner.") else candidate.getValue("reuse"),
                     "sourcePaths" to kotlinx.serialization.json.JsonArray(paths.map { kotlinx.serialization.json.JsonPrimitive(it) }),
+                    "unresolvedQuestions" to kotlinx.serialization.json.JsonArray(when (mode) {
+                        "blank-question" -> listOf(kotlinx.serialization.json.JsonPrimitive(""))
+                        "whitespace-question" -> listOf(kotlinx.serialization.json.JsonPrimitive(" \n "))
+                        else -> emptyList()
+                    }),
                 )).toString()
-                respond("""{"response":${Json.encodeToString(output)},"done":true}""", headers = io.ktor.http.headersOf(io.ktor.http.HttpHeaders.ContentType, "application/json"))
+                val responseBody = """{"response":${Json.encodeToString(output)},"done":true}"""
+                responseBodies += responseBody
+                respond(responseBody, headers = io.ktor.http.headersOf(io.ktor.http.HttpHeaders.ContentType, "application/json"))
             }
             val catalog = com.orchard.backend.vector.defaultLocalModelProviderCatalog()
             val provider = com.orchard.backend.vector.CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single().copy(model = "gpt-oss:120b"), engine = engine)
@@ -185,17 +207,58 @@ class CompanyCircuitTest {
                 val settings = TransientModelProfileSettingsStore()
                 val override = ModelProfileOverride(DefaultModelExecutionProfiles.broadRepositoryAnalysis.id, 24_000, 4_000)
                 settings.save(listOf(override))
-                val attempts = TransientRepositoryAnalysisAttemptStore()
+                val attempts = com.orchard.backend.analysis.FileRepositoryAnalysisAttemptStore(state)
                 val plans = TransientRepositoryExecutionPlanStore()
+                val traceDirectory = createTempDirectory("orchard-citation-trace-")
+                val traces = if (mode == "trace-quota") com.orchard.backend.vector.ModelBoundaryTraceStore(traceDirectory, maxTraceBytes = 1)
+                    else com.orchard.backend.vector.ModelBoundaryTraceStore(traceDirectory)
                 val analysis = RepositoryAnalysisService(workspace, listOf(provider), plans, gateway,
-                    companyControl = company, attemptStore = attempts, profileSettingsStore = settings)
+                    companyControl = company, attemptStore = attempts, profileSettingsStore = settings, modelBoundaryTraces = traces)
                 val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { analysis.tick(run.runId) }
+                if (mode == "trace-quota") {
+                    assertEquals(RepositoryAnalysisTickStatus.STORAGE_UNAVAILABLE, result.status, result.diagnostic)
+                    assertTrue(requests.isEmpty())
+                    assertTrue(plans.load().isEmpty())
+                    assertEquals(ANALYSIS_ATTEMPT_BLOCKED, attempts.load().last().state)
+                    assertTrue(attempts.load().last().diagnostic.contains("trace"))
+                    continue
+                }
                 assertEquals(1, requests.size)
+                val traceFile = Files.list(traceDirectory).use { it.toList().single() }
+                val events = Files.readAllLines(traceFile).map { Json.decodeFromString<com.orchard.backend.vector.ModelBoundaryTraceEvent>(it) }
+                assertEquals(listOf("ANALYSIS_REQUEST", "PROVIDER_REQUEST", "PROVIDER_RESPONSE", "MODEL_GENERATION", "NORMALIZED_CANDIDATE",
+                    "ANALYSIS_DECODE", "ANALYSIS_CANDIDATE_VALIDATION", "ANALYSIS_RESULT"), events.map { it.stage })
+                assertEquals(listOf(run.runId), events.map { it.runId }.distinct())
+                assertEquals(1, events.map { it.traceId }.distinct().size)
+                assertEquals((1..events.size).toList(), events.map { it.sequence })
+                assertTrue(events.none { it.truncated })
+                val capturedRequest = events.single { it.stage == "PROVIDER_REQUEST" }
+                assertEquals(requestBodies.single(), capturedRequest.payload)
+                assertEquals(events.single { it.stage == "ANALYSIS_REQUEST" }.payloadHash, capturedRequest.details["logicalPromptHash"])
+                assertEquals(responseBodies.single(), events.single { it.stage == "PROVIDER_RESPONSE" }.payload)
+                val rawOutput = Json.parseToJsonElement(responseBodies.single()).jsonObject.getValue("response").jsonPrimitive.content
+                assertEquals(rawOutput, events.single { it.stage == "MODEL_GENERATION" }.payload)
+                val normalized = events.single { it.stage == "NORMALIZED_CANDIDATE" }.payload
+                if (mode == "scalar-reuse") {
+                    assertEquals("Reuse the existing owner.", Json.parseToJsonElement(normalized).jsonObject.getValue("reuse").jsonArray.single().jsonPrimitive.content)
+                } else {
+                    assertEquals(rawOutput, normalized)
+                }
+                val decode = events.single { it.stage == "ANALYSIS_DECODE" }
+                assertEquals(if (mode == "missing-hash") "FAIL" else "PASS", decode.details["status"])
+                if (mode in setOf("blank-question", "whitespace-question")) {
+                    val question = Json.parseToJsonElement(decode.payload).jsonObject.getValue("unresolvedQuestions").jsonArray.single().jsonPrimitive.content
+                    assertTrue(question.isBlank())
+                    val rejection = events.single { it.stage == "ANALYSIS_CANDIDATE_VALIDATION" }
+                    assertEquals("FAIL", rejection.details["status"])
+                    assertTrue(rejection.details.getValue("diagnostic").contains("blank question"))
+                }
+                assertEquals(result.status.name, Json.parseToJsonElement(events.last().payload).jsonObject.getValue("status").jsonPrimitive.content)
                 assertEquals(listOf(override), settings.load())
                 assertEquals(revision, gateway.currentRevision(requireNotNull(run.context.repository.path)))
                 val observation = workspace.modelExecutions().single()
-                val valid = mode == "valid"
-                assertEquals(valid || mode == "stale-hash", observation.schemaValid)
+                val valid = mode in setOf("valid", "scalar-reuse")
+                assertEquals(valid || mode in setOf("stale-hash", "wrong-file-hash"), observation.schemaValid, result.diagnostic)
                 assertTrue(observation.outputHash != null)
                 assertEquals(if (valid) com.orchard.backend.attention.ContextQualityStatus.PASS else com.orchard.backend.attention.ContextQualityStatus.FAIL,
                     observation.qualityReport?.downstream)
@@ -222,13 +285,25 @@ class CompanyCircuitTest {
                     assertEquals(RepositoryAnalysisTickStatus.INVALID_ANALYSIS, result.status, result.diagnostic)
                     val diagnostic = when (mode) {
                         "missing-hash" -> "contentHash"
-                        "stale-hash" -> "wrong content hash"
+                        "stale-hash", "wrong-file-hash" -> "wrong content hash"
+                        "blank-question", "whitespace-question" -> "blank question"
                         else -> "candidate Attention evidence"
                     }
                     assertTrue(result.diagnostic.contains(diagnostic), result.diagnostic)
                     assertEquals(null, result.plan)
                     assertTrue(plans.load().isEmpty())
                     assertEquals(ANALYSIS_ATTEMPT_BLOCKED, attempts.load().last().state)
+                    if (mode in setOf("stale-hash", "wrong-file-hash")) {
+                        val blocked = attempts.load().last()
+                        val selection = assertNotNull(blocked.contextSelection)
+                        val source = selection.files.single { it.path == "build.gradle.kts" }
+                        val received = if (mode == "stale-hash") "0".repeat(64) else selection.files.single { it.path == "README.md" }.contentHash
+                        assertTrue(blocked.diagnostic.contains("expected ${source.contentHash}"), blocked.diagnostic)
+                        assertTrue(blocked.diagnostic.contains("received ${Json.encodeToString(received)}"), blocked.diagnostic)
+                        assertEquals(com.orchard.backend.attention.ContextQualityStatus.FAIL, selection.qualityReport?.downstream)
+                        assertEquals(null, blocked.rejectedPlan)
+                        assertEquals(blocked, com.orchard.backend.analysis.FileRepositoryAnalysisAttemptStore(state).load().last())
+                    }
                 }
             } finally {
                 provider.close()
