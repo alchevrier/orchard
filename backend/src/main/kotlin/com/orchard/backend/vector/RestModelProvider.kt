@@ -310,7 +310,7 @@ class CatalogModelProvider(
         val wirePrompt = formattedInput?.prompt ?: prompt
         val promptHash = providerPromptHash(wirePrompt)
         val promptTokens = accountModelInput(prompt, bindingProfile()).totalTokens
-        val think = ollamaThinkControl(structured)
+        val think = ollamaThinkControl(structured, contract)
         val options = OllamaCatalogOptions(
             temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
             seed = binding.configuration["seed"]?.toIntOrNull() ?: 42,
@@ -515,7 +515,10 @@ class CatalogModelProvider(
     private fun isJsonObject(value: String): Boolean = runCatching { json.parseToJsonElement(value) is JsonObject }
         .getOrDefault(false)
 
-    private fun ollamaThinkControl(structured: Boolean): JsonPrimitive = if (binding.model.substringBefore(':').equals("gpt-oss", ignoreCase = true) && !structured) {
+    private fun ollamaThinkControl(structured: Boolean, contract: ModelOutputContract): JsonPrimitive = if (
+        binding.model.substringBefore(':').equals("gpt-oss", ignoreCase = true) &&
+        (!structured || contract == ModelOutputContract.GENESIS_PROPOSAL)
+    ) {
         JsonPrimitive("low")
     } else {
         JsonPrimitive(false)

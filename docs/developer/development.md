@@ -110,6 +110,8 @@ To locate a failure, compare the response body with `MODEL_GENERATION`, then the
 
 A `CREATED` response proves only the implemented schema, phase and citation checks, not that the proposal adequately describes the product. Review source coverage and the observations themselves before admission. Unexpected protocol text in an observation that is absent from the supplied source is not supporting evidence, even when its path/hash pair is valid. Do not silently strip such text or admit the proposal to make onboarding advance. Persisting a repository assessment does not accept classification or start delivery.
 
+Genesis context reserves up to half of its existing 4 KiB source aperture for the opening of a tracked root README, then spends the remaining bytes and file slots on implementation evidence. The README comes first so prompt fitting does not discard product purpose ahead of code details. GPT-OSS onboarding uses native `think: "low"` in structured mode, as its plain fallback already does; other stages retain their existing policy and output budgets are unchanged. Claim observations containing Harmony protocol tokens absent from their cited excerpt are rejected before storing an assessment. Actual protocol source can still be cited.
+
 Run the desktop only after the backend is ready:
 
 ```bash

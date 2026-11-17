@@ -32,6 +32,30 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ModelProviderCatalogTest {
     @Test
+    fun `GPT OSS onboarding enables low reasoning without leaking thinking into output or changing analysis policy`() = runTest {
+        val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
+        val engine = MockEngine { request ->
+            requests += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+            respond("""{"response":"{}","thinking":"private reasoning","done":true,"prompt_eval_count":10,"eval_count":20}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(
+            catalog.endpoints.single(), catalog.bindings.single().copy(model = "gpt-oss:120b"), engine = engine,
+        )
+        try {
+            val result = provider.executeGenesisProposal("Classify existing work.", 128, 4_096,
+                GenesisProposalOutputDomain("CLASSIFICATION", assessmentOnly = false, evidenceHashes = emptyMap()))
+            assertEquals("low", requests.single().getValue("think").jsonPrimitive.content)
+            assertEquals("{}", result.text)
+            provider.executeRepositoryAnalysis("Analyze admitted work.", 128, 4_096)
+            assertEquals("false", requests.last().getValue("think").jsonPrimitive.content)
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test
     fun `genesis native schema follows each invocation phase and evidence aperture`() = runTest {
         val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
         val engine = MockEngine { request ->

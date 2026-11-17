@@ -576,6 +576,33 @@ class ProjectGenesisTest {
     }
 
     @Test
+    fun repositoryEvidenceRejectsInventedProtocolTextButAllowsCitingActualProtocolSource() = kotlinx.coroutines.test.runTest {
+        val protocol = "<|start|>assistant<|channel|>analysis<|message|>"
+        for (containsProtocol in listOf(false, true)) {
+            val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+            createHierarchy(workspace)
+            val classified = advance(workspace, ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL, productIntent = "A guided local product.", baseRevision = 0,
+            ), GENESIS_EXPERIENCE)
+            advance(workspace, experienceSubmission(classified), GENESIS_ARCHITECTURE)
+            val contextProvider = FakeGenesisRepositoryContextProvider(source = if (containsProtocol) {
+                """class GenesisIntelligenceService { val header = "$protocol" }"""
+            } else "class GenesisIntelligenceService")
+            val output = validArchitectureOutput(contextProvider.contentHash)
+                .replace("The supplied file defines GenesisIntelligenceService.", "The source contains $protocol")
+            val service = GenesisIntelligenceService(workspace, FakeGenesisModel(output), repositoryContextProvider = contextProvider)
+
+            val result = service.propose(1, GenesisProposalRequest("Use the existing Architect implementation."))
+
+            assertEquals(if (containsProtocol) GenesisProposalStatus.CREATED else GenesisProposalStatus.INVALID_OUTPUT, result.status)
+            if (!containsProtocol) {
+                assertTrue(result.diagnostic.contains("model-protocol text"))
+                assertEquals(null, service.latestRepositoryAssessment(1))
+            }
+        }
+    }
+
+    @Test
     fun repositoryClaimWithForgedEvidenceIsRejected() = kotlinx.coroutines.test.runTest {
         val workspace = WorkspaceStore(repositoryBindings = boundRepository())
         createHierarchy(workspace)
@@ -1010,17 +1037,18 @@ class ProjectGenesisTest {
     private class FakeGenesisRepositoryContextProvider(
         private val current: Boolean = true,
         private val reportedRevision: String = "c".repeat(40),
+        source: String = "class GenesisIntelligenceService",
     ) : GenesisRepositoryContextProvider {
         val contentHash = CodingContextFile(
             "backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
-            "class GenesisIntelligenceService",
+            source,
         ).contentHash
         val observation = GenesisRepositoryObservation(
             revision = "c".repeat(40),
             context = CodingRepositoryContext(
                 files = listOf(CodingContextFile(
                     "backend/src/main/kotlin/com/orchard/backend/agent/GenesisIntelligenceService.kt",
-                    "class GenesisIntelligenceService",
+                    source,
                     contentHash,
                 )),
                 omittedFileCount = 12,

@@ -499,6 +499,13 @@ class GenesisIntelligenceService(
             }) {
             return "The Architect cited claim evidence that was not present in the pinned repository context."
         }
+        if (claims.flatMap { it.support + it.defeaters }.any { citation ->
+                MODEL_PROTOCOL_TOKEN.findAll(citation.observation).any { token ->
+                    token.value !in files.getValue(citation.path).content
+                }
+            }) {
+            return "The Architect generated model-protocol text absent from the cited source. The repository assessment was not stored."
+        }
         return null
     }
 
@@ -746,6 +753,7 @@ class GenesisIntelligenceService(
         const val MAX_LIST_ENTRIES = 16
         const val MAX_SCHEMA_DIAGNOSTIC_CHARS = 2_048
         val JSON_CODE_FENCE = Regex("""\s*```(?:json)?\s*(\{.*})\s*```\s*""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+        val MODEL_PROTOCOL_TOKEN = Regex("""<\|(?:start|end|channel|message)\|>""")
         val PROPOSAL_FIELDS = setOf("submission", "observations", "unresolvedQuestions", "repositoryClaims")
         val SUBMISSION_FIELDS = setOf(
             "classification",

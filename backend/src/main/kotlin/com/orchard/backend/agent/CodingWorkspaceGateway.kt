@@ -154,15 +154,30 @@ class LocalCodingWorkspaceGateway(
         selectors = selectors,
     )
 
-    override fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext =
-        collectContext(
+    override fun collectGenesisContext(workspacePath: String, query: String): CodingRepositoryContext {
+        val isOverview: (String) -> Boolean = {
+            it.lowercase() in setOf("readme", "readme.md", "readme.markdown", "readme.rst", "readme.txt")
+        }
+        val overview = collectContext(
+            workspacePath, "", 1, MAX_GENESIS_CONTEXT_BYTES / 2, MAX_GENESIS_CONTEXT_BYTES / 2,
+            includePath = isOverview,
+        )
+        val overviewBytes = overview.files.sumOf { file ->
+            file.content.encodeToByteArray().size + file.matchedDeclarations.sumOf { it.encodeToByteArray().size }
+        }
+        val implementation = collectContext(
             workspacePath,
             query,
-            MAX_GENESIS_CONTEXT_FILES,
-            MAX_GENESIS_CONTEXT_BYTES,
-            MAX_GENESIS_CONTEXT_BYTES,
-            includePath = ::isGenesisImplementationPath,
+            MAX_GENESIS_CONTEXT_FILES - overview.files.size,
+            MAX_GENESIS_CONTEXT_BYTES - overviewBytes,
+            MAX_GENESIS_CONTEXT_BYTES - overviewBytes,
+            includePath = { !isOverview(it) && isGenesisImplementationPath(it) },
         )
+        return CodingRepositoryContext(
+            overview.files + implementation.files,
+            overview.omittedFileCount + implementation.omittedFileCount,
+        )
+    }
 
     override fun collectPlanContext(
         workspacePath: String,

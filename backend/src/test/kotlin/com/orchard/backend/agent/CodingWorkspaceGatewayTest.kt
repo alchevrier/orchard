@@ -242,6 +242,29 @@ class CodingWorkspaceGatewayTest {
     }
 
     @Test
+    fun `genesis context reserves product overview before ranked implementation`() {
+        val repository = createTempDirectory("orchard-genesis-overview-")
+        git(repository, "init")
+        val overview = "Product purpose: turn intent into governed software delivery.\n" +
+            "Historical release details.\n".repeat(500)
+        Files.writeString(repository.resolve("README.md"), overview)
+        repeat(18) { index ->
+            Files.writeString(repository.resolve("ConversationCommand$index.kt"), "class ConversationCommand$index\n")
+        }
+        git(repository, "add", ".")
+
+        val context = LocalCodingWorkspaceGateway().collectGenesisContext(repository.toString(), "conversation command")
+
+        assertEquals("README.md", context.files.first().path)
+        assertTrue(context.files.first().content.contains("turn intent into governed software delivery"))
+        assertEquals(CodingContextFile("README.md", overview).contentHash, context.files.first().contentHash)
+        assertTrue(context.files.any { it.path.endsWith(".kt") })
+        assertTrue(context.files.size <= 6)
+        assertTrue(context.files.sumOf { it.content.encodeToByteArray().size } <= 4 * 1024)
+        assertEquals(19 - context.files.size, context.omittedFileCount)
+    }
+
+    @Test
     fun `genesis context stays within proposal aperture`() {
         val repository = createTempDirectory("orchard-genesis-context-")
         git(repository, "init")
