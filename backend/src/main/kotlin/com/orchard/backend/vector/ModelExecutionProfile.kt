@@ -31,8 +31,15 @@ data class RepositoryAnalysisOutputDomain(
     }
 }
 
+data class GenesisProposalOutputDomain(
+    val phase: String,
+    val assessmentOnly: Boolean,
+    val evidenceHashes: Map<String, String>,
+)
+
 enum class ModelOutputContract {
     JSON_OBJECT,
+    GENESIS_PROPOSAL,
     REPOSITORY_ANALYSIS_CANDIDATE,
     BOUNDED_CODING_TOOL_BATCH,
     BOUNDED_LITERAL_REPLACEMENTS;
@@ -40,6 +47,7 @@ enum class ModelOutputContract {
     val versionedId: String
         get() = when (this) {
             JSON_OBJECT -> "json-object-v1"
+            GENESIS_PROPOSAL -> "genesis-proposal-v2"
             REPOSITORY_ANALYSIS_CANDIDATE -> "repository-analysis-candidate-v4"
             BOUNDED_CODING_TOOL_BATCH -> "bounded-coding-tool-batch-v1"
             BOUNDED_LITERAL_REPLACEMENTS -> "bounded-literal-replacements-v1"
@@ -49,7 +57,7 @@ enum class ModelOutputContract {
         get() = when (this) {
             REPOSITORY_ANALYSIS_CANDIDATE -> mapOf("evidence" to 3, "reuse" to 2, "preservedInvariants" to 2, "nonGoals" to 2, "sourcePaths" to 12)
             BOUNDED_CODING_TOOL_BATCH, BOUNDED_LITERAL_REPLACEMENTS -> mapOf("operations" to 12)
-            JSON_OBJECT -> emptyMap()
+            JSON_OBJECT, GENESIS_PROPOSAL -> emptyMap()
         }
 
     val instruction: String
@@ -58,6 +66,7 @@ enum class ModelOutputContract {
     fun instructionFor(outputDomain: RepositoryAnalysisOutputDomain?): String =
         "Output contract $versionedId. Maximum array lengths: ${arrayLimits.entries.joinToString { "${it.key}=${it.value}" }}. " +
             when (this) {
+                GENESIS_PROPOSAL -> "Return one JSON object matching requiredSubmissionShape and requiredOutputExample in the authoritative envelope. Every repository evidence item requires path, contentHash and observation. Copy source hashes from supplied evidence; phase and authority checks still apply."
                 REPOSITORY_ANALYSIS_CANDIDATE -> "Return JSON matching ${schemaFor(outputDomain)}. Each evidence contentHash must be copied from that path's pinned repository source hash, not its excerpt hash. Admitted ownership and action limits still apply."
                 BOUNDED_LITERAL_REPLACEMENTS -> "Every operation must use REPLACE_LITERAL. Admitted ownership and action limits still apply."
                 else -> "Admitted ownership and action limits still apply."
@@ -67,6 +76,9 @@ enum class ModelOutputContract {
         get() = schemaFor(null)
 
     internal fun schemaFor(outputDomain: RepositoryAnalysisOutputDomain?): JsonObject? {
+        if (this == GENESIS_PROPOSAL) return serializedOutputSchema(
+            com.orchard.backend.agent.GenesisProposalOutput.serializer().descriptor,
+        )
         if (this != REPOSITORY_ANALYSIS_CANDIDATE) return null
         val schema = serializedOutputSchema(com.orchard.backend.analysis.RepositoryAnalysisCandidate.serializer().descriptor, arrayLimits)
         val properties = schema.getValue("properties").jsonObject.toMutableMap()
@@ -80,17 +92,55 @@ enum class ModelOutputContract {
             JsonObject(sources + ("items" to JsonObject(sources.getValue("items").jsonObject + ("enum" to JsonArray(outputDomain.sourcePaths.sorted().map(::JsonPrimitive))))))
         }
         val evidence = properties.getValue("evidence").jsonObject
-        properties["evidence"] = if (outputDomain.evidencePaths.isEmpty()) JsonObject(evidence + ("maxItems" to JsonPrimitive(0))) else {
-            val citation = evidence.getValue("items").jsonObject
-            val fields = citation.getValue("properties").jsonObject
-            val choices = outputDomain.evidenceHashes.toSortedMap().map { (path, hash) ->
-                JsonObject(citation + ("properties" to JsonObject(fields + mapOf(
-                    "path" to JsonObject(fields.getValue("path").jsonObject + ("enum" to JsonArray(listOf(JsonPrimitive(path))))),
-                    "contentHash" to JsonObject(fields.getValue("contentHash").jsonObject + ("enum" to JsonArray(listOf(JsonPrimitive(hash))))),
-                ))))
-            }
-            JsonObject(evidence + ("items" to JsonObject(mapOf("oneOf" to JsonArray(choices)))))
+        properties["evidence"] = pinnedEvidenceArraySchema(evidence, outputDomain.evidenceHashes)
+        return JsonObject(schema + ("properties" to JsonObject(properties)))
+    }
+
+    internal fun genesisSchemaFor(domain: GenesisProposalOutputDomain): JsonObject {
+        require(this == GENESIS_PROPOSAL)
+        val schema = requireNotNull(structuredSchema)
+        val properties = schema.getValue("properties").jsonObject.toMutableMap()
+        val submission = properties.getValue("submission").jsonObject
+        val requiredFields = when {
+            domain.assessmentOnly -> emptySet()
+            domain.phase == "CLASSIFICATION" -> setOf("classification", "productIntent")
+            domain.phase == "EXPERIENCE" -> setOf("experience")
+            domain.phase == "ARCHITECTURE" -> setOf("components", "decisions", "firstEpicId")
+            domain.phase == "BLUEPRINT" -> setOf("blueprint")
+            else -> error("Unsupported Genesis proposal phase: ${domain.phase}")
         }
+        val submissionProperties = submission.getValue("properties").jsonObject.mapValues { (field, value) ->
+            val property = value.jsonObject
+            when {
+                field in requiredFields -> JsonObject(property + ("type" to requireNotNull(
+                    (property.getValue("type") as? JsonArray)?.singleOrNull { it.jsonPrimitive.content != "null" },
+                )))
+                field in setOf("baseRevision", "baseHash") ||
+                    (!domain.assessmentOnly && domain.phase == "EXPERIENCE" && field == "productIntent") -> property
+                else -> buildJsonObject { put("type", "null") }
+            }
+        }.toMutableMap()
+        if (!domain.assessmentOnly && domain.phase == "CLASSIFICATION") {
+            val classification = submissionProperties.getValue("classification").jsonObject
+            submissionProperties["classification"] = JsonObject(classification + ("enum" to JsonArray(
+                listOf("GREENFIELD_LOCAL", "EXISTING_LOCAL", "ORGANIZATION_GOVERNED").map(::JsonPrimitive),
+            )))
+            val intent = submissionProperties.getValue("productIntent").jsonObject
+            submissionProperties["productIntent"] = JsonObject(intent + ("minLength" to JsonPrimitive(1)))
+        }
+        properties["submission"] = JsonObject(submission + mapOf(
+            "properties" to JsonObject(submissionProperties),
+            "required" to JsonArray((listOf("baseRevision") + requiredFields).map(::JsonPrimitive)),
+        ))
+        val claims = properties.getValue("repositoryClaims").jsonObject
+        val claim = claims.getValue("items").jsonObject
+        val claimProperties = claim.getValue("properties").jsonObject.toMutableMap()
+        for (field in listOf("support", "defeaters")) {
+            claimProperties[field] = pinnedEvidenceArraySchema(claimProperties.getValue(field).jsonObject, domain.evidenceHashes)
+        }
+        properties["repositoryClaims"] = JsonObject(claims + ("items" to JsonObject(
+            claim + ("properties" to JsonObject(claimProperties)),
+        )))
         return JsonObject(schema + ("properties" to JsonObject(properties)))
     }
 
@@ -109,10 +159,24 @@ enum class ModelOutputContract {
     }
 }
 
+private fun pinnedEvidenceArraySchema(schema: JsonObject, evidenceHashes: Map<String, String>): JsonObject {
+    if (evidenceHashes.isEmpty()) return JsonObject(schema + ("maxItems" to JsonPrimitive(0)))
+    val citation = schema.getValue("items").jsonObject
+    val fields = citation.getValue("properties").jsonObject
+    val choices = evidenceHashes.toSortedMap().map { (path, hash) ->
+        JsonObject(citation + ("properties" to JsonObject(fields + mapOf(
+            "path" to JsonObject(fields.getValue("path").jsonObject + ("enum" to JsonArray(listOf(JsonPrimitive(path))))),
+            "contentHash" to JsonObject(fields.getValue("contentHash").jsonObject + ("enum" to JsonArray(listOf(JsonPrimitive(hash))))),
+        ))))
+    }
+    return JsonObject(schema + ("items" to JsonObject(mapOf("oneOf" to JsonArray(choices)))))
+}
+
 @OptIn(ExperimentalSerializationApi::class)
 private fun serializedOutputSchema(descriptor: SerialDescriptor, arrayLimits: Map<String, Int> = emptyMap()): JsonObject = buildJsonObject {
     val type = when (descriptor.kind) {
         PrimitiveKind.STRING -> "string"
+        PrimitiveKind.INT -> "integer"
         StructureKind.CLASS -> "object"
         StructureKind.LIST -> "array"
         else -> error("Unsupported output contract descriptor: ${descriptor.serialName}")

@@ -26,7 +26,7 @@ class ModelBoundaryTraceStoreTest {
         assertTrue(event.truncated)
         assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(path))
         assertEquals(PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(directory))
-        val error = assertFailsWith<ModelBoundaryTraceException> { store.newTrace(34).record("MODEL_GENERATION", "next") }
+        val error = assertFailsWith<ModelBoundaryTraceException> { store.newGenesisTrace(44).record("MODEL_GENERATION", "next") }
         assertTrue(error.message.orEmpty().contains("file quota"))
         assertEquals(1L, Files.list(directory).use { it.count() })
     }

@@ -32,6 +32,53 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ModelProviderCatalogTest {
     @Test
+    fun `genesis native schema follows each invocation phase and evidence aperture`() = runTest {
+        val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
+        val engine = MockEngine { request ->
+            requests += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+            respond("""{"response":"{}","done":true,"prompt_eval_count":10,"eval_count":2}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+        val phases = listOf(
+            "CLASSIFICATION" to setOf("classification", "productIntent"),
+            "EXPERIENCE" to setOf("experience"),
+            "ARCHITECTURE" to setOf("components", "decisions", "firstEpicId"),
+            "BLUEPRINT" to setOf("blueprint"),
+            "READY" to emptySet(),
+        )
+        try {
+            for ((index, phaseAndFields) in phases.withIndex()) {
+                val (phase, fields) = phaseAndFields
+                provider.executeGenesisProposal("Return the current phase only.", 128, 4_096,
+                    GenesisProposalOutputDomain(
+                        phase, assessmentOnly = phase == "READY",
+                        evidenceHashes = if (index == 0) mapOf("README.md" to "a".repeat(64)) else emptyMap(),
+                    ))
+                val schema = requests.last().getValue("format").jsonObject
+                val submission = schema.getValue("properties").jsonObject.getValue("submission").jsonObject
+                assertEquals(fields + "baseRevision",
+                    submission.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet())
+                for ((field, value) in submission.getValue("properties").jsonObject) {
+                    if (field !in fields + setOf("baseRevision", "baseHash") && !(phase == "EXPERIENCE" && field == "productIntent")) {
+                        assertEquals("null", value.jsonObject.getValue("type").jsonPrimitive.content)
+                    }
+                }
+                val evidenceProperties = schema.getValue("properties").jsonObject.getValue("repositoryClaims").jsonObject
+                    .getValue("items").jsonObject.getValue("properties").jsonObject
+                for (field in listOf("support", "defeaters")) {
+                    val arraySchema = evidenceProperties.getValue(field).jsonObject
+                    if (index == 0) assertEquals(1, arraySchema.getValue("items").jsonObject.getValue("oneOf").jsonArray.size)
+                    else assertEquals("0", arraySchema.getValue("maxItems").jsonPrimitive.content)
+                }
+            }
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test
     fun `default GPT OSS catalog formats identical raw wire input across structured fallback`() = runTest {
         val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
         val responses = mutableListOf<String>()

@@ -12,6 +12,11 @@ import com.orchard.backend.resource.ModelWorkPriority
 import com.orchard.backend.resource.ResourceAdmissionDecision
 import com.orchard.backend.vector.DefaultModelExecutionProfiles
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.ModelBoundaryTrace
+import com.orchard.backend.vector.ModelBoundaryTraceException
+import com.orchard.backend.vector.ModelBoundaryTraceStore
+import com.orchard.backend.vector.ModelOutputContract
+import com.orchard.backend.vector.GenesisProposalOutputDomain
 import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.workspace.GENESIS_ADMISSION
 import com.orchard.backend.workspace.GENESIS_ARCHITECTURE
@@ -27,6 +32,8 @@ import com.orchard.backend.workspace.ProjectGenesisView
 import com.orchard.backend.workspace.RepositoryBlueprint
 import com.orchard.backend.workspace.WorkspaceStore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -135,6 +142,7 @@ class GenesisIntelligenceService(
     private val assessmentStore: RepositoryObjectiveAssessmentStore = TransientRepositoryObjectiveAssessmentStore(),
     private val json: Json = Json { encodeDefaults = true },
     private val systemPrompt: String = loadPrompt(),
+    private val modelBoundaryTraces: ModelBoundaryTraceStore? = null,
 ) {
     private val mutex = Mutex()
     private val strictJson = Json { encodeDefaults = true }
@@ -155,7 +163,7 @@ class GenesisIntelligenceService(
     suspend fun propose(projectId: Int, request: GenesisProposalRequest): GenesisProposalResult {
         if (!mutex.tryLock()) return GenesisProposalResult(GenesisProposalStatus.BUSY)
         return try {
-            generate(projectId, request, assessmentOnly = false)
+            generateWithTrace(projectId, request, assessmentOnly = false)
         } finally {
             mutex.unlock()
         }
@@ -164,9 +172,37 @@ class GenesisIntelligenceService(
     suspend fun assessRepository(projectId: Int, request: GenesisProposalRequest): GenesisProposalResult {
         if (!mutex.tryLock()) return GenesisProposalResult(GenesisProposalStatus.BUSY)
         return try {
-            generate(projectId, request, assessmentOnly = true)
+            generateWithTrace(projectId, request, assessmentOnly = true)
         } finally {
             mutex.unlock()
+        }
+    }
+
+    private suspend fun generateWithTrace(
+        projectId: Int,
+        request: GenesisProposalRequest,
+        assessmentOnly: Boolean,
+    ): GenesisProposalResult {
+        val trace = modelBoundaryTraces?.newGenesisTrace(projectId)
+            ?: return generate(projectId, request, assessmentOnly)
+        var completed: GenesisProposalResult? = null
+        return try {
+            withContext(trace) {
+                generate(projectId, request, assessmentOnly).also { result ->
+                    completed = result
+                    trace.record("GENESIS_RESULT", json.encodeToString(mapOf(
+                        "status" to result.status.name,
+                        "diagnostic" to result.diagnostic,
+                        "assessmentId" to result.proposal?.repositoryAssessment?.assessmentId?.toString().orEmpty(),
+                    )))
+                }
+            }
+        } catch (error: ModelBoundaryTraceException) {
+            val stored = completed?.proposal?.repositoryAssessment?.assessmentId
+            GenesisProposalResult(
+                GenesisProposalStatus.STORAGE_UNAVAILABLE,
+                diagnostic = "${error.message}" + if (stored != null) " Assessment $stored was already recorded; no genesis authority was admitted." else "",
+            )
         }
     }
 
@@ -236,6 +272,14 @@ class GenesisIntelligenceService(
         }
         val prompt = promptContext.prompt
         val suppliedRepositoryContext = promptContext.repositoryContext
+        val trace = currentCoroutineContext()[ModelBoundaryTrace]
+        trace?.record("GENESIS_REQUEST", prompt, mapOf(
+            "phase" to genesis.phase,
+            "genesisRevision" to (genesis.revision?.revision ?: 0).toString(),
+            "repositoryRevision" to repositoryObservation?.revision.orEmpty(),
+            "assessmentOnly" to assessmentOnly.toString(),
+            "contract" to ModelOutputContract.GENESIS_PROPOSAL.versionedId,
+        ))
         val admission = resourceController.acquire(modelProvider.resourceDemand(profile), ModelWorkPriority.INTERACTIVE)
         val lease = admission.lease ?: return GenesisProposalResult(
             if (admission.evidence.decision == ResourceAdmissionDecision.TELEMETRY_UNAVAILABLE) {
@@ -246,22 +290,35 @@ class GenesisIntelligenceService(
         )
         val generation = try {
             lease.use {
-                modelProvider.executeWorkDefinition(
+                modelProvider.executeGenesisProposal(
                     prompt,
                     profile.outputBudgetTokens,
                     profile.inputBudgetTokens + profile.outputBudgetTokens,
+                    GenesisProposalOutputDomain(
+                        phase = genesis.phase,
+                        assessmentOnly = assessmentOnly,
+                        evidenceHashes = suppliedRepositoryContext?.files.orEmpty().associate { it.path to it.contentHash },
+                    ),
                 )
             }
         } catch (exception: CancellationException) {
             throw exception
+        } catch (exception: ModelBoundaryTraceException) {
+            throw exception
         } catch (_: Exception) {
             return GenesisProposalResult(GenesisProposalStatus.MODEL_UNAVAILABLE)
         }
+        trace?.record("MODEL_GENERATION", generation.text, mapOf(
+            "promptTokens" to generation.promptTokens.toString(),
+            "completionTokens" to generation.completionTokens.toString(),
+        ))
         if (
             generation.promptTokens > profile.inputBudgetTokens ||
             generation.completionTokens > profile.outputBudgetTokens
         ) return GenesisProposalResult(GenesisProposalStatus.INVALID_OUTPUT)
-        val decoded = decodeProposalOutput(generation.text)
+        val decoded = decodeProposalOutput(generation.text, trace)
+        trace?.record("GENESIS_DECODE", decoded.output?.let { json.encodeToString(it) } ?: decoded.diagnostic,
+            mapOf("status" to if (decoded.output == null) "FAIL" else "PASS"))
         val output = decoded.output
             ?: return GenesisProposalResult(
                 GenesisProposalStatus.INVALID_OUTPUT,
@@ -274,7 +331,7 @@ class GenesisIntelligenceService(
         if (!assessmentOnly && !matchesPhase(genesis.phase, pinned)) {
             return GenesisProposalResult(
                 GenesisProposalStatus.INVALID_OUTPUT,
-                diagnostic = "The Architect returned fields outside the ${genesis.phase.lowercase()} phase. Revise the description and retry.",
+                diagnostic = "The Architect returned a submission missing required fields or containing fields outside the ${genesis.phase.lowercase()} phase. Revise the description and retry.",
             )
         }
         val evidencePaths = suppliedRepositoryContext?.files.orEmpty().map { it.path }
@@ -301,6 +358,7 @@ class GenesisIntelligenceService(
             ) != true) {
             return GenesisProposalResult(GenesisProposalStatus.REPOSITORY_CHANGED)
         }
+        trace?.record("GENESIS_VALIDATION", json.encodeToString(output), mapOf("status" to "PASS"))
             val assessment = repositoryObservation?.let { observation ->
                 runCatching {
                     assessmentStore.appendNext { assessmentId ->
@@ -388,7 +446,7 @@ class GenesisIntelligenceService(
                     )
                 },
             )
-            val prompt = "$systemPrompt\n\nAuthoritative genesis envelope:\n${json.encodeToString(envelope)}"
+            val prompt = "$systemPrompt\n${ModelOutputContract.GENESIS_PROPOSAL.instruction}\n\nAuthoritative genesis envelope:\n${json.encodeToString(envelope)}"
             if (estimateModelTokens(prompt) <= inputBudgetTokens) {
                 return FittedGenesisPrompt(prompt, repositoryContext)
             }
@@ -444,13 +502,15 @@ class GenesisIntelligenceService(
         return null
     }
 
-    private fun decodeProposalOutput(text: String): ProposalDecodeResult {
+    private fun decodeProposalOutput(text: String, trace: ModelBoundaryTrace?): ProposalDecodeResult {
         val candidate = JSON_CODE_FENCE.matchEntire(text)?.groupValues?.get(1) ?: text
+        trace?.record("GENESIS_NORMALIZED_CANDIDATE", candidate)
         val element = runCatching { strictJson.parseToJsonElement(candidate) }.getOrNull()
             ?: return ProposalDecodeResult(
                 diagnostic = "The Architect returned malformed JSON. Revise the description and retry.",
             )
         val canonical = canonicalizeProposalRoot(element)
+        trace?.record("GENESIS_CANONICAL_CANDIDATE", canonical.toString())
         val output = runCatching {
             strictJson.decodeFromJsonElement(GenesisProposalOutput.serializer(), canonical)
         }.getOrNull()
@@ -761,7 +821,7 @@ private data class PriorRepositoryAssessment(
 private data class GenesisEpicOption(val epicId: Int, val title: String)
 
 @Serializable
-private data class GenesisProposalOutput(
+internal data class GenesisProposalOutput(
     val submission: ProjectGenesisSubmission,
     val observations: List<String> = emptyList(),
     val unresolvedQuestions: List<String> = emptyList(),

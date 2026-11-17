@@ -86,9 +86,9 @@ ORCHARD_OPERATION_MODE=PILOTED ./gradlew :backend:jvmRun --no-daemon
 
 `ORCHARD_OPERATION_MODE` accepts `AUTONOMOUS` (the default) or `PILOTED`. Piloted mode preserves read-only projections and explicit API actions while suppressing background model-backed analysis, coding, review, audit, campaign, and pending-command execution. Direct `jvmRun` does not start a model provider.
 
-### Local Analysis Boundary Traces
+### Local Model Boundary Traces
 
-Provider audit events normally retain hashes, counts and phases, not request/response payloads. To diagnose a new repository-analysis attempt, opt in before starting the backend:
+Provider audit events normally retain hashes, counts and phases, not request/response payloads. To diagnose a new repository-analysis or onboarding attempt, opt in before starting the backend:
 
 ```bash
 ORCHARD_OPERATION_MODE=PILOTED \
@@ -100,11 +100,15 @@ The trace directory must be an absolute, dedicated private directory on a POSIX 
 
 Each `analysis-<runId>-<UUID>.jsonl` file correlates the final `ANALYSIS_REQUEST`, prepared `PROVIDER_REQUEST`, UTF-8 `PROVIDER_RESPONSE` body, reconciled `MODEL_GENERATION`, `NORMALIZED_CANDIDATE`, `ANALYSIS_DECODE`, candidate validation and final `ANALYSIS_RESULT`. Provider request/response pairs have their own request IDs so structured/plain fallback remains distinguishable. Requests contain the actual serialized body, including the rendered prompt and schema, but not HTTP headers or resolved credentials. Ollama response capture preserves UTF-8 body text, including line endings, before stream reconciliation; this is not a network packet capture.
 
+Onboarding uses `genesis-<projectId>-<UUID>.jsonl`, with `projectId` and a null `runId` rather than inventing a delivery run. `GENESIS_REQUEST` records phase, genesis revision, repository revision and the final logical prompt. Provider boundaries and `MODEL_GENERATION` precede `GENESIS_NORMALIZED_CANDIDATE`, `GENESIS_CANONICAL_CANDIDATE`, `GENESIS_DECODE`, successful `GENESIS_VALIDATION`, and `GENESIS_RESULT`. A failed decode records its diagnostic without filling missing citation fields. Proposal generation does not admit genesis authority. Onboarding's `genesis-proposal-v2` contract supplies a serializer-derived native Ollama schema specialized to required fields for the current phase (or assessment-only mode), and exact supplied path/hash pairs for support and defeaters. Other phases' submission fields can only be null or omitted. The prompt retains its phase-specific typed output example and explicit evidence requirements for unstructured fallback, without duplicating the full schema in the input budget. Independent phase, claim and pinned-source checks remain mandatory.
+
 Payloads may contain source code and provider-generated text. They remain local, are not exposed through HTTP projections, and must not be uploaded or committed. Directories use owner-only permissions and files use `0600`. Each event retains at most 256 KiB of a UTF-8-safe prefix, with explicit truncation, original byte count and full-payload hash. Limits are 4 MiB per trace and 32 trace files; archive or remove specific old diagnostic files before exceeding those limits. No automatic deletion is performed.
 
-Opted-in capture errors are logged and surfaced as `STORAGE_UNAVAILABLE`, not hidden as successful capture. A pre-dispatch capture failure prevents inference; a later failure cannot undo an already recorded plan. Missing terminal events identify interrupted or incomplete traces. Historical records containing only hashes cannot reconstruct an exact old prompt or response.
+Opted-in capture errors are logged and surfaced as `STORAGE_UNAVAILABLE`, not hidden as successful capture. A pre-dispatch capture failure prevents inference; a later failure cannot undo an already recorded plan or repository assessment. An onboarding terminal-capture failure identifies any assessment already stored, without admitting genesis. Missing terminal events identify interrupted or incomplete traces. Historical records containing only hashes cannot reconstruct an exact old prompt or response. The file-count limit is shared across analysis and onboarding traces.
 
 To locate a failure, compare the response body with `MODEL_GENERATION`, then the normalized/decoded candidate, then the candidate check and final result. An invalid question present in raw provider output is a generation-side finding; a change introduced during reconciliation or decoding is an adapter/parser finding. Neither finding alone establishes a model-capability limit.
+
+A `CREATED` response proves only the implemented schema, phase and citation checks, not that the proposal adequately describes the product. Review source coverage and the observations themselves before admission. Unexpected protocol text in an observation that is absent from the supplied source is not supporting evidence, even when its path/hash pair is valid. Do not silently strip such text or admit the proposal to make onboarding advance. Persisting a repository assessment does not accept classification or start delivery.
 
 Run the desktop only after the backend is ready:
 

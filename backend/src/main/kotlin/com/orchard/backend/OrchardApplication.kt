@@ -250,6 +250,7 @@ fun main() {
         resourceController,
         CodingGenesisRepositoryContextProvider(codingWorkspaceGateway),
         repositoryObjectiveAssessmentStore,
+        modelBoundaryTraces = modelBoundaryTraces,
     )
     val repositoryBaselineAnalysis = RepositoryBaselineAnalysisService(
         workspace,

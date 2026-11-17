@@ -45,6 +45,12 @@ import com.orchard.backend.agent.GenesisRepositoryObservation
 import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.CatalogModelProvider
+import com.orchard.backend.vector.ModelBoundaryTraceEvent
+import com.orchard.backend.vector.ModelBoundaryTraceStore
+import com.orchard.backend.vector.defaultLocalModelProviderCatalog
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -52,6 +58,8 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
+import io.ktor.http.headersOf
 import io.ktor.server.testing.testApplication
 import java.nio.file.Files
 import java.nio.file.Path
@@ -61,8 +69,110 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 class ProjectGenesisTest {
+    @Test
+    fun onboardingWireContractAndTracePreserveIncompleteEvidenceUntilRejection() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore(repositoryBindings = boundRepository())
+        createHierarchy(workspace)
+        val contextProvider = FakeGenesisRepositoryContextProvider()
+        val path = contextProvider.observation.context.files.single().path
+        val valid = """{
+            "submission":{"classification":"EXISTING_LOCAL","productIntent":"Maintain the existing product.","baseRevision":0},
+            "repositoryClaims":[{
+                "claimId":"genesis-service","statement":"The repository defines a Genesis service.","status":"SUPPORTED",
+                "support":[{"path":"$path","contentHash":"${contextProvider.contentHash}","observation":"The supplied file defines GenesisIntelligenceService."}]
+            }]
+        }""".trimIndent()
+        val incomplete = valid.replace(
+            ""","contentHash":"${contextProvider.contentHash}","observation":"The supplied file defines GenesisIntelligenceService."""",
+            "",
+        )
+        val outputs = ArrayDeque(listOf(incomplete, valid))
+        val requests = mutableListOf<JsonObject>()
+        val responses = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+            val body = Json.encodeToString(buildJsonObject {
+                put("response", outputs.removeFirst())
+                put("done", true)
+                put("prompt_eval_count", 100)
+                put("eval_count", 100)
+            })
+            responses += body
+            respond(body, headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+        val directory = createTempDirectory("orchard-genesis-boundaries-")
+        val quotaDirectory = createTempDirectory("orchard-genesis-trace-quota-")
+        val store = ModelBoundaryTraceStore(directory)
+        val service = GenesisIntelligenceService(
+            workspace, provider, repositoryContextProvider = contextProvider, modelBoundaryTraces = store,
+        )
+        try {
+            val rejected = service.propose(1, GenesisProposalRequest("Classify the existing repository."))
+            assertEquals(GenesisProposalStatus.INVALID_OUTPUT, rejected.status)
+            assertTrue(rejected.diagnostic.contains("claimSupport[0]:{path:string}"))
+            assertEquals(null, service.latestRepositoryAssessment(1))
+
+            val schema = requests.single().getValue("format").jsonObject
+            val support = schema.getValue("properties").jsonObject.getValue("repositoryClaims").jsonObject
+                .getValue("items").jsonObject.getValue("properties").jsonObject.getValue("support").jsonObject.getValue("items").jsonObject
+                .getValue("oneOf").jsonArray.single().jsonObject
+            assertEquals(setOf("path", "contentHash", "observation"),
+                support.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet())
+            assertEquals(path, support.getValue("properties").jsonObject.getValue("path").jsonObject.getValue("enum").jsonArray.single().jsonPrimitive.content)
+            assertEquals(contextProvider.contentHash, support.getValue("properties").jsonObject.getValue("contentHash").jsonObject.getValue("enum").jsonArray.single().jsonPrimitive.content)
+            val submissionSchema = schema.getValue("properties").jsonObject.getValue("submission").jsonObject
+            assertEquals(setOf("baseRevision", "classification", "productIntent"),
+                submissionSchema.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet())
+            assertEquals("null", submissionSchema.getValue("properties").jsonObject.getValue("components").jsonObject.getValue("type").jsonPrimitive.content)
+            assertTrue(requests.single().getValue("prompt").jsonPrimitive.content.contains("genesis-proposal-v2"))
+
+            val created = service.propose(1, GenesisProposalRequest("Classify the existing repository."))
+            assertEquals(GenesisProposalStatus.CREATED, created.status)
+            assertEquals(contextProvider.contentHash, created.proposal?.repositoryAssessment?.claims?.single()?.support?.single()?.contentHash)
+            assertEquals(GENESIS_CLASSIFICATION, workspace.snapshot(MESSAGE_READY).projectGenesis.single().phase)
+
+            val traces = Files.list(directory).use { it.toList() }.map { file ->
+                Files.readAllLines(file).map { Json.decodeFromString<ModelBoundaryTraceEvent>(it) }
+            }
+            assertTrue(traces.flatten().all { it.projectId == 1 && it.runId == null })
+            val failedTrace = traces.single { events -> events.any { it.stage == "MODEL_GENERATION" && it.payload == incomplete } }
+            assertEquals(incomplete, failedTrace.single { it.stage == "GENESIS_NORMALIZED_CANDIDATE" }.payload)
+            assertEquals("FAIL", failedTrace.single { it.stage == "GENESIS_DECODE" }.details["status"])
+            assertEquals(responses.first(), failedTrace.single { it.stage == "PROVIDER_RESPONSE" }.payload)
+            assertEquals("GENESIS_RESULT", failedTrace.last().stage)
+            val passedTrace = traces.single { events -> events.any { it.stage == "GENESIS_VALIDATION" } }
+            assertEquals(listOf("GENESIS_REQUEST", "PROVIDER_REQUEST", "PROVIDER_RESPONSE", "MODEL_GENERATION",
+                "GENESIS_NORMALIZED_CANDIDATE", "GENESIS_CANONICAL_CANDIDATE", "GENESIS_DECODE",
+                "GENESIS_VALIDATION", "GENESIS_RESULT"), passedTrace.map { it.stage })
+
+            val quotaStore = ModelBoundaryTraceStore(quotaDirectory, maxTraces = 1)
+            quotaStore.newTrace(34).record("OCCUPIED", "existing trace")
+            val unavailable = GenesisIntelligenceService(
+                workspace, provider, repositoryContextProvider = contextProvider, modelBoundaryTraces = quotaStore,
+            ).propose(1, GenesisProposalRequest("Classify the existing repository."))
+            assertEquals(GenesisProposalStatus.STORAGE_UNAVAILABLE, unavailable.status)
+            assertEquals(2, requests.size)
+        } finally {
+            provider.close()
+            for (path in listOf(directory, quotaDirectory)) {
+                Files.list(path).use { entries -> entries.forEach(Files::deleteIfExists) }
+                Files.delete(path)
+            }
+        }
+    }
+
     @Test
     fun modelProposalIsPhaseBoundPinnedAndNonAuthoritative() = kotlinx.coroutines.test.runTest {
         val workspace = WorkspaceStore()

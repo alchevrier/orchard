@@ -40,6 +40,8 @@ interface ModelProvider : AutoCloseable {
     }
     suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         executeWorkDefinition(prompt, maxOutputTokens)
+    suspend fun executeGenesisProposal(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, outputDomain: GenesisProposalOutputDomain): ModelGeneration =
+        executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
     suspend fun executeCircuitSynthesis(
         prompt: String,
         maxOutputTokens: Int,

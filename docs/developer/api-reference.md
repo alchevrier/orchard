@@ -26,7 +26,7 @@ The server installs `ContentNegotiation` with `kotlinx.serialization`. Decoding 
 | --- | --- | --- |
 | `POST` | `/api/projects/{projectId}/genesis` | Record a genesis revision |
 | `POST` | `/api/projects/{projectId}/genesis/admission` | Admit an exact genesis revision |
-| `POST` | `/api/projects/{projectId}/genesis/proposal` | Generate a candidate genesis phase proposal |
+| `POST` | `/api/projects/{projectId}/genesis/proposal` | Generate a candidate genesis phase proposal using the phase-bound `genesis-proposal-v2` output contract; repository evidence requires an allowed path/hash pair and observation |
 | `POST` | `/api/projects/{projectId}/design-governance` | Activate project design governance |
 | `POST` | `/api/designs` | Record a design requirement revision |
 | `POST` | `/api/designs/{designId}/admission` | Admit or reject a design |
@@ -112,7 +112,7 @@ The `repository-analysis-candidate-v4` contract constrains each citation to a su
 
 Unresolved questions must be concrete nonblank strings. The wire schema excludes empty strings, and service validation also rejects whitespace-only questions as `INVALID_ANALYSIS` before they can become a spurious architect escalation.
 
-`ORCHARD_MODEL_TRACE_DIR` enables bounded, private local repository-analysis boundary captures for request, provider response, reconciliation, decoding and final validation. These source-bearing payloads are deliberately excluded from `/api/model-providers/audit-events` and other HTTP projections. See [local analysis boundary traces](development.md#local-analysis-boundary-traces) for limits and inspection. Trace capture grants no inference or retry authority.
+`ORCHARD_MODEL_TRACE_DIR` enables bounded, private local repository-analysis and onboarding boundary captures for request, provider response, reconciliation, decoding and final validation. These source-bearing payloads are deliberately excluded from `/api/model-providers/audit-events` and other HTTP projections. See [local model boundary traces](development.md#local-model-boundary-traces) for limits and inspection. Trace capture grants no inference or retry authority.
 
 Context quality and JSON schema validity are independent. A schema-valid coding result denied by the Attention action guard records failed downstream quality, not success. Later execution outcomes not yet established when the model observation is appended remain `UNKNOWN`; final coding results are recorded separately in the coding execution ledger. Failed source compilation persists a blocked analysis attempt and quality report before inference, and restart must preserve that report without rewriting the ledger or granting retry authority.
 

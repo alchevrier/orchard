@@ -23,7 +23,7 @@ import kotlinx.serialization.json.Json
 data class ModelBoundaryTraceEvent(
     val formatVersion: Int = 1,
     val traceId: String,
-    val runId: Long,
+    val runId: Long?,
     val sequence: Int,
     val stage: String,
     val payload: String,
@@ -33,6 +33,7 @@ data class ModelBoundaryTraceEvent(
     val truncated: Boolean,
     val details: Map<String, String>,
     val recordedAt: String = Instant.now().toString(),
+    val projectId: Int? = null,
 )
 
 class ModelBoundaryTraceException(message: String, cause: Exception) : IOException(message, cause)
@@ -59,6 +60,9 @@ class ModelBoundaryTraceStore(
     fun newTrace(runId: Long): ModelBoundaryTrace =
         ModelBoundaryTrace(this, "analysis-$runId-${UUID.randomUUID()}", runId)
 
+    fun newGenesisTrace(projectId: Int): ModelBoundaryTrace =
+        ModelBoundaryTrace(this, "genesis-$projectId-${UUID.randomUUID()}", null, projectId)
+
     @Synchronized
     internal fun append(
         trace: ModelBoundaryTrace,
@@ -71,7 +75,10 @@ class ModelBoundaryTraceStore(
         try {
             if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
                 val count = Files.list(directory).use { entries ->
-                    entries.filter { it.fileName.toString().startsWith("analysis-") && it.fileName.toString().endsWith(".jsonl") }.count()
+                    entries.filter {
+                        val name = it.fileName.toString()
+                        (name.startsWith("analysis-") || name.startsWith("genesis-")) && name.endsWith(".jsonl")
+                    }.count()
                 }
                 if (count >= maxTraces) throw IOException("Trace file quota reached ($maxTraces); archive diagnostics before continuing")
             } else if (Files.isSymbolicLink(path) ||
@@ -84,7 +91,7 @@ class ModelBoundaryTraceStore(
                 while (end > 0 && (bytes[end].toInt() and 0xc0) == 0x80) end--
             }
             val event = ModelBoundaryTraceEvent(
-                traceId = trace.traceId, runId = trace.runId, sequence = sequence, stage = stage,
+                traceId = trace.traceId, runId = trace.runId, projectId = trace.projectId, sequence = sequence, stage = stage,
                 payload = String(bytes, 0, end, Charsets.UTF_8), payloadHash = stagedPlanHash(payload),
                 originalBytes = bytes.size, capturedBytes = end, truncated = end != bytes.size, details = details,
             )
@@ -117,7 +124,8 @@ class ModelBoundaryTraceStore(
 class ModelBoundaryTrace internal constructor(
     private val store: ModelBoundaryTraceStore,
     val traceId: String,
-    val runId: Long,
+    val runId: Long?,
+    val projectId: Int? = null,
 ) : AbstractCoroutineContextElement(Key) {
     private var sequence = 0
 

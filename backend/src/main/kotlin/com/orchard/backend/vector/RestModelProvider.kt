@@ -160,6 +160,9 @@ class CatalogModelProvider(
     override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         generate(prompt, maxOutputTokens, contextWindowTokens)
 
+    override suspend fun executeGenesisProposal(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, outputDomain: GenesisProposalOutputDomain): ModelGeneration =
+        generate(prompt, maxOutputTokens, contextWindowTokens, ModelOutputContract.GENESIS_PROPOSAL, genesisOutputDomain = outputDomain)
+
     override suspend fun executeCircuitSynthesis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         generate(prompt, maxOutputTokens, contextWindowTokens)
 
@@ -237,12 +240,12 @@ class CatalogModelProvider(
         ModelEndpointInspection(endpoint.endpointId, false, diagnostic = error.message.orEmpty().take(512))
     }
 
-    private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int, contract: ModelOutputContract = ModelOutputContract.JSON_OBJECT, outputDomain: RepositoryAnalysisOutputDomain? = null): ModelGeneration {
+    private suspend fun generate(prompt: String, maxOutputTokens: Int?, contextWindowTokens: Int, contract: ModelOutputContract = ModelOutputContract.JSON_OBJECT, outputDomain: RepositoryAnalysisOutputDomain? = null, genesisOutputDomain: GenesisProposalOutputDomain? = null): ModelGeneration {
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
         if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
-            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true, contract = contract, outputDomain = outputDomain)
+            val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true, contract = contract, outputDomain = outputDomain, genesisOutputDomain = genesisOutputDomain)
             val completed = if (structured.done != true || !isJsonObject(structured.response)) {
-                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false, contract = contract, outputDomain = outputDomain)
+                generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false, contract = contract, outputDomain = outputDomain, genesisOutputDomain = genesisOutputDomain)
             } else {
                 structured
             }
@@ -300,6 +303,7 @@ class CatalogModelProvider(
         structured: Boolean,
         contract: ModelOutputContract,
         outputDomain: RepositoryAnalysisOutputDomain?,
+        genesisOutputDomain: GenesisProposalOutputDomain?,
     ): OllamaCatalogResponse {
         val startedAt = nanoTime()
         val formattedInput = formatModelInput(prompt, bindingProfile())
@@ -322,7 +326,7 @@ class CatalogModelProvider(
             "logicalPromptHash" to providerPromptHash(prompt), "wirePromptHash" to promptHash,
         )
         val requestBody = if (structured) json.encodeToString(OllamaCatalogRequest(
-            binding.model, wirePrompt, format = ollamaResponseFormat(contract, outputDomain),
+            binding.model, wirePrompt, format = ollamaResponseFormat(contract, outputDomain, genesisOutputDomain),
             think = think, options = options, raw = formattedInput != null,
         )) else json.encodeToString(OllamaCatalogPlainRequest(
             binding.model, wirePrompt, think = think, options = options, raw = formattedInput != null,
@@ -617,6 +621,9 @@ class ModelProviderRegistry(
     override suspend fun executeWorkDefinition(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         primary().executeWorkDefinition(prompt, maxOutputTokens, contextWindowTokens)
 
+    override suspend fun executeGenesisProposal(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, outputDomain: GenesisProposalOutputDomain): ModelGeneration =
+        primary().executeGenesisProposal(prompt, maxOutputTokens, contextWindowTokens, outputDomain)
+
     override suspend fun executeCircuitSynthesis(prompt: String, maxOutputTokens: Int, contextWindowTokens: Int): ModelGeneration =
         primary().executeCircuitSynthesis(prompt, maxOutputTokens, contextWindowTokens)
 
@@ -650,7 +657,9 @@ class ModelProviderRegistry(
     override fun close() = activeProviders.forEach(ModelProvider::close)
 }
 
-private fun ollamaResponseFormat(contract: ModelOutputContract, outputDomain: RepositoryAnalysisOutputDomain? = null): JsonElement = if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
+private fun ollamaResponseFormat(contract: ModelOutputContract, outputDomain: RepositoryAnalysisOutputDomain? = null, genesisOutputDomain: GenesisProposalOutputDomain? = null): JsonElement = if (contract == ModelOutputContract.GENESIS_PROPOSAL) {
+    contract.genesisSchemaFor(requireNotNull(genesisOutputDomain))
+} else if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
     requireNotNull(contract.schemaFor(outputDomain))
 } else if (contract == ModelOutputContract.BOUNDED_CODING_TOOL_BATCH || contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS) {
     val requiresLiteralReplacements = contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS
