@@ -16,6 +16,8 @@ import com.orchard.backend.workspace.FileDefinitionCollaborationStore
 import com.orchard.backend.workspace.FileModelExperienceStore
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.WorkflowStartStatus
+import com.orchard.backend.workspace.WorkflowMutationStatus
+import com.orchard.backend.workspace.ProjectArchiveStatus
 import com.orchard.backend.workspace.WorkEpisode
 import com.orchard.backend.workspace.AttemptSubmission
 import com.orchard.backend.workspace.EvidenceSubmission
@@ -1192,6 +1194,13 @@ class WorkspaceRepositoryTest {
             recovered.workDefinitions.first { it.workItemId == 5 }.hash,
             recovered.workflowRuns.first { it.runId == 2L }.workDefinition?.hash,
         )
+        assertEquals(ProjectArchiveStatus.ACTIVE_WORK, store.archiveProject(1).status)
+        assertEquals(WorkflowMutationStatus.RECORDED, store.cancelWorkflow(2).status)
+        assertEquals(ProjectArchiveStatus.ARCHIVED, store.archiveProject(1).status)
+        assertEquals(WorkflowStartStatus.PROJECT_ARCHIVED, store.startWorkflow(5).status)
+        assertTrue(store.snapshot(0).workflowRuns.isEmpty())
+        assertEquals(2, store.snapshot(0, includeArchived = true).workflowRuns.size)
+        assertTrue(Files.isDirectory(repositoryDirectory.resolve(".git")))
     }
 
     private fun intent(

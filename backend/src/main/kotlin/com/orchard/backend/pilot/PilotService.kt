@@ -41,6 +41,7 @@ import com.orchard.backend.conversation.COMMAND_PROPOSED
 import com.orchard.backend.conversation.COMMAND_REJECTED
 import com.orchard.backend.conversation.ConversationConductorService
 import com.orchard.backend.conversation.ConversationObjectiveRevision
+import com.orchard.backend.conversation.ProjectSetupStatus
 import com.orchard.backend.conversation.OBJECTIVE_ACTIVE
 import com.orchard.backend.conversation.OBJECTIVE_AWAITING_ADMISSION
 import com.orchard.backend.conversation.OBJECTIVE_BLOCKED
@@ -157,6 +158,7 @@ data class PilotAction(
     val path: String,
     val costClass: String,
     val reason: String,
+    val requestBody: Map<String, String> = emptyMap(),
 )
 
 @Serializable
@@ -206,33 +208,72 @@ class PilotService(
     private val providerEvents: () -> List<ModelProviderAuditEvent> = { ModelProviderAuditLog.recent() },
     private val now: () -> Instant = Instant::now,
 ) {
-    fun status(): PilotStatus = compilePilotStatus(
-        snapshot = workspace.snapshot(MESSAGE_READY),
-        analysisAttempts = repositoryAnalysis?.attempts().orEmpty(),
-        analysisPlans = repositoryAnalysis?.plans().orEmpty(),
-        providerEvents = providerEvents(),
-        resources = runCatching { resourceController?.configuration() }.getOrNull(),
-        objectives = activeObjectives(),
-        operationMode = operationMode,
-        intelligenceReady = { run ->
-            val reservation = run.context.workspaceReservation
-            repositoryIntelligenceImporter == null || (reservation != null &&
-                repositoryIntelligenceImporter.compatible(run.context.projectId, reservation.baseRevision) != null)
-        },
-        coordinatesReady = { run ->
-            if (repositoryIntelligenceImporter == null) {
-                true
-            } else {
+    fun status(): PilotStatus {
+        val status = compilePilotStatus(
+            snapshot = workspace.snapshot(MESSAGE_READY),
+            analysisAttempts = repositoryAnalysis?.attempts().orEmpty(),
+            analysisPlans = repositoryAnalysis?.plans().orEmpty(),
+            providerEvents = providerEvents(),
+            resources = runCatching { resourceController?.configuration() }.getOrNull(),
+            objectives = activeObjectives(),
+            operationMode = operationMode,
+            intelligenceReady = { run ->
                 val reservation = run.context.workspaceReservation
-                val graph = reservation?.let {
-                    repositoryIntelligenceImporter.compatible(run.context.projectId, it.baseRevision)
+                repositoryIntelligenceImporter == null || (reservation != null &&
+                    repositoryIntelligenceImporter.compatible(run.context.projectId, reservation.baseRevision) != null)
+            },
+            coordinatesReady = { run ->
+                if (repositoryIntelligenceImporter == null) {
+                    true
+                } else {
+                    val reservation = run.context.workspaceReservation
+                    val graph = reservation?.let {
+                        repositoryIntelligenceImporter.compatible(run.context.projectId, it.baseRevision)
+                    }
+                    graph != null && coordinateAdmissionMatchesGraph(run.context.repositoryCoordinateAdmission, graph)
                 }
-                graph != null && coordinateAdmissionMatchesGraph(run.context.repositoryCoordinateAdmission, graph)
-            }
-        },
-        repairBasisCurrent = { proposal -> workspace.coordinateRepairBasisCurrent(proposal.proposal) },
-        now = now(),
-    )
+            },
+            repairBasisCurrent = { proposal -> workspace.coordinateRepairBasisCurrent(proposal.proposal) },
+            now = now(),
+        )
+        if (status.currentRun != null || status.state == "RUNNING") return status
+        val objectiveId = status.activeObjective?.objectiveId ?: return status
+        val setup = conversationConductor?.projectSetupState(objectiveId) ?: return status
+        if (setup.status == ProjectSetupStatus.HANDED_OFF) return status
+        val running = setup.status == ProjectSetupStatus.DISPATCHING || (status.resources?.activeLeases ?: 0) > 0
+        val action = when {
+            running || setup.status == ProjectSetupStatus.BLOCKED -> null
+            setup.status == ProjectSetupStatus.AWAITING_ADMISSION -> PilotAction(
+                "admit-project-setup", "POST", "/api/conversation-commands/${setup.commandId}/admission",
+                "HUMAN_AUTHORITY", setup.diagnostic,
+                mapOf("actor" to "HUMAN", "commandHash" to requireNotNull(setup.commandHash)),
+            )
+            else -> PilotAction(
+                "continue-project-setup", "POST", "/api/conversation-objectives/$objectiveId/continue",
+                if (setup.step?.modelBacked == true) "MODEL_GENESIS_PROPOSAL" else "DETERMINISTIC",
+                "The setup FSM selected ${setup.step}. This proposes the next command without admitting it.",
+                mapOf("actor" to "HUMAN"),
+            )
+        }
+        return status.copy(
+            state = when {
+                running -> "RUNNING"
+                setup.status == ProjectSetupStatus.BLOCKED -> "BLOCKED"
+                else -> "ACTION_REQUIRED"
+            },
+            currentOperation = PilotOperationStatus(
+                "PROJECT_SETUP", setup.status.name,
+                diagnostic = setup.diagnostic.ifBlank { "Next setup transition: ${setup.step}." },
+            ),
+            authorizedActions = listOfNotNull(action) + if (!running && setup.status == ProjectSetupStatus.AWAITING_ADMISSION) {
+                listOf(PilotAction(
+                    "reject-project-setup", "POST", "/api/conversation-commands/${setup.commandId}/rejection",
+                    "HUMAN_AUTHORITY", "Reject this exact pending proposal without changing Genesis or creating a repository.",
+                    mapOf("actor" to "HUMAN", "commandHash" to requireNotNull(setup.commandHash)),
+                ))
+            } else emptyList(),
+        )
+    }
 
     fun atlas(): List<PilotStateDomain> = PilotStateAtlas.domains
 
@@ -495,9 +536,24 @@ object PilotStateAtlas {
             listOf(GENESIS_CLASSIFICATION, GENESIS_EXPERIENCE, GENESIS_ARCHITECTURE, GENESIS_BLUEPRINT, GENESIS_ADMISSION, GENESIS_READY),
             transition(GENESIS_CLASSIFICATION, GENESIS_EXPERIENCE, "genesis.classify", "ADMITTED_COMMAND", projection = "classification recorded", meaning = "Define audience and product promise."),
             transition(GENESIS_EXPERIENCE, GENESIS_ARCHITECTURE, "genesis.define-experience", "ADMITTED_COMMAND", projection = "experience recorded", meaning = "Define components and decisions."),
+            transition(GENESIS_ARCHITECTURE, GENESIS_ARCHITECTURE, "setup.create-first-outcome", "ADMITTED_COMMAND", projection = "first epic exists", meaning = "The setup FSM creates the missing first outcome before requesting architecture."),
             transition(GENESIS_ARCHITECTURE, GENESIS_BLUEPRINT, "genesis.define-architecture", "ADMITTED_COMMAND", projection = "architecture recorded", meaning = "Define repository blueprint."),
             transition(GENESIS_BLUEPRINT, GENESIS_ADMISSION, "genesis.define-blueprint", "ADMITTED_COMMAND", projection = "blueprint recorded", meaning = "Review genesis authority."),
             transition(GENESIS_ADMISSION, GENESIS_READY, "genesis.admit", "HUMAN_OR_ADMITTED_COMMAND", projection = "genesis admitted", meaning = "Implementation workflows may start.", terminal = true),
+        ),
+        domain(
+            "PROJECT_SETUP",
+            ProjectSetupStatus.entries.map { it.name },
+            transition("READY", "AWAITING_ADMISSION", "setup.continue", "HUMAN_REQUEST",
+                projection = "one exact command proposal", meaning = "Software chooses the transition; the Architect supplies only phase-specific content."),
+            transition("AWAITING_ADMISSION", "DISPATCHING", "command.admit", "EXACT_COMMAND_HASH",
+                projection = "existing command dispatch", meaning = "Execute through the owning service without bypassing admission."),
+            transition("DISPATCHING", "READY", "command.correlate", "OWNING_SERVICE",
+                projection = "persisted Genesis or first-outcome authority", meaning = "Recompute the next step from persisted state."),
+            transition("DISPATCHING", "HANDED_OFF", "company.start", "OWNING_SERVICE",
+                projection = "delivery workflow run exists", meaning = "The existing delivery workflow now owns implementation and evidence.", terminal = true),
+            transition(null, "BLOCKED", "setup.blocked", "DETERMINISTIC_POLICY",
+                projection = "explicit diagnostic", meaning = "Resolve the authority or failed command; do not loop model calls."),
         ),
         domain(
             "WORK_DEFINITION",

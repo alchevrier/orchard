@@ -23,6 +23,7 @@ import com.orchard.backend.workspace.GENESIS_EXPERIENCE
 import com.orchard.backend.workspace.GENESIS_READY
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.PROJECT_GREENFIELD_LOCAL
+import com.orchard.backend.workspace.PROJECT_EXISTING_LOCAL
 import com.orchard.backend.workspace.PROJECT_ORGANIZATION_GOVERNED
 import com.orchard.backend.workspace.ProjectGenesisStatus
 import com.orchard.backend.workspace.ProjectGenesisFirstOutcomeStatus
@@ -40,11 +41,14 @@ import com.orchard.backend.agent.CodingRepositoryContext
 import com.orchard.backend.agent.GenesisIntelligenceService
 import com.orchard.backend.agent.GenesisProposalRequest
 import com.orchard.backend.agent.GenesisProposalStatus
+import com.orchard.backend.agent.GenesisProposalOutput
 import com.orchard.backend.agent.GenesisRepositoryContextProvider
 import com.orchard.backend.agent.GenesisRepositoryObservation
 import com.orchard.backend.analysis.FileRepositoryObjectiveAssessmentStore
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
+import com.orchard.backend.vector.GenesisOutputMode
+import com.orchard.backend.vector.GenesisProposalOutputDomain
 import com.orchard.backend.vector.CatalogModelProvider
 import com.orchard.backend.vector.ModelBoundaryTraceEvent
 import com.orchard.backend.vector.ModelBoundaryTraceStore
@@ -79,6 +83,125 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class ProjectGenesisTest {
+    @Test
+    fun outputRecoveryChangesDecoderOnceWithoutAdmittingAuthority() = kotlinx.coroutines.test.runTest {
+        val valid = Json.encodeToString(GenesisProposalOutput(ProjectGenesisSubmission(
+            classification = PROJECT_GREENFIELD_LOCAL, productIntent = "A local service.", baseRevision = 0,
+        )))
+        val corrupt = valid.replace("A local service.", "Bad \u200B\u200B\u200B\uF0B7")
+        for (recovers in listOf(true, false)) {
+            val workspace = WorkspaceStore()
+            createHierarchy(workspace)
+            val outputs = ArrayDeque(listOf(corrupt, if (recovers) valid else corrupt))
+            val modes = mutableListOf<GenesisOutputMode>()
+            val model = object : ModelProvider by FakeGenesisModel("{}") {
+                override fun bindingProfile() = FakeGenesisModel("{}").bindingProfile().let {
+                    it.copy(configuration = it.configuration + ("protocol" to "OLLAMA_NATIVE"))
+                }
+                override suspend fun executeGenesisProposal(
+                    prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, outputDomain: GenesisProposalOutputDomain,
+                ): ModelGeneration {
+                    modes += outputDomain.outputMode
+                    return ModelGeneration(outputs.removeFirst(), 64, 64)
+                }
+            }
+            val result = GenesisIntelligenceService(workspace, model).propose(1,
+                GenesisProposalRequest("Create a local service.", recoverInvalidOutput = true))
+            assertEquals(listOf(GenesisOutputMode.NATIVE_SCHEMA_FINAL, GenesisOutputMode.JSON_OBJECT_FINAL), modes)
+            assertEquals(if (recovers) GenesisProposalStatus.CREATED else GenesisProposalStatus.INVALID_OUTPUT, result.status)
+            assertEquals(!recovers, result.recoveryExhausted)
+            assertEquals(GENESIS_CLASSIFICATION, workspace.snapshot(MESSAGE_READY).projectGenesis.single().phase)
+        }
+    }
+
+    @Test
+    fun unsupportedDecoderRecoveryDoesNotRepeatAnIdenticalProviderRequest() = kotlinx.coroutines.test.runTest {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        var calls = 0
+        val model = object : ModelProvider by FakeGenesisModel("{}") {
+            override fun bindingProfile() = FakeGenesisModel("{}").bindingProfile().let {
+                it.copy(configuration = it.configuration + ("protocol" to "OPENAI_COMPATIBLE"))
+            }
+            override suspend fun executeGenesisProposal(
+                prompt: String, maxOutputTokens: Int, contextWindowTokens: Int, outputDomain: GenesisProposalOutputDomain,
+            ): ModelGeneration {
+                calls++
+                return ModelGeneration("{}", 64, 1)
+            }
+        }
+        val result = GenesisIntelligenceService(workspace, model).propose(1,
+            GenesisProposalRequest("Create a local service.", recoverInvalidOutput = true))
+        assertEquals(1, calls)
+        assertEquals(GenesisProposalStatus.INVALID_OUTPUT, result.status)
+        assertTrue(result.recoveryExhausted)
+    }
+
+    @Test
+    fun outputQualityGateRejectsGeneratedArtifactsWithoutRejectingOrdinaryUnicode() = kotlinx.coroutines.test.runTest {
+        for ((text, expected) in listOf(
+            "Use H2 \u200B\u200B\u200B\uF0B7" to GenesisProposalStatus.INVALID_OUTPUT,
+            "<|channel|>analysis<|message|>private scratch text" to GenesisProposalStatus.INVALID_OUTPUT,
+            "Use H2 \uF0B7" to GenesisProposalStatus.INVALID_OUTPUT,
+            "Use H2 \u0000" to GenesisProposalStatus.INVALID_OUTPUT,
+            "Caf\u00e9 \u4f60\u597d \u0645\u06cc\u200c\u0631\u0648\u062f" to GenesisProposalStatus.CREATED,
+        )) {
+            val workspace = WorkspaceStore()
+            createHierarchy(workspace)
+            val output = Json.encodeToString(GenesisProposalOutput(ProjectGenesisSubmission(
+                classification = PROJECT_GREENFIELD_LOCAL, productIntent = text, baseRevision = 0,
+            )))
+            val result = GenesisIntelligenceService(workspace, FakeGenesisModel(output))
+                .propose(1, GenesisProposalRequest("Create a local service."))
+            assertEquals(expected, result.status)
+            assertTrue(!result.diagnostic.contains("private scratch text"))
+        }
+    }
+
+    @Test
+    fun exhaustedOutputRecoveryIsNotAdvertisedAsRetryable() = testApplication {
+        val workspace = WorkspaceStore()
+        createHierarchy(workspace)
+        val base = FakeGenesisModel("{}")
+        val model = object : ModelProvider by base {
+            override fun bindingProfile() = base.bindingProfile().let {
+                it.copy(configuration = it.configuration + ("protocol" to "OLLAMA_NATIVE"))
+            }
+        }
+        application { workspaceApi(workspace, genesisIntelligence = GenesisIntelligenceService(workspace, model)) }
+        val response = client.post("/api/projects/1/genesis/proposal") {
+            header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            setBody("""{"prompt":"Create a local service.","recoverInvalidOutput":true}""")
+        }
+        assertEquals(HttpStatusCode.UnprocessableEntity, response.status)
+        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("false", body.getValue("retryable").jsonPrimitive.content)
+        assertTrue(body.getValue("diagnostic").jsonPrimitive.content.contains("Bounded output recovery exhausted"))
+    }
+
+    @Test
+    fun unsupportedBlueprintToolchainsAreRejectedOnlyForGreenfieldProjects() {
+        for (classification in listOf(PROJECT_GREENFIELD_LOCAL, PROJECT_EXISTING_LOCAL)) {
+            val workspace = WorkspaceStore()
+            createHierarchy(workspace)
+            assertEquals(ProjectGenesisStatus.RECORDED, workspace.advanceProjectGenesis(1, ProjectGenesisSubmission(
+                classification = classification, productIntent = "Deliver a local service.", baseRevision = 0,
+            )).status)
+            fun current() = workspace.snapshot(MESSAGE_READY).projectGenesis.single()
+            assertEquals(ProjectGenesisStatus.RECORDED, workspace.advanceProjectGenesis(1, experienceSubmission(current())).status)
+            assertEquals(ProjectGenesisStatus.RECORDED, workspace.advanceProjectGenesis(1, architectureSubmission(current())).status)
+            val basis = current()
+            val submission = blueprintSubmission(basis)
+            val result = workspace.advanceProjectGenesis(1,
+                submission.copy(blueprint = requireNotNull(submission.blueprint).copy(toolchain = "maven")))
+            assertEquals(
+                if (classification == PROJECT_GREENFIELD_LOCAL) ProjectGenesisStatus.INVALID_TRANSITION else ProjectGenesisStatus.RECORDED,
+                result.status,
+            )
+            if (classification == PROJECT_GREENFIELD_LOCAL) assertEquals(basis, current())
+        }
+    }
+
     @Test
     fun onboardingWireContractAndTracePreserveIncompleteEvidenceUntilRejection() = kotlinx.coroutines.test.runTest {
         val workspace = WorkspaceStore(repositoryBindings = boundRepository())
@@ -751,6 +874,8 @@ class ProjectGenesisTest {
     @Test
     fun firstWorkingOutcomeIsRevisionPinnedAndCreatedWithoutConversationObjective() = testApplication {
         val workspace = WorkspaceStore()
+        val productIntent = "A guided local product with explicit human approval and verifiable delivery evidence. ".repeat(5).trim()
+        assertTrue(productIntent.length > 256)
         workspace.beginBatch()
         assertTrue(workspace.applyIntent(intent(ENTITY_PROJECT, "Orchard")))
         workspace.commitBatch()
@@ -758,7 +883,7 @@ class ProjectGenesisTest {
             workspace,
             ProjectGenesisSubmission(
                 classification = PROJECT_GREENFIELD_LOCAL,
-                productIntent = "A guided local product.",
+                productIntent = productIntent,
                 baseRevision = 0,
             ),
             GENESIS_EXPERIENCE,
@@ -776,6 +901,7 @@ class ProjectGenesisTest {
         assertEquals("Complete the first user journey", workspace.entities().single { it.type == ENTITY_EPIC }.title)
         val review = workspace.snapshot(MESSAGE_READY).projectGenesis.single()
         assertEquals(GENESIS_ADMISSION, review.phase)
+        assertEquals(productIntent, review.revision?.productIntent)
         assertEquals(emptyList(), review.revision?.components)
         assertEquals(null, review.revision?.blueprint)
         assertEquals(ProjectGenesisStatus.ADMITTED, workspace.admitProjectGenesis(1).status)
@@ -784,6 +910,8 @@ class ProjectGenesisTest {
 
     @Test
     fun repositoryFirstIntentAndOutcomeCreateOneAdmissionStateAcrossRestart() = withTempDirectory { directory ->
+        val productIntent = "Make repository reality understandable and operable. ".repeat(8).trim()
+        assertTrue(productIntent.length > 256)
         val bindings = boundRepository()
         val first = WorkspaceStore(
             repository = FileWorkspaceRepository(directory),
@@ -800,14 +928,14 @@ class ProjectGenesisTest {
             title = "Deliver a repository-first project inbox",
             baseRevision = 0,
             baseHash = null,
-            confirmedProductIntent = "Make repository reality understandable and operable.",
+            confirmedProductIntent = productIntent,
         )
         val duplicate = first.createProjectGenesisFirstOutcome(
             projectId = 1,
             title = "Ignored duplicate title",
             baseRevision = 1,
             baseHash = first.snapshot(MESSAGE_READY).projectGenesis.single().revision?.hash,
-            confirmedProductIntent = "Make repository reality understandable and operable.",
+            confirmedProductIntent = productIntent,
         )
 
         assertEquals(ProjectGenesisFirstOutcomeStatus.CREATED, created.status)
@@ -823,7 +951,7 @@ class ProjectGenesisTest {
         )
         val genesis = recovered.snapshot(MESSAGE_READY).projectGenesis.single()
         assertEquals(GENESIS_ADMISSION, genesis.phase)
-        assertEquals("Make repository reality understandable and operable.", genesis.revision?.productIntent)
+        assertEquals(productIntent, genesis.revision?.productIntent)
         assertEquals(created.outcomeId, genesis.revision?.firstEpicId)
         assertEquals("Deliver a repository-first project inbox", recovered.entities().single { it.type == ENTITY_EPIC }.title)
     }

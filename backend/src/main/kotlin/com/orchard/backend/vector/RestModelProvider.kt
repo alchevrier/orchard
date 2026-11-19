@@ -194,6 +194,15 @@ class CatalogModelProvider(
         modelDigest = binding.modelDigest,
     )
 
+    private fun generationBindingProfile(contract: ModelOutputContract, domain: GenesisProposalOutputDomain?): ModelBindingProfile {
+        val profile = bindingProfile()
+        return if (contract == ModelOutputContract.GENESIS_PROPOSAL &&
+            domain?.outputMode in setOf(GenesisOutputMode.NATIVE_SCHEMA_FINAL, GenesisOutputMode.JSON_OBJECT_FINAL) &&
+            profile.configuration["input.format"] == MODEL_INPUT_FORMAT_GPT_OSS_HARMONY) {
+            profile.copy(configuration = profile.configuration + ("input.format" to MODEL_INPUT_FORMAT_GPT_OSS_HARMONY_FINAL))
+        } else profile
+    }
+
     private fun effectiveInputConfiguration(): Map<String, String> {
         if (endpoint.protocol != PROVIDER_PROTOCOL_OLLAMA_NATIVE || binding.model !in setOf("gpt-oss:120b", "gpt-oss:20b")) return binding.configuration
         val format = binding.configuration["input.format"] ?: MODEL_INPUT_FORMAT_GPT_OSS_HARMONY
@@ -244,18 +253,18 @@ class CatalogModelProvider(
         require(contextWindowTokens <= binding.contextWindowTokens) { "Requested context exceeds binding capacity" }
         if (endpoint.protocol == PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
             val structured = generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = true, contract = contract, outputDomain = outputDomain, genesisOutputDomain = genesisOutputDomain)
-            val completed = if (structured.done != true || !isJsonObject(structured.response)) {
+            val completed = if (contract != ModelOutputContract.GENESIS_PROPOSAL && (structured.done != true || !isJsonObject(structured.response))) {
                 generateOllama(prompt, maxOutputTokens, contextWindowTokens, structured = false, contract = contract, outputDomain = outputDomain, genesisOutputDomain = genesisOutputDomain)
             } else {
                 structured
             }
             check(completed.response.isNotBlank() && completed.done == true) {
-                "Provider ${endpoint.endpointId} did not complete after structured and plain retries " +
-                    "(structuredDone=${structured.done}, plainDone=${completed.done})"
+                "Provider ${endpoint.endpointId} did not complete ${contract.versionedId} generation " +
+                    "(structuredDone=${structured.done}, completedDone=${completed.done})"
             }
             return ModelGeneration(
                 completed.response,
-                completed.promptEvalCount ?: accountModelInput(prompt, bindingProfile()).totalTokens,
+                completed.promptEvalCount ?: accountModelInput(prompt, generationBindingProfile(contract, genesisOutputDomain)).totalTokens,
                 completed.evalCount ?: accountModelOutput(completed.response, bindingProfile()).totalTokens,
             )
         }
@@ -306,10 +315,11 @@ class CatalogModelProvider(
         genesisOutputDomain: GenesisProposalOutputDomain?,
     ): OllamaCatalogResponse {
         val startedAt = nanoTime()
-        val formattedInput = formatModelInput(prompt, bindingProfile())
+        val generationProfile = generationBindingProfile(contract, genesisOutputDomain)
+        val formattedInput = formatModelInput(prompt, generationProfile)
         val wirePrompt = formattedInput?.prompt ?: prompt
         val promptHash = providerPromptHash(wirePrompt)
-        val promptTokens = accountModelInput(prompt, bindingProfile()).totalTokens
+        val promptTokens = accountModelInput(prompt, generationProfile).totalTokens
         val think = ollamaThinkControl(structured, contract)
         val options = OllamaCatalogOptions(
             temperature = binding.configuration["temperature"]?.toDoubleOrNull() ?: 0.0,
@@ -661,7 +671,8 @@ class ModelProviderRegistry(
 }
 
 private fun ollamaResponseFormat(contract: ModelOutputContract, outputDomain: RepositoryAnalysisOutputDomain? = null, genesisOutputDomain: GenesisProposalOutputDomain? = null): JsonElement = if (contract == ModelOutputContract.GENESIS_PROPOSAL) {
-    contract.genesisSchemaFor(requireNotNull(genesisOutputDomain))
+    val domain = requireNotNull(genesisOutputDomain)
+    if (domain.outputMode in setOf(GenesisOutputMode.JSON_OBJECT, GenesisOutputMode.JSON_OBJECT_FINAL)) JsonPrimitive("json") else contract.genesisSchemaFor(domain)
 } else if (contract == ModelOutputContract.REPOSITORY_ANALYSIS_CANDIDATE) {
     requireNotNull(contract.schemaFor(outputDomain))
 } else if (contract == ModelOutputContract.BOUNDED_CODING_TOOL_BATCH || contract == ModelOutputContract.BOUNDED_LITERAL_REPLACEMENTS) {

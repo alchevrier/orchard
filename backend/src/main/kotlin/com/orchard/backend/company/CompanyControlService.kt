@@ -610,14 +610,21 @@ class CompanyControlService(
         val requiredEvidence = run.workflow.evidenceContract.requirements.filter {
             it.kind != "SOURCE_DIFF" && it.gate != com.orchard.backend.workspace.CRITERION_HUMAN
         }
-        val commands = requiredEvidence.map { requirement ->
-            run.evidence.lastOrNull {
+        val commands = requiredEvidence.flatMap { requirement ->
+            val command = run.evidence.lastOrNull {
                 it.kind == requirement.kind && it.revision == candidateRevision && it.passed && it.command.isNotBlank()
             }?.command ?: return null
+            val admitted = requirement.verification?.takeIf(String::isNotBlank)?.let(::listOf)
+                ?: if (requirement.kind == "ACCEPTANCE") {
+                    com.orchard.backend.workspace.admittedAcceptanceVerifications(
+                        run.workDefinition?.definition?.acceptanceCriteria?.map { it.verification }.orEmpty(),
+                    ).ifEmpty { listOf(command) }
+                } else listOf(command)
+            admitted.map { requirement.kind to it }
         }.distinct()
         if (commands.isEmpty()) return null
         return buildList {
-            for (command in commands) {
+            for ((kind, command) in commands) {
                 if (workspaceGateway.currentRevision(workspacePath) != candidateRevision) return null
                 val observation = runCatching {
                     workspaceGateway.executeVerification(
@@ -627,6 +634,7 @@ class CompanyControlService(
                     )
                 }.getOrNull() ?: return null
                 if (observation.exitCode != 0 || workspaceGateway.currentRevision(workspacePath) != candidateRevision) return null
+                if (com.orchard.backend.agent.jvmTestEvidenceDiagnostic(kind, observation) != null) return null
                 add(observation)
             }
         }

@@ -31,10 +31,15 @@ data class RepositoryAnalysisOutputDomain(
     }
 }
 
+@Serializable
+enum class GenesisOutputMode { NATIVE_SCHEMA, JSON_OBJECT, NATIVE_SCHEMA_FINAL, JSON_OBJECT_FINAL }
+
 data class GenesisProposalOutputDomain(
     val phase: String,
     val assessmentOnly: Boolean,
     val evidenceHashes: Map<String, String>,
+    val allowedGreenfieldToolchains: Set<String> = emptySet(),
+    val outputMode: GenesisOutputMode = GenesisOutputMode.NATIVE_SCHEMA_FINAL,
 )
 
 enum class ModelOutputContract {
@@ -127,6 +132,14 @@ enum class ModelOutputContract {
             )))
             val intent = submissionProperties.getValue("productIntent").jsonObject
             submissionProperties["productIntent"] = JsonObject(intent + ("minLength" to JsonPrimitive(1)))
+        }
+        if (!domain.assessmentOnly && domain.phase == "BLUEPRINT" && domain.allowedGreenfieldToolchains.isNotEmpty()) {
+            val blueprint = submissionProperties.getValue("blueprint").jsonObject
+            val fields = blueprint.getValue("properties").jsonObject
+            val toolchain = fields.getValue("toolchain").jsonObject
+            submissionProperties["blueprint"] = JsonObject(blueprint + ("properties" to JsonObject(fields + (
+                "toolchain" to JsonObject(toolchain + ("enum" to JsonArray(domain.allowedGreenfieldToolchains.sorted().map(::JsonPrimitive))))
+            ))))
         }
         properties["submission"] = JsonObject(submission + mapOf(
             "properties" to JsonObject(submissionProperties),
@@ -386,6 +399,7 @@ const val MODEL_TOKEN_COUNT_BYTE_FALLBACK = "UTF8_BYTE_UPPER_BOUND"
 const val MODEL_PROVIDER_OVERHEAD_RESERVE_TOKENS = 0
 const val MODEL_TOKEN_COUNT_UNVERIFIED_FORMAT = "UNVERIFIED_PROVIDER_TEMPLATE"
 const val MODEL_INPUT_FORMAT_GPT_OSS_HARMONY = "gpt-oss-harmony-v1"
+const val MODEL_INPUT_FORMAT_GPT_OSS_HARMONY_FINAL = "gpt-oss-harmony-final-v2"
 const val MODEL_TOKEN_COUNT_FORMATTED_UPPER_BOUND = "FORMATTED_INPUT_TOKEN_UPPER_BOUND"
 private const val GPT_OSS_OPTIONAL_BOUNDARY_TOKENS = 2
 
@@ -396,7 +410,8 @@ internal fun formatModelInput(value: String, binding: ModelBindingProfile): Form
     if (protocol == null || protocol == "OLLAMA_NATIVE" && binding.configuration["input.format"] == "raw") {
         return FormattedModelInput(value, "raw-input-v1")
     }
-    if (protocol != "OLLAMA_NATIVE" || binding.configuration["input.format"] != MODEL_INPUT_FORMAT_GPT_OSS_HARMONY ||
+    val format = binding.configuration["input.format"] ?: return null
+    if (protocol != "OLLAMA_NATIVE" || format !in setOf(MODEL_INPUT_FORMAT_GPT_OSS_HARMONY, MODEL_INPUT_FORMAT_GPT_OSS_HARMONY_FINAL) ||
         binding.model !in setOf("gpt-oss:120b", "gpt-oss:20b")) return null
     val date = binding.configuration["input.format.date"]?.let {
         runCatching { java.time.LocalDate.parse(it).toString() }.getOrNull()
@@ -405,8 +420,9 @@ internal fun formatModelInput(value: String, binding: ModelBindingProfile): Form
         "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\n" +
             "Knowledge cutoff: 2024-06\nCurrent date: $date\n\nReasoning: low\n\n" +
             "# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>" +
-            "<|start|>user<|message|>$value<|end|><|start|>assistant",
-        MODEL_INPUT_FORMAT_GPT_OSS_HARMONY,
+            "<|start|>user<|message|>$value<|end|><|start|>assistant" +
+            if (format == MODEL_INPUT_FORMAT_GPT_OSS_HARMONY_FINAL) "<|channel|>final<|message|>" else "",
+        format,
     )
 }
 
@@ -432,7 +448,7 @@ data class ModelTokenAccounting(
 fun accountModelInput(value: String, binding: ModelBindingProfile): ModelTokenAccounting {
     val content = accountModelText(value, binding, 0)
     val formatted = formatModelInput(value, binding)
-    if (formatted?.providerFormat == MODEL_INPUT_FORMAT_GPT_OSS_HARMONY) {
+    if (formatted != null && formatted.providerFormat in setOf(MODEL_INPUT_FORMAT_GPT_OSS_HARMONY, MODEL_INPUT_FORMAT_GPT_OSS_HARMONY_FINAL)) {
         val rendered = accountModelText(formatted.prompt, binding, 0)
         val bytes = formatted.prompt.encodeToByteArray().size
         val total = if (rendered.method == MODEL_TOKEN_COUNT_BYTE_FALLBACK) bytes else rendered.totalTokens

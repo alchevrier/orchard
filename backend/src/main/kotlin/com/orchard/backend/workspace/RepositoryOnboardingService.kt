@@ -25,6 +25,7 @@ enum class RepositoryOnboardingStatus {
     INVALID_SOURCE,
     CLONE_FAILED,
     PROJECT_NOT_FOUND,
+    PROJECT_ARCHIVED,
     PROJECT_CREATION_FAILED,
     REPOSITORY_BIND_FAILED,
 }
@@ -74,6 +75,12 @@ class RepositoryOnboardingService(
                     RepositoryOnboardingStatus.PROJECT_NOT_FOUND,
                     diagnostic = "Project $projectId does not exist.",
                 )
+        }
+        if (selectedProject != null && workspace.isProjectArchived(selectedProject.id)) {
+            return RepositoryOnboardingResult(
+                RepositoryOnboardingStatus.PROJECT_ARCHIVED,
+                diagnostic = "Archived projects cannot import repositories.",
+            )
         }
         val repositoryPath = when (request.source) {
             REPOSITORY_SOURCE_LOCAL_FOLDER -> inspectLocalRepository(request.location)

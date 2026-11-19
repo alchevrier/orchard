@@ -27,6 +27,16 @@ import com.orchard.backend.vector.ModelExecutionProfile
 import com.orchard.backend.vector.ModelGeneration
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.api.DocumentIntent
+import com.orchard.backend.workspace.ACTION_CREATE
+import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
+import com.orchard.backend.workspace.ENTITY_EPIC
+import com.orchard.backend.workspace.ENTITY_PROJECT
+import com.orchard.backend.workspace.ExperienceContract
+import com.orchard.backend.workspace.MESSAGE_READY
+import com.orchard.backend.workspace.PROJECT_GREENFIELD_LOCAL
+import com.orchard.backend.workspace.ProjectGenesisStatus
+import com.orchard.backend.workspace.ProjectGenesisSubmission
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -38,8 +48,102 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class ConversationConductorTest {
+    @Test
+    fun `Genesis context is current and scoped and invalid submissions never reach admission`() = runBlocking {
+        val workspace = WorkspaceStore()
+        workspace.beginBatch()
+        for (title in listOf("Selected", "Unrelated")) {
+            assertTrue(workspace.applyIntent(DocumentIntent(
+                ACTION_CREATE, ENTITY_PROJECT, DEFAULT_DELIVERY_WORKFLOW_ID, title = title,
+            )))
+        }
+        for (projectId in 1..2) {
+            assertTrue(workspace.applyIntent(DocumentIntent(
+                ACTION_CREATE, ENTITY_EPIC, DEFAULT_DELIVERY_WORKFLOW_ID, projectId = projectId, title = "Outcome $projectId",
+            )))
+        }
+        workspace.commitBatch()
+        assertEquals(ProjectGenesisStatus.RECORDED, workspace.advanceProjectGenesis(1, ProjectGenesisSubmission(
+            classification = PROJECT_GREENFIELD_LOCAL, productIntent = "Deliver the content service and its tests.", baseRevision = 0,
+        )).status)
+        val revision = requireNotNull(workspace.snapshot(MESSAGE_READY).projectGenesis.first { it.projectId == 1 }.revision)
+        val submission = ProjectGenesisSubmission(
+            experience = ExperienceContract(
+                audience = "Developers", productPromise = "Look up persisted content.",
+                primaryJourney = listOf("Start the service", "Fetch content"),
+                interactionPrinciples = listOf("Predictable HTTP"), emotionalQualities = listOf("Confident"),
+                mustNotFeelLike = listOf("An untested stub"),
+            ),
+            baseRevision = revision.revision,
+            baseHash = revision.hash,
+        )
+        val objectiveTurn = objectiveTurn("Deliver content lookup").let { turn ->
+            turn.copy(objective = requireNotNull(turn.objective).copy(projectId = 1))
+        }
+        val interpreter = QueueInterpreter(
+            objectiveTurn,
+            commandTurn(CAPABILITY_ADVANCE_PROJECT_GENESIS).copy(
+                payloadJson = """{"projectId":1,"submission":{"experience":{"primaryJourney":["Wrong phase payload"]}}}""",
+            ),
+            commandTurn(CAPABILITY_ADVANCE_PROJECT_GENESIS).copy(payloadJson = Json.encodeToString(
+                AdvanceProjectGenesisCapabilityPayload(1, submission.copy(
+                    experience = null, classification = PROJECT_GREENFIELD_LOCAL,
+                )),
+            )),
+            commandTurn(CAPABILITY_ADVANCE_PROJECT_GENESIS).copy(payloadJson = Json.encodeToString(
+                AdvanceProjectGenesisCapabilityPayload(1, submission.copy(baseRevision = 0, baseHash = null)),
+            )),
+            commandTurn(CAPABILITY_ADVANCE_PROJECT_GENESIS).copy(
+                payloadJson = Json.encodeToString(AdvanceProjectGenesisCapabilityPayload(1, submission)),
+            ),
+        )
+        val store = TransientConversationStore()
+        val registry = defaultConversationCapabilities(workspace)
+        val compiler = ConversationContextCompiler(workspace = workspace)
+        val service = ConversationConductorService(store, interpreter, registry, compiler, now = { NOW })
+        val conversationId = requireNotNull(service.create(CreateConversationRequest("Genesis")).projection).conversation.conversationId
+        val initialResult = service.submitMessage(conversationId, SubmitConversationMessageRequest(
+            "initial-goal", 1, "Deliver the content service and its tests.",
+        ))
+        assertEquals(ConversationOperationStatus.ADMISSION_REQUIRED, initialResult.status, initialResult.diagnostic)
+        val initial = requireNotNull(initialResult.projection)
+        val objective = initial.objectives.single()
+        val source = initial.messages.first()
+        service.controlObjective(objective.objectiveId, ControlConversationObjectiveRequest(
+            OBJECTIVE_CONTROL_ADMIT, source.messageId, source.hash,
+        ))
+        for ((index, diagnostic) in listOf("baseRevision", "INVALID_TRANSITION", "STALE_REVISION").withIndex()) {
+            val result = service.submitMessage(conversationId, SubmitConversationMessageRequest(
+                "invalid-$index", requireNotNull(service.projection(conversationId)).messages.size + 1L,
+                "Continue the original requirement.", objective.objectiveId,
+            ))
+            assertEquals(ConversationOperationStatus.REJECTED, result.status)
+            assertTrue(result.diagnostic.contains(diagnostic), result.diagnostic)
+            assertTrue(requireNotNull(result.projection).commands.isEmpty())
+            assertEquals(revision, workspace.snapshot(MESSAGE_READY).projectGenesis.first { it.projectId == 1 }.revision)
+        }
+        val proposed = service.submitMessage(conversationId, SubmitConversationMessageRequest(
+            "valid-submission", requireNotNull(service.projection(conversationId)).messages.size + 1L,
+            "Continue the original requirement.", objective.objectiveId,
+        ))
+        assertEquals(ConversationOperationStatus.ADMISSION_REQUIRED, proposed.status)
+        assertEquals(revision, interpreter.contexts.last().projectGenesis?.revision)
+        assertEquals(listOf(ConversationContextEpic(3, "Outcome 1")), interpreter.contexts.last().projectEpics)
+        assertEquals(revision, workspace.snapshot(MESSAGE_READY).projectGenesis.first { it.projectId == 1 }.revision)
+        val command = requireNotNull(proposed.projection).commands.single().proposal
+        assertEquals(ConversationOperationStatus.RECORDED,
+            service.admitCommand(command.commandId, AdmitConversationCommandRequest(command.hash)).status)
+        val refreshed = compiler.compile(store.events(), conversationId, objective.objectiveId, registry.descriptors())
+        assertEquals("ARCHITECTURE", refreshed.projectGenesis?.phase)
+        assertEquals(revision.revision + 1, refreshed.projectGenesis?.revision?.revision)
+        assertTrue(refreshed.projectGenesis?.revision?.hash != revision.hash)
+        assertNull(compiler.compile(store.events(), conversationId, null, registry.descriptors()).projectGenesis)
+    }
+
     @Test
     fun `small onboarding turn admits actual context demand instead of full aperture`() = runBlocking {
         var admittedInputTokens = 0
@@ -192,6 +296,11 @@ class ConversationConductorTest {
         assertNotNull(commandView.admission)
         assertEquals(COMMAND_CORRELATED, commandView.executions.last().state)
         assertEquals("42", commandView.executions.last().downstreamId)
+        val context = ConversationContextCompiler().compile(
+            store.events(), conversationId, objective.objectiveId, listOf(capability.descriptor),
+        )
+        assertEquals(commandView.executions.last().downstreamHash, context.commandStates.single().downstreamHash)
+        assertTrue(context.commandStates.single().downstreamHash != command.hash)
     }
 
     @Test
@@ -615,6 +724,205 @@ class ConversationConductorTest {
     }
 
     @Test
+    fun `invented and assistant supplied import sources are rejected before preflight`() = runBlocking {
+        val location = "https://github.com/example/spring-boot-h2-content-lookup.git"
+        for (request in listOf(
+            "Create a Spring Boot H2 application from nothing with unit and integration tests.",
+            "Import $location-other instead.",
+            "Import \"$location-other\" instead.",
+        )) {
+            val store = TransientConversationStore()
+            val baseCapability = testCapability(CAPABILITY_ONBOARD_REPOSITORY, true, emptySet()) {
+                error("An unsupplied repository must not execute")
+            }
+            val capability = object : ConversationCapability by baseCapability {
+                override suspend fun preflight(
+                    payloadJson: String,
+                    objective: ConversationObjectiveRevision?,
+                ): ConversationCapabilityResult? = error("An unsupplied repository must not reach preflight")
+            }
+            val service = service(store, QueueInterpreter(
+                ConversationInterpretation(SPEECH_DISCUSS, "Consider $location"),
+                commandTurn(CAPABILITY_ONBOARD_REPOSITORY).copy(
+                    payloadJson = Json.encodeToString(OnboardRepositoryCapabilityPayload("GIT_URL", location, "Example")),
+                ),
+            ), capability)
+            val conversationId = requireNotNull(service.create(CreateConversationRequest("Greenfield intake")).projection)
+                .conversation.conversationId
+            service.submitMessage(conversationId, SubmitConversationMessageRequest("initial-request", 1, request))
+
+            val result = service.submitMessage(
+                conversationId,
+                SubmitConversationMessageRequest("continue-request", 3, "Continue with the original request."),
+            )
+
+            assertEquals(ConversationOperationStatus.REJECTED, result.status)
+            assertTrue(result.diagnostic.contains("GREENFIELD_LOCAL"))
+            assertTrue(requireNotNull(result.projection).commands.isEmpty())
+            assertEquals(result.diagnostic, result.projection.messages.last().content)
+        }
+    }
+
+    @Test
+    fun `previously supplied exact import sources still require admission`() = runBlocking {
+        for ((sourceType, location) in listOf(
+            "GIT_URL" to "https://example.com/acme/repository.git",
+            "LOCAL_FOLDER" to "/tmp/a repository with spaces",
+        )) {
+            val store = TransientConversationStore()
+            val executions = AtomicInteger()
+            val capability = testCapability(CAPABILITY_ONBOARD_REPOSITORY, true, emptySet()) {
+                executions.incrementAndGet()
+                ConversationCapabilityResult(true, "Onboarded.", "REPOSITORY_ONBOARDING", "1", HASH)
+            }
+            val service = service(store, QueueInterpreter(
+                ConversationInterpretation(SPEECH_DISCUSS, "Ready to propose the import."),
+                commandTurn(CAPABILITY_ONBOARD_REPOSITORY).copy(
+                    payloadJson = Json.encodeToString(OnboardRepositoryCapabilityPayload(sourceType, location, "Example")),
+                ),
+            ), capability)
+            val conversationId = requireNotNull(service.create(CreateConversationRequest("Existing import")).projection)
+                .conversation.conversationId
+            service.submitMessage(conversationId, SubmitConversationMessageRequest("source-request", 1, "Import \"$location\"."))
+
+            val proposed = service.submitMessage(
+                conversationId,
+                SubmitConversationMessageRequest("continue-request", 3, "Propose that import."),
+            )
+
+            assertEquals(ConversationOperationStatus.ADMISSION_REQUIRED, proposed.status)
+            assertEquals(0, executions.get())
+            val command = requireNotNull(proposed.projection).commands.single().proposal
+            val admitted = service.admitCommand(command.commandId, AdmitConversationCommandRequest(command.hash))
+            assertEquals(ConversationOperationStatus.RECORDED, admitted.status)
+            assertEquals(1, executions.get())
+            assertEquals(COMMAND_CORRELATED, requireNotNull(admitted.projection).commands.single().executions.last().state)
+        }
+    }
+
+    @Test
+    fun `restored unsafe imports cannot be admitted or dispatched using later source messages`() = runBlocking {
+        val location = "https://github.com/example/spring-boot-h2-content-lookup.git"
+        for (alreadyAdmitted in listOf(false, true)) {
+            val store = TransientConversationStore()
+            val capability = testCapability(CAPABILITY_ONBOARD_REPOSITORY, true, emptySet()) {
+                error("A restored unsupplied import must not execute")
+            }
+            val service = service(store, QueueInterpreter(
+                ConversationInterpretation(SPEECH_DISCUSS, "Recorded."),
+                ConversationInterpretation(SPEECH_DISCUSS, "Recorded later source."),
+            ), capability)
+            val initial = requireNotNull(service.create(CreateConversationRequest("Restored greenfield request")).projection)
+            val conversationId = initial.conversation.conversationId
+            val submitted = service.submitMessage(
+                conversationId,
+                SubmitConversationMessageRequest("original-request", 1, "Build a new product from nothing."),
+            )
+            val source = requireNotNull(submitted.projection).messages.first()
+            val command = newConversationCommand(ConversationCommandProposal(
+                commandId = 1,
+                conversationId = conversationId,
+                sourceMessageId = source.messageId,
+                sourceMessageHash = source.hash,
+                capabilityId = CAPABILITY_ONBOARD_REPOSITORY,
+                payloadJson = Json.encodeToString(OnboardRepositoryCapabilityPayload("GIT_URL", location, "Example")),
+                mutation = true,
+                proposedAt = NOW,
+                hash = "",
+            ))
+            store.appendCommand(command)
+            if (alreadyAdmitted) {
+                store.appendAdmission(newConversationAdmission(ConversationCommandAdmission(1, command.commandId, command.hash, "HUMAN", NOW, "")))
+            }
+            service.submitMessage(conversationId, SubmitConversationMessageRequest("later-source", 3, "Here is $location"))
+            val restored = service(store, QueueInterpreter(), capability)
+
+            val result = restored.admitCommand(command.commandId, AdmitConversationCommandRequest(command.hash))
+
+            assertEquals(ConversationOperationStatus.REJECTED, result.status)
+            assertTrue(result.diagnostic.contains("before this proposal"))
+            val view = requireNotNull(result.projection).commands.single()
+            assertEquals(alreadyAdmitted, view.admission != null)
+            if (alreadyAdmitted) {
+                assertEquals(COMMAND_FAILED, view.executions.single().state)
+                assertEquals(result.diagnostic, view.executions.single().diagnostic)
+            } else {
+                assertTrue(view.executions.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun `new project payloads are validated before admission without creating workspace state`() = runBlocking {
+        val workspace = WorkspaceStore()
+        val store = TransientConversationStore()
+        val payload = CreateWorkItemCapabilityPayload(
+            entityTypeId = 1,
+            title = "Spring Boot H2 Content Lookup",
+            content = "Persist Hello World at ID 1 in H2; deliver HTTP lookup and unit and integration tests.",
+        )
+        val validPayload = Json.encodeToString(payload)
+        val invalidPayload = validPayload.dropLast(1) + ",\"epicId\":null,\"storyId\":null}"
+        val service = ConversationConductorService(
+            store,
+            QueueInterpreter(
+                objectiveTurn("Build a new content service"),
+                commandTurn(CAPABILITY_CREATE_WORK_ITEM).copy(payloadJson = invalidPayload),
+                commandTurn(CAPABILITY_CREATE_WORK_ITEM).copy(payloadJson = validPayload),
+            ),
+            defaultConversationCapabilities(workspace),
+            now = { NOW },
+        )
+        val conversationId = requireNotNull(service.create(CreateConversationRequest("From nothing")).projection)
+            .conversation.conversationId
+        val proposed = requireNotNull(service.submitMessage(
+            conversationId, SubmitConversationMessageRequest("initial-goal", 1, payload.content),
+        ).projection)
+        val objective = proposed.objectives.single()
+        val source = proposed.messages.first()
+        service.controlObjective(
+            objective.objectiveId,
+            ControlConversationObjectiveRequest(OBJECTIVE_CONTROL_ADMIT, source.messageId, source.hash),
+        )
+
+        val rejected = service.submitMessage(
+            conversationId, SubmitConversationMessageRequest("invalid-project", 3, "Create the project.", objective.objectiveId),
+        )
+
+        assertEquals(ConversationOperationStatus.REJECTED, rejected.status)
+        assertTrue(rejected.diagnostic.contains("before admission"))
+        assertTrue(requireNotNull(rejected.projection).commands.isEmpty())
+        assertEquals(0, workspace.entityCount)
+
+        val corrected = service.submitMessage(
+            conversationId, SubmitConversationMessageRequest("valid-project", 5, "Propose the corrected project.", objective.objectiveId),
+        )
+        assertEquals(ConversationOperationStatus.ADMISSION_REQUIRED, corrected.status)
+        assertEquals(0, workspace.entityCount)
+        val command = requireNotNull(corrected.projection).commands.single().proposal
+        val admitted = service.admitCommand(command.commandId, AdmitConversationCommandRequest(command.hash))
+        assertEquals(ConversationOperationStatus.RECORDED, admitted.status)
+        assertEquals(1, workspace.entityCount)
+        assertEquals(payload.content, workspace.entityAt(0).content)
+        assertTrue(workspace.snapshot(com.orchard.backend.workspace.MESSAGE_READY).repositories.isEmpty())
+        assertEquals(1, service.projectWorkspaceActivity(workspace))
+        val bound = requireNotNull(service.projection(conversationId)).objectives.single()
+        assertEquals(workspace.entityAt(0).id, bound.projectId)
+        assertEquals(OBJECTIVE_READY, bound.state)
+        assertEquals(objective.outcome, bound.outcome)
+        assertEquals(objective.constraints, bound.constraints)
+        assertEquals(objective.sourceMessageHash, bound.sourceMessageHash)
+        assertEquals("ORCHARD_PROJECTION", bound.actor)
+        assertEquals(0, service.projectWorkspaceActivity(workspace))
+        assertEquals(com.orchard.backend.workspace.ProjectArchiveStatus.ARCHIVED, workspace.archiveProject(requireNotNull(bound.projectId)).status)
+        assertEquals(1, service.projectWorkspaceActivity(workspace))
+        val archivedObjective = requireNotNull(service.projection(conversationId)).objectives.single()
+        assertEquals(OBJECTIVE_CANCELLED, archivedObjective.state)
+        assertEquals(objective.sourceMessageHash, archivedObjective.sourceMessageHash)
+        assertEquals(0, service.projectWorkspaceActivity(workspace))
+    }
+
+    @Test
     fun `dispatch revalidates dependencies and paused objectives gate correlated runs`() = runBlocking {
         val store = TransientConversationStore()
         val executions = AtomicInteger()
@@ -780,6 +1088,7 @@ class ConversationConductorTest {
     private fun testCapability(
         id: String,
         mutation: Boolean,
+        allowedObjectiveStates: Set<String> = setOf(OBJECTIVE_READY, OBJECTIVE_ACTIVE),
         execute: suspend () -> ConversationCapabilityResult,
     ) = object : ConversationCapability {
         override val descriptor = ConversationCapabilityDescriptor(
@@ -787,7 +1096,7 @@ class ConversationConductorTest {
             "Test capability",
             mutation,
             "{}",
-            setOf(OBJECTIVE_READY, OBJECTIVE_ACTIVE),
+            allowedObjectiveStates,
             "TestService",
             if (mutation) "EXACT_COMMAND_HASH" else "NONE",
             "TEST_AUTHORITY",
@@ -817,12 +1126,14 @@ class ConversationConductorTest {
     private class QueueInterpreter(vararg turns: ConversationInterpretation) : ConversationInterpreter {
         private val pending = ArrayDeque(turns.toList())
         val calls = AtomicInteger()
+        val contexts = mutableListOf<ConversationContextManifest>()
 
         override suspend fun interpret(
             context: ConversationContextManifest,
             message: ConversationMessage,
         ): InterpretedConversationTurn {
             calls.incrementAndGet()
+            contexts += context
             return InterpretedConversationTurn(pending.removeFirst())
         }
     }

@@ -67,6 +67,8 @@ import com.orchard.backend.company.CompanyProjectView
 import com.orchard.backend.company.FileCompanyAuditAttemptStore
 import com.orchard.backend.company.FileCompanyControlStore
 import com.orchard.backend.conversation.ConversationConductorService
+import com.orchard.backend.conversation.ConversationContextCompiler
+import com.orchard.backend.conversation.ProjectSetupWorkflow
 import com.orchard.backend.conversation.FileConversationStore
 import com.orchard.backend.conversation.ModelConversationInterpreter
 import com.orchard.backend.conversation.conversationRoutes
@@ -128,6 +130,9 @@ import com.orchard.backend.workspace.FileCircuitProposalStore
 import com.orchard.backend.workspace.FileCircuitDispatchStore
 import com.orchard.backend.workspace.FileDesignGovernanceStore
 import com.orchard.backend.workspace.FileProjectGenesisStore
+import com.orchard.backend.workspace.FileProjectArchiveStore
+import com.orchard.backend.workspace.ProjectArchiveRequest
+import com.orchard.backend.workspace.ProjectArchiveStatus
 import com.orchard.backend.workspace.DesignGovernanceStatus
 import com.orchard.backend.workspace.ProjectGenesisStatus
 import com.orchard.backend.workspace.ProjectGenesisFirstOutcomeStatus
@@ -199,6 +204,7 @@ fun main() {
         FileDesignGovernanceStore(OrchardPaths.WORKSPACE_DIR),
         FileProjectGenesisStore(OrchardPaths.WORKSPACE_DIR),
         enforceProjectGenesis = true,
+        projectArchiveStore = FileProjectArchiveStore(OrchardPaths.WORKSPACE_DIR),
     )
     val machineCapacityMonitor = SystemMachineCapacityMonitor()
     val modelProviderCatalogStore = FileModelProviderCatalogStore(OrchardPaths.WORKSPACE_DIR)
@@ -431,6 +437,8 @@ fun main() {
             repositoryOnboarding,
             modelProviderRegistry,
         ),
+        contextCompiler = ConversationContextCompiler(workspace = workspace),
+        projectSetup = ProjectSetupWorkflow(workspace, genesisIntelligence),
     )
     val pilotService = PilotService(
         workspace,
@@ -764,7 +772,15 @@ fun Application.workspaceApi(
         if (projectReports != null) projectReportRoutes(projectReports)
         if (pilotService != null) pilotRoutes(pilotService)
         get("/api/workspace") {
-            call.respond(workspace.snapshot(MESSAGE_READY))
+            val includeArchived = when (call.request.queryParameters["includeArchived"]) {
+                null, "false" -> false
+                "true" -> true
+                else -> {
+                    call.respond(HttpStatusCode.BadRequest)
+                    return@get
+                }
+            }
+            call.respond(workspace.snapshot(MESSAGE_READY, includeArchived))
         }
         get("/api/projects/{projectId}/genesis/repository-assessment") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
@@ -1240,6 +1256,24 @@ fun Application.workspaceApi(
             }
             call.respond(status, result)
         }
+        post("/api/projects/{projectId}/archive") {
+            val projectId = call.parameters["projectId"]?.toIntOrNull()
+            val request = runCatching { call.receive<ProjectArchiveRequest>() }.getOrNull()
+            if (projectId == null || projectId <= 0 || request == null) {
+                call.respond(HttpStatusCode.BadRequest)
+                return@post
+            }
+            val result = workspace.archiveProject(projectId, request.actor)
+            val status = when (result.status) {
+                ProjectArchiveStatus.ARCHIVED -> HttpStatusCode.Created
+                ProjectArchiveStatus.ALREADY_ARCHIVED -> HttpStatusCode.OK
+                ProjectArchiveStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+                ProjectArchiveStatus.ACTIVE_WORK -> HttpStatusCode.Conflict
+                ProjectArchiveStatus.INVALID_ACTOR -> HttpStatusCode.BadRequest
+                ProjectArchiveStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
+            }
+            call.respond(status, result)
+        }
         post("/api/projects/{projectId}/genesis") {
             val projectId = call.parameters["projectId"]?.toIntOrNull()
             val request = runCatching { call.receive<ProjectGenesisSubmission>() }.getOrNull()
@@ -1277,7 +1311,7 @@ fun Application.workspaceApi(
                 GenesisProposalFailureResponse(
                     status = result.status.name,
                     diagnostic = result.diagnostic,
-                    retryable = result.status !in setOf(
+                    retryable = !result.recoveryExhausted && result.status !in setOf(
                         GenesisProposalStatus.PROJECT_NOT_FOUND,
                         GenesisProposalStatus.PHASE_NOT_PROPOSABLE,
                     ),
@@ -1578,6 +1612,7 @@ fun Application.workspaceApi(
             val status = when (result.status) {
                 RepositoryBindStatus.BOUND -> HttpStatusCode.OK
                 RepositoryBindStatus.PROJECT_NOT_FOUND -> HttpStatusCode.NotFound
+                RepositoryBindStatus.PROJECT_ARCHIVED -> HttpStatusCode.Conflict
                 RepositoryBindStatus.INVALID_REPOSITORY -> HttpStatusCode.UnprocessableEntity
                 RepositoryBindStatus.STORAGE_UNAVAILABLE -> HttpStatusCode.ServiceUnavailable
             }
@@ -1599,6 +1634,7 @@ fun Application.workspaceApi(
                 WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
                 WorkflowStartStatus.COORDINATE_ADMISSION_BLOCKED -> HttpStatusCode.UnprocessableEntity
                 WorkflowStartStatus.STAGED_PLAN_BLOCKED,
+                WorkflowStartStatus.PROJECT_ARCHIVED,
                 WorkflowStartStatus.DESIGN_NOT_ADMITTED,
                 WorkflowStartStatus.PROJECT_GENESIS_NOT_ADMITTED -> HttpStatusCode.Conflict
                 WorkflowStartStatus.ALREADY_STARTED -> HttpStatusCode.Conflict
@@ -1622,6 +1658,7 @@ fun Application.workspaceApi(
                 WorkflowStartStatus.WORK_DEFINITION_NOT_READY,
                 WorkflowStartStatus.COORDINATE_ADMISSION_BLOCKED -> HttpStatusCode.UnprocessableEntity
                 WorkflowStartStatus.ALREADY_STARTED,
+                WorkflowStartStatus.PROJECT_ARCHIVED,
                 WorkflowStartStatus.STAGED_PLAN_BLOCKED,
                 WorkflowStartStatus.DESIGN_NOT_ADMITTED,
                 WorkflowStartStatus.PROJECT_GENESIS_NOT_ADMITTED -> HttpStatusCode.Conflict

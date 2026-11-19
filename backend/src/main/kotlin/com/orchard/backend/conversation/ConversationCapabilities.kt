@@ -22,8 +22,10 @@ import com.orchard.backend.workspace.ACTION_CREATE
 import com.orchard.backend.workspace.DEFAULT_DELIVERY_WORKFLOW_ID
 import com.orchard.backend.workspace.ENTITY_EPIC
 import com.orchard.backend.workspace.GENESIS_READY
+import com.orchard.backend.workspace.GENESIS_ARCHITECTURE
 import com.orchard.backend.workspace.ProjectGenesisStatus
 import com.orchard.backend.workspace.ProjectGenesisSubmission
+import com.orchard.backend.workspace.ProjectArchiveStatus
 import com.orchard.backend.workspace.RepositoryBindStatus
 import com.orchard.backend.workspace.RepositoryOnboardingRequest
 import com.orchard.backend.workspace.RepositoryOnboardingService
@@ -43,6 +45,7 @@ const val CAPABILITY_REQUEST_STATUS = "REQUEST_STATUS"
 const val CAPABILITY_INSPECT_REPOSITORY = "INSPECT_REPOSITORY"
 const val CAPABILITY_BIND_REPOSITORY = "BIND_REPOSITORY"
 const val CAPABILITY_CREATE_WORK_ITEM = "CREATE_WORK_ITEM"
+const val CAPABILITY_ARCHIVE_PROJECT = "ARCHIVE_PROJECT"
 const val CAPABILITY_GENERATE_WORK_DEFINITION = "GENERATE_WORK_DEFINITION"
 const val CAPABILITY_ACCEPT_WORK_DEFINITION = "ACCEPT_WORK_DEFINITION"
 const val CAPABILITY_GENERATE_STAGED_PLAN = "GENERATE_STAGED_PLAN"
@@ -59,7 +62,7 @@ const val CAPABILITY_INSPECT_MODEL_CONFIGURATION = "INSPECT_MODEL_CONFIGURATION"
 const val CAPABILITY_REGISTER_MODEL = "REGISTER_MODEL"
 const val CAPABILITY_ASSIGN_MODEL_PROFILE = "ASSIGN_MODEL_PROFILE"
 
-@Serializable data class ProjectCapabilityPayload(val projectId: Int)
+@Serializable data class ProjectCapabilityPayload(val projectId: Int, val genesisHash: String? = null)
 @Serializable data class RepositoryCapabilityPayload(val projectId: Int, val path: String)
 @Serializable data class WorkItemCapabilityPayload(val workItemId: Int)
 @Serializable data class ScopeCapabilityPayload(val scopeId: Int)
@@ -72,6 +75,7 @@ const val CAPABILITY_ASSIGN_MODEL_PROFILE = "ASSIGN_MODEL_PROFILE"
     val storyId: Int = 0,
     val title: String,
     val content: String = "",
+    val firstOutcomeGenesisHash: String? = null,
 )
 @Serializable data class AdvanceProjectGenesisCapabilityPayload(
     val projectId: Int,
@@ -110,6 +114,34 @@ fun defaultConversationCapabilities(
     modelProviderRegistry: ModelProviderRegistry? = null,
     json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = false },
 ): ConversationCapabilityRegistry = ConversationCapabilityRegistry(listOfNotNull(
+    object : ConversationCapability {
+        override val descriptor = descriptor(
+            CAPABILITY_ARCHIVE_PROJECT,
+            "Archive one project after all its workflows have completed or been cancelled. Hide it from active workspace projections without deleting repository files or historical authority.",
+            mutation = true,
+            payloadSchema = "{\"projectId\": positive integer}",
+            owningService = "WorkspaceStore",
+            resultType = "PROJECT_ARCHIVE",
+            idempotencyStrategy = "PROJECT_SINGLETON",
+        )
+
+        override suspend fun execute(payloadJson: String, objective: ConversationObjectiveRevision?, command: ConversationCommandProposal): ConversationCapabilityResult {
+            val payload = json.decodeFromString<ProjectCapabilityPayload>(payloadJson)
+            require(payload.projectId > 0 && (objective?.projectId == null || objective.projectId == payload.projectId)) {
+                "Project archival crossed the selected objective's project authority."
+            }
+            val result = workspace.archiveProject(payload.projectId, "HUMAN", commandReference(command))
+            if (result.status !in setOf(ProjectArchiveStatus.ARCHIVED, ProjectArchiveStatus.ALREADY_ARCHIVED)) {
+                return failure("Project was not archived: ${result.status}. ${result.diagnostic}", "PROJECT_ARCHIVE", payload.projectId.toString())
+            }
+            return success(
+                "Project ${payload.projectId} is archived; source files and history are preserved.",
+                "PROJECT_ARCHIVE",
+                payload.projectId.toString(),
+                json.encodeToString(requireNotNull(result.archive)),
+            )
+        }
+    },
     object : ConversationCapability {
         override val descriptor = descriptor(
             CAPABILITY_REQUEST_STATUS,
@@ -406,7 +438,7 @@ fun defaultConversationCapabilities(
     object : ConversationCapability {
         override val descriptor = descriptor(
             CAPABILITY_CREATE_WORK_ITEM,
-            "Create one typed project, epic, story, task, or bug through workspace hierarchy validation.",
+            "Create one project (entityTypeId 1), epic (2), story (3), task (4), or bug (5) through workspace hierarchy validation. A new project uses projectId 0 and needs no existing repository; content preserves its product intent. Hierarchy IDs must be integers; omit unused IDs or use 0, never null.",
             mutation = true,
             payloadSchema = "{\"entityTypeId\": 1..5, \"projectId\": integer, \"epicId\": integer, \"storyId\": integer, \"title\": string, \"content\": string}",
             states = executableStates,
@@ -414,6 +446,29 @@ fun defaultConversationCapabilities(
             resultType = "WORKSPACE_ENTITY",
             idempotencyStrategy = "COMMAND_REFERENCE",
         )
+
+        private fun decodePayload(payloadJson: String): CreateWorkItemCapabilityPayload =
+            json.decodeFromString<CreateWorkItemCapabilityPayload>(payloadJson).also { payload ->
+                require(payload.entityTypeId in 1..5 && payload.title.isNotBlank())
+            }
+
+        private fun validateFirstOutcome(payload: CreateWorkItemCapabilityPayload) {
+            val hash = payload.firstOutcomeGenesisHash ?: return
+            val genesis = workspace.snapshot(MESSAGE_READY).projectGenesis.singleOrNull { it.projectId == payload.projectId }
+            require(payload.entityTypeId == ENTITY_EPIC && genesis?.phase == GENESIS_ARCHITECTURE &&
+                genesis.revision?.hash == hash &&
+                workspace.entities().none { it.type == ENTITY_EPIC && it.parentId == payload.projectId }) {
+                "The first-outcome setup transition is stale or no longer permitted."
+            }
+        }
+
+        override suspend fun preflight(
+            payloadJson: String,
+            objective: ConversationObjectiveRevision?,
+        ): ConversationCapabilityResult? {
+            synchronized(workspace) { validateFirstOutcome(decodePayload(payloadJson)) }
+            return null
+        }
 
         override suspend fun reconcile(
             command: ConversationCommandProposal,
@@ -423,12 +478,12 @@ fun defaultConversationCapabilities(
             ?.let { success("Recovered workspace entity ${it.id}: ${it.title}.", "WORKSPACE_ENTITY", it.id.toString(), json.encodeToString(it)) }
 
         override suspend fun execute(payloadJson: String, objective: ConversationObjectiveRevision?, command: ConversationCommandProposal): ConversationCapabilityResult {
-            val payload = json.decodeFromString<CreateWorkItemCapabilityPayload>(payloadJson)
-            require(payload.entityTypeId in 1..5 && payload.title.isNotBlank())
+            val payload = decodePayload(payloadJson)
             require(objective?.projectId == null || payload.projectId == objective.projectId) {
                 "Workspace creation crossed the selected objective's project authority."
             }
             val created = synchronized(workspace) {
+                validateFirstOutcome(payload)
                 workspace.beginBatch()
                 try {
                     val accepted = workspace.applyIntent(DocumentIntent(
@@ -575,6 +630,19 @@ fun defaultConversationCapabilities(
             idempotencyStrategy = "COMMAND_REFERENCE",
         )
 
+        override suspend fun preflight(
+            payloadJson: String,
+            objective: ConversationObjectiveRevision?,
+        ): ConversationCapabilityResult? {
+            val payload = json.decodeFromString<AdvanceProjectGenesisCapabilityPayload>(payloadJson)
+            require(payload.projectId > 0 && (objective?.projectId == null || objective.projectId == payload.projectId)) {
+                "Genesis mutation crossed the selected objective's project authority."
+            }
+            val rejection = workspace.validateProjectGenesisSubmission(payload.projectId, payload.submission)
+            require(rejection == null) { "Project Genesis submission rejected: $rejection." }
+            return null
+        }
+
         override suspend fun reconcile(
             command: ConversationCommandProposal,
             objective: ConversationObjectiveRevision?,
@@ -628,7 +696,7 @@ fun defaultConversationCapabilities(
             require(payload.projectId > 0 && (objective?.projectId == null || objective.projectId == payload.projectId)) {
                 "Genesis admission crossed the selected objective's project authority."
             }
-            val result = workspace.admitProjectGenesis(payload.projectId, commandReference(command))
+            val result = workspace.admitProjectGenesis(payload.projectId, commandReference(command), payload.genesisHash)
             if (result.status != ProjectGenesisStatus.ADMITTED) {
                 return failure("Project genesis was not admitted: ${result.status}.", "PROJECT_GENESIS", payload.projectId.toString())
             }
@@ -917,19 +985,10 @@ fun defaultConversationCapabilities(
                 idempotencyStrategy = "PROJECT_SINGLETON",
             )
 
-            override suspend fun reconcile(
-                command: ConversationCommandProposal,
-                objective: ConversationObjectiveRevision?,
-            ): ConversationCapabilityResult? {
-                val payload = json.decodeFromString<ProjectCapabilityPayload>(command.payloadJson)
-                return companyControl?.projectViews()?.singleOrNull { it.projectId == payload.projectId }
-                    ?.let { success("Recovered company circuit for project ${it.projectId}.", "COMPANY_PROJECT", it.projectId.toString(), json.encodeToString(it)) }
-            }
-
             override suspend fun execute(payloadJson: String, objective: ConversationObjectiveRevision?, command: ConversationCommandProposal): ConversationCapabilityResult {
                 val payload = json.decodeFromString<ProjectCapabilityPayload>(payloadJson)
                 require(payload.projectId > 0 && (objective?.projectId == null || objective.projectId == payload.projectId))
-                val result = service.start(payload.projectId)
+                val result = service.start(payload.projectId, payload.genesisHash)
                 if (result.status !in setOf(CompanyCircuitStatus.STARTED, CompanyCircuitStatus.ALREADY_STARTED) || result.project == null) {
                     return failure("Company circuit did not start: ${result.status}. ${result.diagnostic}", "PROJECT", payload.projectId.toString())
                 }

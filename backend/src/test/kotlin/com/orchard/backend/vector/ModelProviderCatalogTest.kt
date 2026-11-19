@@ -32,6 +32,54 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ModelProviderCatalogTest {
     @Test
+    fun `Genesis owns invalid-output recovery instead of an implicit plain retry`() = runTest {
+        var requests = 0
+        val engine = MockEngine {
+            requests++
+            respond("""{"response":"not JSON","done":true}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single(), engine = engine)
+        try {
+            val result = provider.executeGenesisProposal("Classify the project.", 128, 4_096,
+                GenesisProposalOutputDomain("CLASSIFICATION", assessmentOnly = false, evidenceHashes = emptyMap()))
+            assertEquals("not JSON", result.text)
+            assertEquals(1, requests)
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test
+    fun `final-channel fallback accounting hashes the actual serialized input`() = runTest {
+        var wirePrompt = ""
+        val engine = MockEngine { request ->
+            wirePrompt = Json.parseToJsonElement((request.body as TextContent).text).jsonObject.getValue("prompt").jsonPrimitive.content
+            respond("""{"response":"{}","done":true}""",
+                headers = headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val catalog = defaultLocalModelProviderCatalog()
+        val provider = CatalogModelProvider(catalog.endpoints.single(), catalog.bindings.single().copy(model = "gpt-oss:120b"), engine = engine)
+        try {
+            val prompt = "Classify the project."
+            val result = provider.executeGenesisProposal(prompt, 128, 4_096,
+                GenesisProposalOutputDomain("CLASSIFICATION", assessmentOnly = false, evidenceHashes = emptyMap()))
+            val profile = provider.bindingProfile().let {
+                it.copy(configuration = it.configuration + ("input.format" to MODEL_INPUT_FORMAT_GPT_OSS_HARMONY_FINAL))
+            }
+            val accounting = accountModelInput(prompt, profile)
+            assertTrue(wirePrompt.endsWith("<|start|>assistant<|channel|>final<|message|>"))
+            assertTrue(accounting.capacityEstablished)
+            assertEquals(com.orchard.backend.workspace.stagedPlanHash(wirePrompt), accounting.serializedInputHash)
+            assertEquals(wirePrompt.encodeToByteArray().size, accounting.serializedInputBytes)
+            assertEquals(accounting.totalTokens, result.promptTokens)
+        } finally {
+            provider.close()
+        }
+    }
+
+    @Test
     fun `GPT OSS onboarding enables low reasoning without leaking thinking into output or changing analysis policy`() = runTest {
         val requests = mutableListOf<kotlinx.serialization.json.JsonObject>()
         val engine = MockEngine { request ->
@@ -48,8 +96,21 @@ class ModelProviderCatalogTest {
                 GenesisProposalOutputDomain("CLASSIFICATION", assessmentOnly = false, evidenceHashes = emptyMap()))
             assertEquals("low", requests.single().getValue("think").jsonPrimitive.content)
             assertEquals("{}", result.text)
+            provider.executeGenesisProposal("Classify existing work.", 128, 4_096,
+                GenesisProposalOutputDomain("CLASSIFICATION", assessmentOnly = false, evidenceHashes = emptyMap(),
+                    outputMode = GenesisOutputMode.JSON_OBJECT))
+            assertEquals("json", requests.last().getValue("format").jsonPrimitive.content)
+            assertEquals("low", requests.last().getValue("think").jsonPrimitive.content)
+            provider.executeGenesisProposal("Classify existing work.", 128, 4_096,
+                GenesisProposalOutputDomain("CLASSIFICATION", assessmentOnly = false, evidenceHashes = emptyMap(),
+                    outputMode = GenesisOutputMode.NATIVE_SCHEMA_FINAL))
+            val finalRequest = requests.last()
+            assertTrue(finalRequest.getValue("prompt").jsonPrimitive.content.endsWith("<|start|>assistant<|channel|>final<|message|>"))
+            assertEquals("low", finalRequest.getValue("think").jsonPrimitive.content)
+            assertEquals("object", finalRequest.getValue("format").jsonObject.getValue("type").jsonPrimitive.content)
             provider.executeRepositoryAnalysis("Analyze admitted work.", 128, 4_096)
             assertEquals("false", requests.last().getValue("think").jsonPrimitive.content)
+            assertTrue(requests.last().getValue("prompt").jsonPrimitive.content.endsWith("<|start|>assistant"))
         } finally {
             provider.close()
         }
@@ -79,6 +140,7 @@ class ModelProviderCatalogTest {
                     GenesisProposalOutputDomain(
                         phase, assessmentOnly = phase == "READY",
                         evidenceHashes = if (index == 0) mapOf("README.md" to "a".repeat(64)) else emptyMap(),
+                        allowedGreenfieldToolchains = if (phase == "BLUEPRINT") setOf("gradle", "node") else emptySet(),
                     ))
                 val schema = requests.last().getValue("format").jsonObject
                 val submission = schema.getValue("properties").jsonObject.getValue("submission").jsonObject
@@ -88,7 +150,18 @@ class ModelProviderCatalogTest {
                     if (field !in fields + setOf("baseRevision", "baseHash") && !(phase == "EXPERIENCE" && field == "productIntent")) {
                         assertEquals("null", value.jsonObject.getValue("type").jsonPrimitive.content)
                     }
+                    if (phase == "BLUEPRINT") {
+                        val toolchain = submission.getValue("properties").jsonObject.getValue("blueprint").jsonObject
+                            .getValue("properties").jsonObject.getValue("toolchain").jsonObject
+                        assertEquals(setOf("gradle", "node"), toolchain.getValue("enum").jsonArray.map { it.jsonPrimitive.content }.toSet())
+                    }
                 }
+                provider.executeGenesisProposal("Use the existing repository's toolchain.", 128, 4_096,
+                    GenesisProposalOutputDomain("BLUEPRINT", assessmentOnly = false, evidenceHashes = emptyMap()))
+                val importedToolchain = requests.last().getValue("format").jsonObject.getValue("properties").jsonObject
+                    .getValue("submission").jsonObject.getValue("properties").jsonObject.getValue("blueprint").jsonObject
+                    .getValue("properties").jsonObject.getValue("toolchain").jsonObject
+                assertTrue("enum" !in importedToolchain)
                 val evidenceProperties = schema.getValue("properties").jsonObject.getValue("repositoryClaims").jsonObject
                     .getValue("items").jsonObject.getValue("properties").jsonObject
                 for (field in listOf("support", "defeaters")) {

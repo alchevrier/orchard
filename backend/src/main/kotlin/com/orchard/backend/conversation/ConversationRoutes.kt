@@ -70,6 +70,25 @@ fun Route.conversationRoutes(conductor: ConversationConductorService) {
         val result = conductor.controlObjective(objectiveId, request)
         call.respond(conversationStatus(result.status), result.toApiResponse())
     }
+    get("/api/conversation-objectives/{objectiveId}/setup") {
+        val objectiveId = call.parameters["objectiveId"]?.toLongOrNull()
+        if (objectiveId == null || objectiveId <= 0) {
+            call.respond(HttpStatusCode.BadRequest)
+            return@get
+        }
+        val state = conductor.projectSetupState(objectiveId)
+        if (state == null) call.respond(HttpStatusCode.NotFound) else call.respond(state)
+    }
+    post("/api/conversation-objectives/{objectiveId}/continue") {
+        val objectiveId = call.parameters["objectiveId"]?.toLongOrNull()
+        val request = runCatching { call.receive<ContinueProjectSetupRequest>() }.getOrNull()
+        if (objectiveId == null || objectiveId <= 0 || request == null) {
+            call.respond(HttpStatusCode.BadRequest)
+            return@post
+        }
+        val result = conductor.continueProjectSetup(objectiveId, request.actor)
+        call.respond(conversationStatus(result.status), result.toApiResponse())
+    }
 }
 
 private fun conversationStatus(status: ConversationOperationStatus): HttpStatusCode = when (status) {

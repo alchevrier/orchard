@@ -13,17 +13,21 @@ import com.orchard.backend.vector.ModelProfileResolver
 import com.orchard.backend.vector.ModelProvider
 import com.orchard.backend.vector.estimateModelTokens
 import com.orchard.backend.vector.modelBindingFingerprint
+import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.RUN_STATE_CANCELLED
 import com.orchard.backend.workspace.RUN_STATE_DONE
 import com.orchard.backend.workspace.RUN_STATE_EVIDENCE_BLOCKED
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.ProjectGenesisView
+import com.orchard.backend.workspace.ENTITY_EPIC
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -188,7 +192,12 @@ data class ConversationContextManifest(
     val summaries: List<ConversationSummaryRevision>,
     val capabilities: List<ConversationCapabilityDescriptor>,
     val conversationTitle: String = "",
+    val projectGenesis: ProjectGenesisView? = null,
+    val projectEpics: List<ConversationContextEpic> = emptyList(),
 )
+
+@Serializable
+data class ConversationContextEpic(val id: Int, val title: String)
 
 @Serializable
 data class ConversationContextCommand(
@@ -200,6 +209,7 @@ data class ConversationContextCommand(
     val state: String,
     val downstreamType: String? = null,
     val downstreamId: String? = null,
+    val downstreamHash: String? = null,
 )
 
 @Serializable
@@ -347,7 +357,18 @@ class ModelConversationInterpreter(
             Select only a listed speech act and capability. Never invent IDs, routes, shell commands, authority, or admission.
             Use PROPOSE_DOMAIN_ACTION when the user directly requests a listed capability. A domain action does not require a separate objective; set objective to null unless the user explicitly proposes one.
             A credential-free HTTP(S) Git URL is sufficient for ONBOARD_REPOSITORY: preserve it exactly as location, use source GIT_URL, derive projectTitle from the repository name, and use projectId 0 when no existing project is identified.
-            A valid onboarding response has this exact outer shape: {"speechAct":"PROPOSE_DOMAIN_ACTION","response":"Proposing repository onboarding.","objective":null,"capabilityId":"ONBOARD_REPOSITORY","payloadJson":"{\"source\":\"GIT_URL\",\"location\":\"https://github.com/example/repository\",\"projectTitle\":\"repository\",\"projectId\":0}","commandId":null,"commandHash":null}
+            ONBOARD_REPOSITORY imports an existing source supplied by the user. Never invent a URL or local path, copy an example as a real source, or use onboarding to create a product from nothing.
+            A valid onboarding response has this exact outer shape: {"speechAct":"PROPOSE_DOMAIN_ACTION","response":"Proposing repository onboarding.","objective":null,"capabilityId":"ONBOARD_REPOSITORY","payloadJson":"{\"source\":\"GIT_URL\",\"location\":\"<exact user-supplied Git URL>\",\"projectTitle\":\"repository\",\"projectId\":0}","commandId":null,"commandHash":null}
+            For a new product without an existing source and without a selected admitted objective, propose a bounded objective with projectId null, not 0. Keep all requested behavior and verification requirements in its outcome and constraints. If the selected objective is already READY or ACTIVE, continue it instead of proposing a duplicate objective.
+            Once that objective is admitted, propose CREATE_WORK_ITEM with entityTypeId 1, projectId 0, the new project title, and its complete product intent as content. This creates project metadata, not application files.
+            A valid project payloadJson is "{\"entityTypeId\":1,\"projectId\":0,\"epicId\":0,\"storyId\":0,\"title\":\"<new project title>\",\"content\":\"<complete requested product behavior and verification>\"}". Hierarchy IDs are integers; omit unused IDs or use 0, never null.
+            After project creation, Orchard projects the correlated WORKSPACE_ENTITY ID onto the existing unbound objective without changing its admitted outcome or constraints. Use that objective's projectId for subsequent project-scoped actions; do not propose a duplicate project or objective.
+            Then use INSPECT_PROJECT_GENESIS and ADVANCE_PROJECT_GENESIS for the legal GREENFIELD_LOCAL phases. After genesis admission, START_COMPANY owns repository materialization from the admitted blueprint and governed delivery. Do not ask the user to prepare a repository, implementation, or tests.
+            projectGenesis and projectEpics are fresh authority for the selected objective's project; prefer them over historical messages and command results. Use the current revision.revision and revision.hash as submission.baseRevision and submission.baseHash; for CLASSIFICATION without a revision use baseRevision 0 and baseHash null.
+            Advance only the current phase: CLASSIFICATION needs classification and productIntent; EXPERIENCE needs a complete experience; ARCHITECTURE needs components, decisions and an existing firstEpicId; BLUEPRINT needs a repository blueprint. Never submit experience fields during ARCHITECTURE.
+            When ARCHITECTURE has no projectEpics, first propose CREATE_WORK_ITEM with entityTypeId 2 and the selected projectId, choosing the first outcome from the original requirement. Never invent an epic ID or ask the user to design the outcome.
+            The greenfield local materializer supports Gradle, Cargo and Node, not Maven. Preserve all requested verification in the blueprint. At ADMISSION use ADMIT_PROJECT_GENESIS; at READY use START_COMPANY. Do not repeat inspection when fresh project authority already supplies the needed state.
+            A correlated PROJECT_GENESIS_REVISION downstreamHash is the recorded genesis hash for the next submission's baseHash. It is not the commandHash. Never invent revision hashes.
             A valid objective response has this exact outer shape: {"speechAct":"PROPOSE_OBJECTIVE","response":"Proposing a bounded objective.","objective":{"projectId":5,"title":"Prevent background model starvation","outcome":"Interactive work gets a bounded opportunity before background retry.","constraints":["Preserve resource safety"],"priority":90,"dependencyObjectiveIds":[]},"capabilityId":null,"payloadJson":null,"commandId":null,"commandHash":null}
             When the user supplies a project ID, title, and outcome for a new objective, copy them into the nested objective object. Never return PROPOSE_OBJECTIVE with objective set to null.
             The first output character must be { and the last output character must be }. Do not emit analysis or reasoning.
@@ -358,7 +379,10 @@ class ModelConversationInterpreter(
     }
 }
 
-class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
+class ConversationContextCompiler(
+    private val maxRecentMessages: Int = 24,
+    private val workspace: WorkspaceStore? = null,
+) {
     fun compile(
         events: List<ConversationEvent>,
         conversationId: Long,
@@ -369,6 +393,16 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
         val conversation = events.mapNotNull { it.conversation }.single { it.conversationId == conversationId }
         val messages = events.mapNotNull { it.message }.filter { it.conversationId == conversationId }
         val objectives = latestObjectives(events, conversationId)
+        val projectId = objectives.singleOrNull { it.objectiveId == selectedObjectiveId }?.projectId
+        val genesis = if (projectId != null) {
+            workspace?.snapshot(MESSAGE_READY)?.projectGenesis?.singleOrNull { it.projectId == projectId }
+        } else null
+        val epics = if (genesis != null && workspace != null) {
+            (0 until workspace.entityCount).map(workspace::entityAt)
+                .filter { it.type == ENTITY_EPIC && it.parentId == projectId }
+                .takeLast(32)
+                .map { ConversationContextEpic(it.id, it.title) }
+        } else emptyList()
         val commands = events.mapNotNull { it.command }.filter { it.conversationId == conversationId }
         val admissions = events.mapNotNull { it.admission }.associateBy { it.commandId }
         val executions = events.mapNotNull { it.execution }.groupBy { it.commandId }
@@ -391,6 +425,7 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
                     last?.state ?: COMMAND_PROPOSED,
                     last?.downstreamType,
                     last?.downstreamId,
+                    last?.downstreamHash,
                 )
             }.takeLast(32),
             summaries = if (isolateConversationHistory) emptyList() else events.mapNotNull { it.summary }
@@ -399,6 +434,8 @@ class ConversationContextCompiler(private val maxRecentMessages: Int = 24) {
                 .map { (_, revisions) -> revisions.maxBy { it.revision } },
             capabilities = capabilities,
             conversationTitle = conversation.title,
+            projectGenesis = genesis,
+            projectEpics = epics,
         )
     }
 }
@@ -413,9 +450,130 @@ class ConversationConductorService(
     private val capabilities: ConversationCapabilityRegistry,
     private val contextCompiler: ConversationContextCompiler = ConversationContextCompiler(),
     private val now: () -> String = { Instant.now().toString() },
+    private val projectSetup: ProjectSetupWorkflow? = null,
 ) {
     private val authorityLock = Any()
     private val objectiveLocks = ConcurrentHashMap<Long, Mutex>()
+    private val setupLocks = ConcurrentHashMap<Long, Mutex>()
+
+    fun projectSetupState(objectiveId: Long): ProjectSetupState? = synchronized(authorityLock) {
+        val workflow = projectSetup ?: return@synchronized null
+        val events = store.events()
+        val objectives = latestObjectives(events)
+        val objective = objectives.singleOrNull { it.objectiveId == objectiveId } ?: return@synchronized null
+        val state = workflow.state(objective.projectId)
+        if (objective.state !in setOf(OBJECTIVE_READY, OBJECTIVE_ACTIVE)) {
+            return@synchronized state.copy(status = ProjectSetupStatus.BLOCKED,
+                diagnostic = "Objective $objectiveId is ${objective.state}; setup requires an admitted, unpaused objective.")
+        }
+        if (objective.dependencyObjectiveIds.any { dependency ->
+            objectives.singleOrNull { it.objectiveId == dependency }?.state != OBJECTIVE_COMPLETED
+        }) {
+            return@synchronized state.copy(status = ProjectSetupStatus.BLOCKED,
+                diagnostic = "Objective dependencies must complete before project setup continues.")
+        }
+        if (state.status != ProjectSetupStatus.READY) return@synchronized state
+        val projectObjectives = objectives.filter { it.projectId == objective.projectId }.mapTo(hashSetOf()) { it.objectiveId }
+        val executions = events.mapNotNull { it.execution }.groupBy { it.commandId }
+        val pending = events.mapNotNull { it.command }.firstOrNull { command ->
+            val execution = executions[command.commandId].orEmpty().lastOrNull()
+            command.objectiveId in projectObjectives && command.mutation &&
+                execution?.state !in setOf(COMMAND_CORRELATED, COMMAND_REJECTED) &&
+                (execution?.state != COMMAND_FAILED || workflow.isCurrentCommandBasis(state, command))
+        }
+        if (pending != null) {
+            val execution = executions[pending.commandId].orEmpty().lastOrNull()
+            return@synchronized state.copy(
+                status = when (execution?.state) {
+                    COMMAND_FAILED -> ProjectSetupStatus.BLOCKED
+                    COMMAND_ADMITTED, COMMAND_DISPATCHED -> ProjectSetupStatus.DISPATCHING
+                    else -> ProjectSetupStatus.AWAITING_ADMISSION
+                },
+                commandId = pending.commandId,
+                commandHash = pending.hash,
+                diagnostic = execution?.diagnostic.orEmpty().ifBlank {
+                    "Resolve existing command ${pending.commandId} before proposing another setup transition."
+                },
+            )
+        }
+        if (state.step?.modelBacked == true) {
+            val basis = workflow.generationBasisHash(objective)
+            val exhausted = events.mapNotNull { it.activity }.lastOrNull {
+                it.objectiveId == objectiveId && it.authorityType == "PROJECT_SETUP_GENERATION_BLOCK" && it.authorityHash == basis
+            }
+            if (exhausted != null) return@synchronized state.copy(status = ProjectSetupStatus.BLOCKED, diagnostic = exhausted.summary)
+        }
+        state
+    }
+
+    suspend fun continueProjectSetup(objectiveId: Long, actor: String): ConversationOperationResult {
+        val workflow = projectSetup ?: return ConversationOperationResult(
+            ConversationOperationStatus.REJECTED, diagnostic = "Project setup coordination is unavailable.",
+        )
+        if (actor.isBlank()) return ConversationOperationResult(ConversationOperationStatus.INVALID_REQUEST)
+        val objective = synchronized(authorityLock) {
+            latestObjectives(store.events()).singleOrNull { it.objectiveId == objectiveId }
+        } ?: return ConversationOperationResult(ConversationOperationStatus.NOT_FOUND)
+        val lock = setupLocks.computeIfAbsent(objective.projectId?.toLong() ?: -objectiveId) { Mutex() }
+        return lock.withLock {
+            val state = projectSetupState(objectiveId)
+                ?: return@withLock ConversationOperationResult(ConversationOperationStatus.NOT_FOUND)
+            if (state.status != ProjectSetupStatus.READY) {
+                return@withLock ConversationOperationResult(
+                    when (state.status) {
+                        ProjectSetupStatus.AWAITING_ADMISSION -> ConversationOperationStatus.ADMISSION_REQUIRED
+                        ProjectSetupStatus.HANDED_OFF -> ConversationOperationStatus.ALREADY_RECORDED
+                        else -> ConversationOperationStatus.REJECTED
+                    },
+                    projection(objective.conversationId),
+                    state.diagnostic,
+                )
+            }
+            val currentObjective = synchronized(authorityLock) {
+                latestObjectives(store.events()).single { it.objectiveId == objectiveId }
+            }
+            if (currentObjective.projectId != objective.projectId || currentObjective.conversationId != objective.conversationId) {
+                return@withLock ConversationOperationResult(ConversationOperationStatus.REJECTED,
+                    projection(currentObjective.conversationId), "Objective ownership changed; continue again from its current project.")
+            }
+            val recorded = synchronized(authorityLock) {
+                val sequence = store.events().count { it.message?.conversationId == objective.conversationId } + 1L
+                appendUserMessage(objective.conversationId, SubmitConversationMessageRequest(
+                    "project-setup:$objectiveId:$sequence", sequence, "Continue project setup.",
+                    objectiveId, actor,
+                ))
+            }
+            if (recorded.status != ConversationOperationStatus.RECORDED) return@withLock recorded
+            val source = requireNotNull(recorded.projection).messages.last()
+            val original = synchronized(authorityLock) {
+                store.events().mapNotNull { it.message }.singleOrNull {
+                    it.messageId == currentObjective.sourceMessageId && it.hash == currentObjective.sourceMessageHash && it.role == MESSAGE_ROLE_USER
+                }
+            }
+            if (original == null) {
+                val diagnostic = "The admitted objective's original user requirement could not be resolved."
+                appendAssistant(source.conversationId, source, objectiveId, diagnostic)
+                return@withLock ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(source.conversationId), diagnostic)
+            }
+            val proposal = workflow.propose(currentObjective, original.content)
+            if (synchronized(authorityLock) { latestObjectives(store.events()).single { it.objectiveId == objectiveId }.hash } != currentObjective.hash) {
+                val diagnostic = "Objective authority changed while project setup was preparing its next transition."
+                appendAssistant(source.conversationId, source, objectiveId, diagnostic)
+                return@withLock ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(source.conversationId), diagnostic)
+            }
+            when (proposal) {
+                is ProjectSetupProposal.Blocked -> {
+                    proposal.exhaustedBasisHash?.let { basis ->
+                        appendActivity(source.conversationId, objectiveId, ACTIVITY_ATTENTION, proposal.diagnostic,
+                            "PROJECT_SETUP_GENERATION_BLOCK", objectiveId.toString(), basis)
+                    }
+                    appendAssistant(source.conversationId, source, objectiveId, proposal.diagnostic)
+                    ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(source.conversationId), proposal.diagnostic)
+                }
+                is ProjectSetupProposal.Proposed -> proposeOrExecuteCommand(source, currentObjective, proposal.interpretation, readOnlyRequired = false)
+            }
+        }
+    }
 
     fun list(): List<ConversationListItem> = synchronized(authorityLock) {
         val events = store.events()
@@ -502,6 +660,8 @@ class ConversationConductorService(
                 ConversationOperationResult(ConversationOperationStatus.ALREADY_RECORDED, projection(command.conversationId))
             } else execute(command)
         }
+        val source = events.mapNotNull { it.message }.single { it.messageId == command.sourceMessageId }
+        rejectUnsuppliedRepositorySource(command.capabilityId, command.payloadJson, source)?.let { return it }
         synchronized(authorityLock) {
             val current = store.events()
             if (current.none { it.admission?.commandId == commandId }) {
@@ -588,9 +748,50 @@ class ConversationConductorService(
 
     fun projectWorkspaceActivity(workspace: WorkspaceStore): Int {
         val snapshot = workspace.snapshot(MESSAGE_READY)
+        val projects = (0 until workspace.entityCount).map(workspace::entityAt)
+            .filter { it.type == ENTITY_PROJECT }.associateBy { it.id }
         return synchronized(authorityLock) {
         var events = store.events()
         val commands = events.mapNotNull { it.command }.associateBy { it.commandId }
+        var projected = 0
+        val archivedProjectIds = snapshot.archivedProjects.mapTo(mutableSetOf()) { it.projectId }
+        latestObjectives(events).filter {
+            it.projectId in archivedProjectIds && it.state !in setOf(OBJECTIVE_COMPLETED, OBJECTIVE_CANCELLED, OBJECTIVE_SUPERSEDED)
+        }.forEach { objective ->
+            store.appendObjective(newConversationObjective(objective.copy(
+                revision = objective.revision + 1,
+                state = OBJECTIVE_CANCELLED,
+                actor = "ORCHARD_PROJECTION",
+                createdAt = now(),
+                previousHash = objective.hash,
+                hash = "",
+            )))
+            events = store.events()
+            projected++
+        }
+        events.mapNotNull { it.execution }
+            .filter { it.state == COMMAND_CORRELATED && it.downstreamType == "WORKSPACE_ENTITY" }
+            .forEach { execution ->
+                val command = commands[execution.commandId]?.takeIf { it.capabilityId == CAPABILITY_CREATE_WORK_ITEM }
+                    ?: return@forEach
+                val project = execution.downstreamId?.toIntOrNull()?.let(projects::get) ?: return@forEach
+                val reference = project.conversationCommand ?: return@forEach
+                if (reference.commandId != command.commandId || reference.commandHash != command.hash ||
+                    reference.capabilityId != command.capabilityId) return@forEach
+                val objective = latestObjectives(events, command.conversationId).singleOrNull {
+                    it.objectiveId == command.objectiveId && it.projectId == null && it.state in executableStates
+                } ?: return@forEach
+                store.appendObjective(newConversationObjective(objective.copy(
+                    revision = objective.revision + 1,
+                    projectId = project.id,
+                    actor = "ORCHARD_PROJECTION",
+                    createdAt = now(),
+                    previousHash = objective.hash,
+                    hash = "",
+                )))
+                events = store.events()
+                projected++
+            }
         val correlatedRuns = events.mapNotNull { it.execution }
             .filter { it.state == COMMAND_CORRELATED && it.downstreamType == "WORKFLOW_RUN" }
             .groupBy { it.commandId }
@@ -600,7 +801,6 @@ class ConversationConductorService(
                 val runId = execution.downstreamId?.toLongOrNull() ?: return@mapNotNull null
                 Triple(command, execution, runId)
             }
-        var projected = 0
         correlatedRuns.forEach { (command, _, runId) ->
             val run = snapshot.workflowRuns.singleOrNull { it.runId == runId } ?: return@forEach
             val authorityHash = conversationAuthorityHash(Json.encodeToString(run))
@@ -1010,7 +1210,15 @@ class ConversationConductorService(
             return ConversationOperationResult(ConversationOperationStatus.AMBIGUOUS_OBJECTIVE, projection(source.conversationId))
         }
         val payloadJson = interpretation.payloadJson?.takeIf(String::isNotBlank) ?: "{}"
-        capability.preflight(payloadJson, selectedObjective)?.let { existing ->
+        rejectUnsuppliedRepositorySource(capabilityId, payloadJson, source)?.let { return it }
+        val preflight = try {
+            capability.preflight(payloadJson, selectedObjective)
+        } catch (error: IllegalArgumentException) {
+            val diagnostic = "$capabilityId payload was rejected before admission: ${error.message.orEmpty()}"
+            appendAssistant(source.conversationId, source, selectedObjective?.objectiveId, diagnostic)
+            return ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(source.conversationId), diagnostic)
+        }
+        preflight?.let { existing ->
             appendAssistant(source.conversationId, source, selectedObjective?.objectiveId, existing.summary)
             appendActivity(
                 source.conversationId,
@@ -1047,6 +1255,38 @@ class ConversationConductorService(
         return execute(command)
     }
 
+    private fun rejectUnsuppliedRepositorySource(
+        capabilityId: String,
+        payloadJson: String,
+        source: ConversationMessage,
+    ): ConversationOperationResult? {
+        if (capabilityId != CAPABILITY_ONBOARD_REPOSITORY) return null
+        val payload = try {
+            Json.decodeFromString<OnboardRepositoryCapabilityPayload>(payloadJson)
+        } catch (error: SerializationException) {
+            val diagnostic = "Repository onboarding payload is invalid: ${error.message.orEmpty()}"
+            appendAssistant(source.conversationId, source, source.objectiveId, diagnostic)
+            return ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(source.conversationId), diagnostic)
+        }
+        val location = payload.location.trim()
+        val supplied = if (location.isBlank()) false else {
+            val exactSource = Regex(
+                """(?:^|[\s(<\[])${Regex.escape(location)}(?=${'$'}|\s|[)>\]]|[.,;](?=${'$'}|\s))|(["'`])${Regex.escape(location)}\1""",
+            )
+            synchronized(authorityLock) {
+                store.events().mapNotNull { it.message }.any { message ->
+                    message.conversationId == source.conversationId && message.messageId <= source.messageId &&
+                        message.role == MESSAGE_ROLE_USER && exactSource.containsMatchIn(message.content)
+                }
+            }
+        }
+        if (supplied) return null
+        val diagnostic = "Repository onboarding requires an exact existing source supplied by the user before this proposal. " +
+            "The proposed location was not supplied. For a new product from nothing, use project creation and GREENFIELD_LOCAL genesis instead."
+        appendAssistant(source.conversationId, source, source.objectiveId, diagnostic)
+        return ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(source.conversationId), diagnostic)
+    }
+
     private suspend fun execute(command: ConversationCommandProposal): ConversationOperationResult {
         val capability = capabilities.resolve(command.capabilityId)
             ?: return ConversationOperationResult(ConversationOperationStatus.REJECTED, projection(command.conversationId))
@@ -1060,6 +1300,11 @@ class ConversationConductorService(
             }
             if (command.mutation && current.none { it.admission?.commandId == command.commandId }) {
                 return@withLock ConversationOperationResult(ConversationOperationStatus.ADMISSION_REQUIRED, projection(command.conversationId))
+            }
+            val source = current.mapNotNull { it.message }.single { it.messageId == command.sourceMessageId }
+            rejectUnsuppliedRepositorySource(command.capabilityId, command.payloadJson, source)?.let { rejected ->
+                synchronized(authorityLock) { appendExecutionLocked(command, COMMAND_FAILED, diagnostic = rejected.diagnostic) }
+                return@withLock rejected.copy(projection = projection(command.conversationId))
             }
             val objective = synchronized(authorityLock) {
                 latestObjectives(store.events(), command.conversationId).singleOrNull { it.objectiveId == command.objectiveId }

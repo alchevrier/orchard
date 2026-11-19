@@ -504,8 +504,15 @@ class CodingWorkerTest {
         val directory = createTempDirectory("orchard-coding-worker-e2e-")
         val repository = initializedRepository()
         val gradle = repository.resolve("gradlew")
-        Files.writeString(gradle, "#!/bin/sh\nprintf 'verified %s\\n' \"$1\"\n")
+        Files.writeString(gradle, """
+            |#!/bin/sh
+            |grep -q 'fun answer() = 42' src/Main.kt || exit 1
+            |mkdir -p build/test-results/test
+            |printf '%s' '<testsuite tests="1"><testcase name="candidateSourceContract"/></testsuite>' > build/test-results/test/TEST-Candidate.xml
+            |printf 'verified %s\n' "${'$'}1"
+            |""".trimMargin())
         gradle.toFile().setExecutable(true)
+        repository.resolve(".gitignore").toFile().appendText("\nbuild/\n")
         Files.writeString(repository.resolve("settings.gradle.kts"), "rootProject.name = \"worker-test\"\n")
         Files.writeString(repository.resolve("src/Main.kt"), "// " + "context".repeat(4_000) + "\nfun answer() = 1\n")
         run(repository, "git", "add", ".")

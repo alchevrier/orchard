@@ -21,6 +21,18 @@ const val PROJECT_GREENFIELD_LOCAL = "GREENFIELD_LOCAL"
 const val PROJECT_EXISTING_LOCAL = "EXISTING_LOCAL"
 const val PROJECT_ORGANIZATION_GOVERNED = "ORGANIZATION_GOVERNED"
 
+enum class GreenfieldToolchain(val names: Set<String>) {
+    GRADLE(setOf("gradle", "gradle-kotlin", "kotlin", "java")),
+    CARGO(setOf("cargo", "rust")),
+    NODE(setOf("node", "npm", "typescript", "javascript"));
+
+    companion object {
+        val supportedNames: Set<String> = entries.flatMap { it.names }.toSet()
+        const val constraint = "Greenfield local delivery supports Gradle for Java/Kotlin, Cargo for Rust, and Node/npm for JavaScript/TypeScript. Architecture decisions and the blueprint must use these materializers; Maven and other toolchains are unavailable. Existing repositories are not restricted."
+        fun from(name: String): GreenfieldToolchain? = entries.firstOrNull { name.trim().lowercase() in it.names }
+    }
+}
+
 @Serializable
 data class ExperienceContract(
     val audience: String = "",

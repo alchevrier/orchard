@@ -1599,7 +1599,8 @@ class CompanyCircuitTest {
         val bindings = FileRepositoryBindingStore(state)
         val workspace = workspace(state, bindings)
         createProjectAndEpic(workspace)
-        admitGenesis(workspace)
+        val verifications = listOf("./gradlew test --no-daemon", "./gradlew integrationTest --no-daemon")
+        admitGenesis(workspace, verificationCommands = verifications)
         val company = CompanyControlService(workspace, listOf(StaffModel), FileCompanyControlStore(state), bindings)
         val circuit = CompanyCircuitService(workspace, company, projects)
 
@@ -1615,6 +1616,10 @@ class CompanyCircuitTest {
         assertEquals(2, snapshot.stagedPlans.size)
         assertEquals(1, snapshot.circuitDispatches.size)
         assertEquals(1, snapshot.workflowRuns.size)
+        assertEquals(verifications, snapshot.workDefinitions.single().definition.acceptanceCriteria.map { it.verification })
+        assertTrue(snapshot.designRevisions.all { revision ->
+            revision.design.content.requirements.single().criteria.map { it.verification } == verifications
+        })
         assertNotNull(company.projectView(1).ruleSet)
 
         val recoveredBindings = FileRepositoryBindingStore(state)
@@ -1721,7 +1726,11 @@ class CompanyCircuitTest {
         workspace.commitBatch()
     }
 
-    private fun admitGenesis(workspace: WorkspaceStore, repositoryPath: String = "src") {
+    private fun admitGenesis(
+        workspace: WorkspaceStore,
+        repositoryPath: String = "src",
+        verificationCommands: List<String> = listOf("./gradlew test --no-daemon"),
+    ) {
         assertEquals(
             ProjectGenesisStatus.RECORDED,
             workspace.advanceProjectGenesis(
@@ -1793,7 +1802,7 @@ class CompanyCircuitTest {
                         rootName = "first-local-product",
                         toolchain = "gradle",
                         modules = listOf("src", "test"),
-                        verificationCommands = listOf("./gradlew test --no-daemon"),
+                        verificationCommands = verificationCommands,
                         policyPackIds = listOf("orchard.default-toolchains"),
                     ),
                     baseRevision = genesis.revision,
@@ -1910,8 +1919,23 @@ class CompanyCircuitTest {
             }
             val content = when (codingCalls++) {
                 0 -> "plugins { base }\n"
-                1 -> "plugins { base }\n\ndescription = \"Initial governed candidate\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
-                else -> "plugins { base }\n\ndescription = \"Repaired after independent audit\"\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n"
+                1 -> "plugins { base }\n\ndescription = \"Initial governed candidate\"\n"
+                else -> "plugins { base }\n\ndescription = \"Repaired after independent audit\"\n"
+            } + if (codingCalls > 1) {
+                """
+                |
+                |tasks.register("test") {
+                |    doLast {
+                |        check(file("README.md").readText().startsWith("# "))
+                |        val report = file("build/test-results/test/TEST-Readme.xml")
+                |        report.parentFile.mkdirs()
+                |        report.writeText("<testsuite tests=\"1\"><testcase name=\"preservesAdmittedReadme\"/></testsuite>")
+                |    }
+                |}
+                |tasks.named("check") { dependsOn("test") }
+                |""".trimMargin()
+            } else {
+                ""
             }
             val envelope = Json.parseToJsonElement(
                 prompt.substringAfter("Authoritative coding execution envelope:\n")

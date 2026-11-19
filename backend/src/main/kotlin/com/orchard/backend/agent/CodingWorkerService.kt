@@ -1245,6 +1245,11 @@ class CodingWorkerService(
                                 }
                             }
                 }
+                observations.filter { it.exitCode == 0 }.forEach { observation ->
+                    jvmTestEvidenceDiagnostic(requirement.kind, observation)?.let { diagnostic ->
+                        return "Verification ${requirement.kind} did not establish test execution: $diagnostic"
+                    }
+                }
                 val failed = observations.firstOrNull { it.exitCode != 0 }
                 val externalModule = failed?.let { externalVerificationModule(it, candidate) }
                 if (failed != null && externalModule != null) {
@@ -1262,7 +1267,10 @@ class CodingWorkerService(
                     0,
                     sha256(observations.joinToString("\n") { it.outputHash }),
                     "Verified ${commands.size} admitted acceptance command${if (commands.size == 1) "" else "s"}: " +
-                        commands.joinToString("; ") { it.evidenceCommand },
+                        commands.joinToString("; ") { it.evidenceCommand } +
+                        observations.mapNotNull { it.testExecution }.takeIf { it.isNotEmpty() }?.let { tests ->
+                            ". JUnit evidence: ${tests.sumOf { it.executedTests }} executed, ${tests.sumOf { it.failedTests }} failed."
+                        }.orEmpty(),
                 )
             }
             val result = workspace.submitEvidence(

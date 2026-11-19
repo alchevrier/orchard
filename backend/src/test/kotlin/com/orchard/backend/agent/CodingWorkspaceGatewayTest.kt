@@ -3,6 +3,7 @@ package com.orchard.backend.agent
 import com.orchard.backend.workspace.compileScopePathEvidenceSelectors
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -14,6 +15,83 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class CodingWorkspaceGatewayTest {
+    @Test
+    fun `successful placeholder command is not test evidence but real reports are observed`() {
+        val repository = createTempDirectory("orchard-observed-tests-")
+        try {
+            git(repository, "init")
+            Files.writeString(repository.resolve(".gitignore"), "build/\n")
+            Files.writeString(repository.resolve("gradlew"), """
+                |#!/bin/sh
+                |if [ "${'$'}1" = test ]; then
+                |  mkdir -p build/test-results/test
+                |  printf '%s' '<testsuite tests="1" failures="0" errors="0"><testcase name="passes"/></testsuite>' > build/test-results/test/TEST-Example.xml
+                |fi
+                |echo BUILD SUCCESSFUL
+                |""".trimMargin())
+            assertTrue(repository.resolve("gradlew").toFile().setExecutable(true))
+            git(repository, "add", ".")
+            git(repository, "-c", "user.name=Orchard Test", "-c", "user.email=orchard@example.test", "commit", "-m", "Fixture")
+            val gateway = LocalCodingWorkspaceGateway()
+            val empty = gateway.executeVerification(repository.toString(), VerificationCommand("./gradlew", listOf("check")), "./gradlew check")
+            assertEquals(0, empty.exitCode)
+            assertTrue(requireNotNull(jvmTestEvidenceDiagnostic("TEST", empty)).contains("no tests"))
+            assertEquals(null, jvmTestEvidenceDiagnostic("BUILD", empty))
+            val observed = gateway.executeVerification(repository.toString(), VerificationCommand("./gradlew", listOf("test")), "./gradlew test")
+            assertEquals(1, observed.testExecution?.executedTests)
+            assertEquals(null, jvmTestEvidenceDiagnostic("TEST", observed))
+        } finally {
+            repository.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `unit reports cannot satisfy missing integration tasks or entirely skipped suites`() {
+        val root = createTempDirectory("orchard-test-report-scope-")
+        try {
+            val unit = root.resolve("app/build/test-results/test/TEST-Unit.xml")
+            Files.createDirectories(unit.parent)
+            Files.writeString(unit, """<testsuite tests="1"><testcase name="unit"/></testsuite>""")
+            val collector = JvmTestEvidenceCollector()
+            fun diagnostic(vararg tasks: String): String? {
+                val command = VerificationCommand("./gradlew", tasks.toList())
+                val evidence = collector.collect(root, command, 0, "candidate")
+                return jvmTestEvidenceDiagnostic("ACCEPTANCE", VerificationObservation(command.canonical(), 0, "hash", "", evidence))
+            }
+            assertEquals(null, diagnostic(":app:test"))
+            assertTrue(requireNotNull(diagnostic(":other:test")).contains("no tests"))
+            assertTrue(requireNotNull(diagnostic(":app:test", ":app:integrationTest")).contains("integrationTest"))
+            val integration = root.resolve("app/build/test-results/integrationTest/TEST-Integration.xml")
+            Files.createDirectories(integration.parent)
+            Files.writeString(integration, """<testsuite tests="1" skipped="1"><testcase name="skipped"><skipped/></testcase></testsuite>""")
+            assertTrue(requireNotNull(diagnostic(":app:integrationTest")).contains("no tests"))
+            Files.writeString(integration, """<testsuite tests="1"><testcase name="integration"/></testsuite>""")
+            assertEquals(null, diagnostic(":app:test", ":app:integrationTest"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `cached report trust is pinned to candidate revision and lost after restart`() {
+        val root = createTempDirectory("orchard-test-report-freshness-")
+        try {
+            val report = root.resolve("build/test-results/test/TEST-Example.xml")
+            Files.createDirectories(report.parent)
+            Files.writeString(report, """<testsuite tests="1"><testcase name="works"/></testsuite>""")
+            Files.setLastModifiedTime(report, FileTime.fromMillis(2_000))
+            val collector = JvmTestEvidenceCollector()
+            val command = VerificationCommand("./gradlew", listOf("test"))
+            assertEquals(false, collector.collect(root, command, 3_000, "candidate-a")?.verifiedForRevision)
+            assertEquals(true, collector.collect(root, command, 1_000, "candidate-a")?.verifiedForRevision)
+            assertEquals(true, collector.collect(root, command, 3_000, "candidate-a")?.verifiedForRevision)
+            assertEquals(false, collector.collect(root, command, 3_000, "candidate-b")?.verifiedForRevision)
+            assertEquals(false, JvmTestEvidenceCollector().collect(root, command, 3_000, "candidate-a")?.verifiedForRevision)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun `analysis collection uses complete Kotlin declarations before admission`() {
         val repository = createTempDirectory("orchard-analysis-declarations-")

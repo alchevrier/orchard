@@ -14,6 +14,7 @@ import com.orchard.backend.workspace.ENTITY_PROJECT
 import com.orchard.backend.workspace.ENTITY_STORY
 import com.orchard.backend.workspace.ENTITY_TASK
 import com.orchard.backend.workspace.GENESIS_READY
+import com.orchard.backend.workspace.GreenfieldToolchain
 import com.orchard.backend.workspace.MESSAGE_READY
 import com.orchard.backend.workspace.PROJECT_GREENFIELD_LOCAL
 import com.orchard.backend.workspace.RepositoryBlueprint
@@ -56,11 +57,14 @@ class CompanyCircuitService(
     private val localProjectsDirectory: Path,
 ) {
     @Synchronized
-    fun start(projectId: Int): CompanyCircuitResult {
+    fun start(projectId: Int, expectedGenesisHash: String? = null): CompanyCircuitResult {
         val snapshot = workspace.snapshot(MESSAGE_READY)
         val genesis = snapshot.projectGenesis.singleOrNull {
             it.projectId == projectId && it.phase == GENESIS_READY && it.revision?.admitted == true
         }?.revision ?: return failure(CompanyCircuitStatus.PROJECT_NOT_READY, projectId, "Admit product genesis first.")
+        if (expectedGenesisHash != null && genesis.hash != expectedGenesisHash) {
+            return failure(CompanyCircuitStatus.PROJECT_NOT_READY, projectId, "The admitted Genesis hash changed before delivery could start.")
+        }
         val epicId = genesis.firstEpicId ?: return failure(
             CompanyCircuitStatus.PROJECT_NOT_READY,
             projectId,
@@ -118,7 +122,7 @@ class CompanyCircuitService(
                 content = genesis.experience.productPromise,
             )
         ) ?: return authorityFailure(projectId, "The first implementation task could not be created.")
-        val verification = preferredVerification(genesis.blueprint, repository?.path)
+        val verifications = preferredVerifications(genesis.blueprint, repository?.path)
         val definition = workspace.snapshot(MESSAGE_READY).workDefinitions.singleOrNull { it.workItemId == task.id }
         if (definition == null) {
             val result = workspace.submitWorkDefinition(
@@ -131,7 +135,7 @@ class CompanyCircuitService(
                     scope = genesis.components.flatMap { it.repositoryPaths }.distinct().ifEmpty { listOf("src") },
                     nonGoals = genesis.experience.mustNotFeelLike.ifEmpty { listOf("Implementing work outside the first admitted journey") },
                     constraints = genesis.decisions.map { it.decision }.ifEmpty { listOf("Preserve the admitted product genesis") },
-                    acceptanceCriteria = listOf(AcceptanceCriterion(genesis.experience.productPromise, verification)),
+                    acceptanceCriteria = verifications.map { AcceptanceCriterion(genesis.experience.productPromise, it) },
                 ),
             )
             if (result.status != WorkDefinitionStatus.RECORDED) return authorityFailure(
@@ -139,7 +143,7 @@ class CompanyCircuitService(
                 "The first work definition was rejected with ${result.status}.",
             )
         }
-        val designStatus = ensureDesignHierarchy(projectId, epicId, story.id, task.id, genesis, verification)
+        val designStatus = ensureDesignHierarchy(projectId, epicId, story.id, task.id, genesis, verifications)
         if (designStatus != null) return authorityFailure(projectId, designStatus)
         val plans = workspace.snapshot(MESSAGE_READY).stagedPlans
         if (plans.none { it.plan.scopeId == epicId }) {
@@ -195,7 +199,7 @@ class CompanyCircuitService(
         storyId: Int,
         taskId: Int,
         genesis: com.orchard.backend.workspace.ProjectGenesisRevision,
-        verification: String,
+        verifications: List<String>,
     ): String? {
         val snapshot = workspace.snapshot(MESSAGE_READY)
         if (snapshot.projectGovernance.none { it.activation.projectId == projectId }) {
@@ -228,13 +232,13 @@ class CompanyCircuitService(
                         requirementId = level.requirementId,
                         statement = level.statement.ifBlank { genesis.productIntent },
                         parentRequirementIds = level.parentRequirementIds,
-                        criteria = listOf(
+                        criteria = verifications.map { verification ->
                             DesignCriterionSubmission(
                                 description = "The governed slice satisfies ${level.requirementId}.",
                                 verification = verification,
                                 gate = CRITERION_AUTOMATED,
                             )
-                        ),
+                        },
                     )
                 ),
             )
@@ -267,11 +271,12 @@ class CompanyCircuitService(
 
     private fun entities(): List<WorkspaceEntity> = List(workspace.entityCount, workspace::entityAt)
 
-    private fun preferredVerification(blueprint: RepositoryBlueprint?, repositoryPath: String?): String = blueprint
+    private fun preferredVerifications(blueprint: RepositoryBlueprint?, repositoryPath: String?): List<String> = blueprint
         ?.verificationCommands
         .orEmpty()
-        .firstOrNull { it.isNotBlank() }
-        ?: when (blueprint?.toolchain?.trim()?.lowercase()) {
+        .filter { it.isNotBlank() }
+        .distinct()
+        .ifEmpty { listOf(when (blueprint?.toolchain?.trim()?.lowercase()) {
             "gradle", "kotlin", "java" -> "./gradlew check --no-daemon"
             "maven" -> "./mvnw test"
             "cargo", "rust" -> "cargo test"
@@ -279,7 +284,7 @@ class CompanyCircuitService(
             "cmake" -> "ctest --test-dir build"
             "node", "npm", "typescript", "javascript" -> "npm test"
             else -> detectVerification(repositoryPath)
-        }
+        }) }
 
     private fun detectVerification(repositoryPath: String?): String {
         val root = repositoryPath?.let(Path::of)
@@ -294,7 +299,7 @@ class CompanyCircuitService(
     }
 
     private fun materialize(projectId: Int, blueprint: RepositoryBlueprint): Path {
-        val toolchain = blueprint.toolchain.trim().lowercase()
+        val toolchain = requireNotNull(GreenfieldToolchain.from(blueprint.toolchain)) { GreenfieldToolchain.constraint }
         val rootName = blueprint.rootName.trim().ifBlank { "project-$projectId" }
         require(rootName.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "The blueprint root name is invalid." }
         val root = localProjectsDirectory.resolve(rootName).toAbsolutePath().normalize()
@@ -309,10 +314,10 @@ class CompanyCircuitService(
         return root
     }
 
-    private fun writeScaffold(root: Path, toolchain: String, blueprint: RepositoryBlueprint) {
+    private fun writeScaffold(root: Path, toolchain: GreenfieldToolchain, blueprint: RepositoryBlueprint) {
         Files.writeString(root.resolve("README.md"), "# ${blueprint.rootName}\n\nMaterialized from admitted Orchard product genesis.\n")
         when (toolchain) {
-            "gradle", "kotlin", "java" -> {
+            GreenfieldToolchain.GRADLE -> {
                 Files.writeString(root.resolve(".gitignore"), ".gradle/\nbuild/\n**/build/\n")
                 Files.writeString(root.resolve("settings.gradle.kts"), "rootProject.name = \"${blueprint.rootName}\"\n")
                 Files.writeString(root.resolve("build.gradle.kts"), "plugins { base }\n\ntasks.register(\"test\") { dependsOn(\"check\") }\n")
@@ -326,18 +331,17 @@ class CompanyCircuitService(
                 val wrapper = launcher.parent.resolve("gradle/wrapper")
                 if (Files.isDirectory(wrapper)) copyTree(wrapper, root.resolve("gradle/wrapper"))
             }
-            "cargo", "rust" -> {
+            GreenfieldToolchain.CARGO -> {
                 Files.writeString(root.resolve(".gitignore"), "target/\n")
                 Files.writeString(root.resolve("Cargo.toml"), "[package]\nname = \"${blueprint.rootName.replace('-', '_')}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")
             }
-            "node", "npm", "typescript", "javascript" -> {
+            GreenfieldToolchain.NODE -> {
                 Files.writeString(root.resolve(".gitignore"), "node_modules/\ncoverage/\ndist/\n")
                 Files.writeString(
                     root.resolve("package.json"),
                     "{\"name\":\"${blueprint.rootName}\",\"version\":\"0.1.0\",\"scripts\":{\"build\":\"node --check index.js\",\"test\":\"node --test\"}}\n",
                 )
             }
-            else -> throw IllegalArgumentException("Greenfield materialization supports Gradle, Cargo, and Node blueprints.")
         }
         blueprint.modules.filter { it.isNotBlank() }.forEach { module ->
             val normalized = Path.of(module).normalize()

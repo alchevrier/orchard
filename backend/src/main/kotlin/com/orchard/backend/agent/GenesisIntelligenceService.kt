@@ -17,7 +17,10 @@ import com.orchard.backend.vector.ModelBoundaryTraceException
 import com.orchard.backend.vector.ModelBoundaryTraceStore
 import com.orchard.backend.vector.ModelOutputContract
 import com.orchard.backend.vector.GenesisProposalOutputDomain
+import com.orchard.backend.vector.GenesisOutputMode
 import com.orchard.backend.vector.estimateModelTokens
+import com.orchard.backend.vector.modelBindingFingerprint
+import com.orchard.backend.vector.PROVIDER_PROTOCOL_OLLAMA_NATIVE
 import com.orchard.backend.workspace.GENESIS_ADMISSION
 import com.orchard.backend.workspace.GENESIS_ARCHITECTURE
 import com.orchard.backend.workspace.GENESIS_BLUEPRINT
@@ -31,6 +34,8 @@ import com.orchard.backend.workspace.ProjectGenesisSubmission
 import com.orchard.backend.workspace.ProjectGenesisView
 import com.orchard.backend.workspace.RepositoryBlueprint
 import com.orchard.backend.workspace.WorkspaceStore
+import com.orchard.backend.workspace.GreenfieldToolchain
+import com.orchard.backend.workspace.PROJECT_GREENFIELD_LOCAL
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
@@ -61,7 +66,11 @@ enum class GenesisProposalStatus {
 }
 
 @Serializable
-data class GenesisProposalRequest(val prompt: String)
+data class GenesisProposalRequest(
+    val prompt: String,
+    val outputMode: GenesisOutputMode = GenesisOutputMode.NATIVE_SCHEMA_FINAL,
+    val recoverInvalidOutput: Boolean = false,
+)
 
 @Serializable
 data class GenesisProposal(
@@ -117,6 +126,8 @@ data class GenesisProposalResult(
     val status: GenesisProposalStatus,
     val proposal: GenesisProposal? = null,
     val diagnostic: String = genesisProposalDiagnostic(status),
+    val outputFailure: Boolean = false,
+    val recoveryExhausted: Boolean = false,
 )
 
 internal fun genesisProposalDiagnostic(status: GenesisProposalStatus): String = when (status) {
@@ -146,6 +157,8 @@ class GenesisIntelligenceService(
 ) {
     private val mutex = Mutex()
     private val strictJson = Json { encodeDefaults = true }
+
+    fun bindingFingerprint(): String = modelBindingFingerprint(modelProvider.bindingProfile())
 
     fun latestRepositoryAssessment(projectId: Int): RepositoryObjectiveAssessment? {
         val snapshot = workspace.snapshot(0)
@@ -184,16 +197,17 @@ class GenesisIntelligenceService(
         assessmentOnly: Boolean,
     ): GenesisProposalResult {
         val trace = modelBoundaryTraces?.newGenesisTrace(projectId)
-            ?: return generate(projectId, request, assessmentOnly)
+            ?: return generateWithRecovery(projectId, request, assessmentOnly)
         var completed: GenesisProposalResult? = null
         return try {
             withContext(trace) {
-                generate(projectId, request, assessmentOnly).also { result ->
+                generateWithRecovery(projectId, request, assessmentOnly).also { result ->
                     completed = result
                     trace.record("GENESIS_RESULT", json.encodeToString(mapOf(
                         "status" to result.status.name,
                         "diagnostic" to result.diagnostic,
                         "assessmentId" to result.proposal?.repositoryAssessment?.assessmentId?.toString().orEmpty(),
+                        "recoveryExhausted" to result.recoveryExhausted.toString(),
                     )))
                 }
             }
@@ -204,6 +218,33 @@ class GenesisIntelligenceService(
                 diagnostic = "${error.message}" + if (stored != null) " Assessment $stored was already recorded; no genesis authority was admitted." else "",
             )
         }
+    }
+
+    private suspend fun generateWithRecovery(
+        projectId: Int,
+        request: GenesisProposalRequest,
+        assessmentOnly: Boolean,
+    ): GenesisProposalResult {
+        val basis = workspace.snapshot(0).projectGenesis.singleOrNull { it.projectId == projectId }
+        val first = generate(projectId, request, assessmentOnly)
+        if (assessmentOnly || !request.recoverInvalidOutput || request.outputMode != GenesisOutputMode.NATIVE_SCHEMA_FINAL ||
+            !first.outputFailure) return first
+        if (modelProvider.bindingProfile().configuration["protocol"] != PROVIDER_PROTOCOL_OLLAMA_NATIVE) {
+            return first.copy(recoveryExhausted = true,
+                diagnostic = "No alternate Genesis decoder is available for this provider. ${first.diagnostic} No equivalent automatic retry is authorized.")
+        }
+        if (workspace.snapshot(0).projectGenesis.singleOrNull { it.projectId == projectId } != basis) {
+            return GenesisProposalResult(GenesisProposalStatus.INVALID_OUTPUT,
+                diagnostic = "Genesis authority changed before output recovery; no further inference was attempted.")
+        }
+        currentCoroutineContext()[ModelBoundaryTrace]?.record("GENESIS_RECOVERY", first.diagnostic,
+            mapOf("attempt" to "2", "outputMode" to GenesisOutputMode.JSON_OBJECT_FINAL.name))
+        val recovered = generate(projectId,
+            request.copy(outputMode = GenesisOutputMode.JSON_OBJECT_FINAL, recoverInvalidOutput = false), assessmentOnly)
+        return if (recovered.status == GenesisProposalStatus.INVALID_OUTPUT) recovered.copy(
+            recoveryExhausted = true,
+            diagnostic = "Bounded output recovery exhausted: ${recovered.diagnostic} No further automatic retry is authorized on this basis.",
+        ) else recovered
     }
 
     private suspend fun generate(
@@ -279,6 +320,7 @@ class GenesisIntelligenceService(
             "repositoryRevision" to repositoryObservation?.revision.orEmpty(),
             "assessmentOnly" to assessmentOnly.toString(),
             "contract" to ModelOutputContract.GENESIS_PROPOSAL.versionedId,
+            "outputMode" to request.outputMode.name,
         ))
         val admission = resourceController.acquire(modelProvider.resourceDemand(profile), ModelWorkPriority.INTERACTIVE)
         val lease = admission.lease ?: return GenesisProposalResult(
@@ -298,6 +340,10 @@ class GenesisIntelligenceService(
                         phase = genesis.phase,
                         assessmentOnly = assessmentOnly,
                         evidenceHashes = suppliedRepositoryContext?.files.orEmpty().associate { it.path to it.contentHash },
+                        allowedGreenfieldToolchains = GreenfieldToolchain.supportedNames.takeIf {
+                            genesis.revision?.classification == PROJECT_GREENFIELD_LOCAL
+                        }.orEmpty(),
+                        outputMode = request.outputMode,
                     ),
                 )
             }
@@ -316,13 +362,14 @@ class GenesisIntelligenceService(
             generation.promptTokens > profile.inputBudgetTokens ||
             generation.completionTokens > profile.outputBudgetTokens
         ) return GenesisProposalResult(GenesisProposalStatus.INVALID_OUTPUT)
-        val decoded = decodeProposalOutput(generation.text, trace)
+        val decoded = decodeProposalOutput(generation.text, trace, prompt)
         trace?.record("GENESIS_DECODE", decoded.output?.let { json.encodeToString(it) } ?: decoded.diagnostic,
             mapOf("status" to if (decoded.output == null) "FAIL" else "PASS"))
         val output = decoded.output
             ?: return GenesisProposalResult(
                 GenesisProposalStatus.INVALID_OUTPUT,
                 diagnostic = decoded.diagnostic,
+                outputFailure = true,
             )
         val pinned = output.submission.copy(
             baseRevision = genesis.revision?.revision ?: 0,
@@ -333,6 +380,11 @@ class GenesisIntelligenceService(
                 GenesisProposalStatus.INVALID_OUTPUT,
                 diagnostic = "The Architect returned a submission missing required fields or containing fields outside the ${genesis.phase.lowercase()} phase. Revise the description and retry.",
             )
+        }
+        if (genesis.revision?.classification == PROJECT_GREENFIELD_LOCAL &&
+            pinned.blueprint?.let { GreenfieldToolchain.from(it.toolchain) == null } == true) {
+            return GenesisProposalResult(GenesisProposalStatus.INVALID_OUTPUT,
+                diagnostic = "Unsupported greenfield blueprint toolchain. ${GreenfieldToolchain.constraint}")
         }
         val evidencePaths = suppliedRepositoryContext?.files.orEmpty().map { it.path }
         val uncorrelatedPaths = if (genesis.phase == GENESIS_ARCHITECTURE && evidencePaths.isNotEmpty()) {
@@ -435,6 +487,12 @@ class GenesisIntelligenceService(
                     requiredOutputExample(genesis, availableFirstEpics.firstOrNull()?.epicId, files.firstOrNull())
                 },
                 availableFirstEpics = availableFirstEpics,
+                supportedGreenfieldToolchains = GreenfieldToolchain.supportedNames.takeIf {
+                    genesis.revision?.classification == PROJECT_GREENFIELD_LOCAL
+                }.orEmpty(),
+                greenfieldToolchainConstraint = GreenfieldToolchain.constraint.takeIf {
+                    genesis.revision?.classification == PROJECT_GREENFIELD_LOCAL
+                },
                 repositoryContext = repositoryObservation?.let {
                     GenesisRepositoryContext(it.revision, files, omittedFileCount)
                 },
@@ -509,13 +567,16 @@ class GenesisIntelligenceService(
         return null
     }
 
-    private fun decodeProposalOutput(text: String, trace: ModelBoundaryTrace?): ProposalDecodeResult {
+    private fun decodeProposalOutput(text: String, trace: ModelBoundaryTrace?, suppliedText: String): ProposalDecodeResult {
         val candidate = JSON_CODE_FENCE.matchEntire(text)?.groupValues?.get(1) ?: text
         trace?.record("GENESIS_NORMALIZED_CANDIDATE", candidate)
         val element = runCatching { strictJson.parseToJsonElement(candidate) }.getOrNull()
             ?: return ProposalDecodeResult(
                 diagnostic = "The Architect returned malformed JSON. Revise the description and retry.",
             )
+        generatedTextDiagnostic(element, suppliedText)?.let {
+            return ProposalDecodeResult(diagnostic = it)
+        }
         val canonical = canonicalizeProposalRoot(element)
         trace?.record("GENESIS_CANONICAL_CANDIDATE", canonical.toString())
         val output = runCatching {
@@ -530,6 +591,26 @@ class GenesisIntelligenceService(
                 ""
             },
         )
+    }
+
+    private fun generatedTextDiagnostic(element: JsonElement, suppliedText: String): String? = when (element) {
+        is JsonObject -> element.entries.firstNotNullOfOrNull { (key, value) ->
+            textDiagnostic(key, suppliedText) ?: generatedTextDiagnostic(value, suppliedText)
+        }
+        is JsonArray -> element.firstNotNullOfOrNull { generatedTextDiagnostic(it, suppliedText) }
+        is JsonPrimitive -> if (element.isString) textDiagnostic(element.content, suppliedText) else null
+    }
+
+    private fun textDiagnostic(text: String, suppliedText: String): String? = when {
+        MODEL_PROTOCOL_TOKEN.findAll(text).any { it.value !in suppliedText } ->
+            "The Architect generated unexpected model-protocol text; the candidate was rejected."
+        INVISIBLE_RUN.findAll(text).any { it.value !in suppliedText } ->
+            "The Architect generated repeated invisible characters; the candidate was rejected."
+        text.codePoints().anyMatch { code ->
+            (Character.getType(code) == Character.PRIVATE_USE.toInt() || Character.isISOControl(code) && code !in setOf(9, 10, 13)) &&
+                String(Character.toChars(code)) !in suppliedText
+        } -> "The Architect generated unsupported non-text characters; the candidate was rejected."
+        else -> null
     }
 
     private fun canonicalizeProposalRoot(element: JsonElement): JsonElement {
@@ -620,7 +701,9 @@ class GenesisIntelligenceService(
 
     private fun objectFingerprint(value: JsonObject): String = value.entries
         .sortedBy { it.key }
-        .joinToString(prefix = "{", postfix = "}") { (key, element) -> "$key:${jsonType(element)}" }
+        .joinToString(prefix = "{", postfix = "}") { (key, element) ->
+            "${key.takeIf { it.matches(Regex("[A-Za-z][A-Za-z0-9_]{0,63}")) } ?: "<invalid-field>"}:${jsonType(element)}"
+        }
 
     private fun jsonType(element: JsonElement): String = when (element) {
         is JsonObject -> "object"
@@ -690,7 +773,7 @@ class GenesisIntelligenceService(
             GENESIS_BLUEPRINT -> ProjectGenesisSubmission(
                 blueprint = RepositoryBlueprint(
                     rootName = "project",
-                    toolchain = "Detected project toolchain",
+                    toolchain = if (genesis.revision?.classification == PROJECT_GREENFIELD_LOCAL) "gradle" else "Detected project toolchain",
                     modules = listOf("app"),
                     verificationCommands = listOf("project test command"),
                 ),
@@ -754,6 +837,7 @@ class GenesisIntelligenceService(
         const val MAX_SCHEMA_DIAGNOSTIC_CHARS = 2_048
         val JSON_CODE_FENCE = Regex("""\s*```(?:json)?\s*(\{.*})\s*```\s*""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
         val MODEL_PROTOCOL_TOKEN = Regex("""<\|(?:start|end|channel|message)\|>""")
+        val INVISIBLE_RUN = Regex("[\u200B\u200C\u200D\u2060\uFEFF]{3,}")
         val PROPOSAL_FIELDS = setOf("submission", "observations", "unresolvedQuestions", "repositoryClaims")
         val SUBMISSION_FIELDS = setOf(
             "classification",
@@ -807,6 +891,8 @@ private data class GenesisProposalEnvelope(
     val requiredSubmissionShape: String,
     val requiredOutputExample: JsonElement,
     val availableFirstEpics: List<GenesisEpicOption>,
+    val supportedGreenfieldToolchains: Set<String> = emptySet(),
+    val greenfieldToolchainConstraint: String? = null,
     val repositoryContext: GenesisRepositoryContext? = null,
     val priorRepositoryAssessment: PriorRepositoryAssessment? = null,
 )

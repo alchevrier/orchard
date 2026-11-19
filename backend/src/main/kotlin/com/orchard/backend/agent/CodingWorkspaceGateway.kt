@@ -84,6 +84,7 @@ data class VerificationObservation(
     val exitCode: Int,
     val outputHash: String,
     val summary: String,
+    val testExecution: TestExecutionEvidence? = null,
 )
 
 interface CodingWorkspaceGateway {
@@ -134,6 +135,7 @@ class LocalCodingWorkspaceGateway(
     private val policyCatalog: ToolchainPolicyCatalog = FileToolchainPolicyCatalog(),
 ) : CodingWorkspaceGateway {
     private val contextLocks = ConcurrentHashMap<String, Any>()
+    private val testEvidence = JvmTestEvidenceCollector()
 
     override fun collectContext(workspacePath: String, query: String): CodingRepositoryContext =
         collectContext(workspacePath, query, MAX_CONTEXT_FILES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FILE_BYTES)
@@ -735,12 +737,16 @@ class LocalCodingWorkspaceGateway(
                 "Repository-local verification executable is invalid"
             }
         }
+        val revision = currentRevision(workspacePath)
+        val startedAtMillis = System.currentTimeMillis()
         val result = run(root, listOf(command.executable) + command.arguments, VERIFICATION_TIMEOUT_SECONDS)
+        val tests = testEvidence.collect(root, command, startedAtMillis, revision)
         return VerificationObservation(
             command = evidenceCommand,
             exitCode = result.exitCode,
-            outputHash = sha256(result.output),
+            outputHash = sha256(result.output + tests?.let { "\nJUnit reports: ${it.reportsHash}" }.orEmpty()),
             summary = result.output.ifBlank { "Command exited with ${result.exitCode}." }.take(MAX_OBSERVATION_SUMMARY),
+            testExecution = tests,
         )
     }
 

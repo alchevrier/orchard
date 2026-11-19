@@ -14,23 +14,31 @@ The server installs `ContentNegotiation` with `kotlinx.serialization`. Decoding 
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/workspace` | Complete workspace projection |
+| `GET` | `/api/workspace` | Active workspace projection; use `?includeArchived=true` for preserved historical project hierarchies, bindings, and runs |
+| `POST` | `/api/projects/{projectId}/archive` | Archive a project using `{"actor":"HUMAN"}` after all its workflows complete or are cancelled; preserve source files and history |
 | `GET` | `/api/company/state` | Durable company control state |
 | `GET` | `/api/company` | Company workspace projection |
 | `POST` | `/api/projects/{projectId}/company/start` | Start governed company execution |
 | `POST` | `/api/company/runs/{runId}/promotion` | Promote an accepted candidate locally |
+
+Archival returns `201` (`ARCHIVED`), `200` for an already archived project, `404` for an unknown project, `409` for unfinished workflows, and `503` if durable storage fails. It appends checksummed authority to `project-archives.jsonl`; it never deletes source checkouts or rewrites previous records. Archived projects and their descendants, bindings, Genesis, and workflow runs leave the default workspace projection. Workflow starts and repository binding fail closed, and associated nonterminal conversational objectives project to cancelled. `ARCHIVE_PROJECT` exposes the same operation through exact Conductor command admission.
 
 ## Genesis, Design, and Repository
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/projects/{projectId}/genesis` | Record a genesis revision |
+| `POST` | `/api/projects/{projectId}/genesis/first-outcome` | Confirm current product intent and create the first outcome epic in a revision-checked admission state, without inventing architecture or blueprint authority |
 | `POST` | `/api/projects/{projectId}/genesis/admission` | Admit an exact genesis revision |
 | `POST` | `/api/projects/{projectId}/genesis/proposal` | Generate a candidate genesis phase proposal using the phase-bound `genesis-proposal-v2` output contract; repository evidence requires an allowed path/hash pair and observation |
 | `POST` | `/api/projects/{projectId}/design-governance` | Activate project design governance |
 | `POST` | `/api/designs` | Record a design requirement revision |
 | `POST` | `/api/designs/{designId}/admission` | Admit or reject a design |
 | `PUT` | `/api/projects/{projectId}/repository` | Bind a canonical local repository |
+
+Genesis proposal requests accept `{"prompt":"<original requirement>","outputMode":"NATIVE_SCHEMA_FINAL"}`. The default `NATIVE_SCHEMA_FINAL` completes the GPT-OSS assistant header in the final channel before schema-constrained generation; it does not change other model tasks or explicitly configured raw input. `JSON_OBJECT_FINAL` keeps that framing without the native schema. Legacy `NATIVE_SCHEMA` and `JSON_OBJECT` remain available for controlled comparisons. Modes share the phase prompt, resource admission, tracing, and software validation. None admits Genesis or creates a delivery command.
+
+`recoverInvalidOutput` defaults to `false` for direct proposal calls. Setup enables it: a malformed or visibly corrupted candidate permits one recovery using `JSON_OBJECT_FINAL`, with a fresh resource lease and unchanged requirement. Genesis does not also perform the adapter's plain retry. Exhaustion returns `retryable: false`; setup records the block in existing conversation authority, including across restart, until the objective, Genesis, or model-binding basis changes. The quality gate detects unexpected model-protocol markers, repeated invisible characters, and unsupported non-text characters. It preserves ordinary Unicode and source-supplied literals; it does not certify semantic correctness.
 
 ## Definition, Planning, and Workflow
 
@@ -73,6 +81,20 @@ When the source task belongs to a started staged plan, coordinate recovery creat
 
 The pilot status does not invoke a model and does not create authority. It composes existing Orchard projections so a human or AI operator can determine what is happening and what may happen next without reading implementation code. Provider activity is correlated to repository analysis by prompt hash and excludes prompt and response content.
 
+### Greenfield Setup FSM
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/conversation-objectives/{objectiveId}/setup` | Read the next setup step, blocker, or pending exact command |
+| `POST` | `/api/conversation-objectives/{objectiveId}/continue` | With `{"actor":"HUMAN"}`, propose the software-selected next transition |
+| `POST` | `/api/conversation-commands/{commandId}/admission` | Admit the exact proposal using `{"actor":"HUMAN","commandHash":"<hash>"}` |
+
+For an admitted objective bound to an active greenfield project, software selects classification, Experience, creation of a missing first epic, Architecture, Blueprint, Genesis admission, and company startup. Only Experience, Architecture, and Blueprint invoke the phase-specific Architect, using the original requirement. Generic conversation interpretation does not choose these transitions. Unbound projects and existing-repository onboarding remain outside this coordinator.
+
+Continuation normally returns `409` with `ADMISSION_REQUIRED`; it does not admit its own command. Repeating continuation while admission is pending returns the existing proposal without another model call. Setup state is derived from existing persisted objectives, Genesis, commands, and workflow runs after restart. Paused objectives, incomplete dependencies, and failed commands on the current setup basis block progression; historical failures on superseded bases do not. Stale first-outcome or Genesis hashes cannot authorize new mutations.
+
+The pilot advertises the exact path and `requestBody` for continuation, admission, or rejection of a pending proposal. `MODEL_GENESIS_PROPOSAL` actions require provider preflight immediately before execution. Greenfield phase prompts declare the available Gradle, Cargo, and Node materializers; Blueprint schemas and domain admission reject unsupported toolchains. Existing-repository Maven support is unchanged. `HANDED_OFF` requires a delivery workflow run, not merely a company view or repository scaffold, and does not mean the application or its tests are complete. This API does not change the generic free-text conversation path or add a frontend continuation control.
+
 ## Repository Analysis and Coding
 
 | Method | Path | Purpose |
@@ -101,6 +123,8 @@ The pilot status does not invoke a model and does not create authority. It compo
 Deterministic analysis rejection and model failure append a blocked attempt tied to the run and pinned repository revision. Blocked runs are excluded from automatic reconciliation until the retry endpoint appends explicit successor authority; each unsuccessful successor blocks again without deleting prior attempts.
 
 Repository-analysis requests compile an analysis-stage Attention projection from the admitted definition before graph selection. Scope coordinates, selector relationships, and related graph paths govern source selection. The final model envelope includes candidate/evidence-only correlations and explicit deferred or unresolved evidence after compaction. Source-change nominations must trace to supplied candidate evidence, and citations cannot claim evidence absent from the final projection. Analysis grants reasoning permissions, not coding mutation authority; deterministic plan admission remains authoritative.
+
+Company startup preserves every admitted blueprint verification command in the initial work definition and design criteria. Coding and independent acceptance require observed JUnit reports for JVM `TEST`/`REGRESSION_TEST` evidence and explicit test-task acceptance commands. Exit zero alone, empty or entirely skipped suites, missing requested Gradle test tasks, and stale reports do not establish passing test evidence. Report hashes contribute to the observation hash. An unchanged report is reusable only when this gateway already observed it for the same candidate revision; after restart, rerun the admitted tests to establish freshness. These checks establish test execution, not complete behavioral path coverage, and do not change non-JVM verification or build-only evidence.
 
 Coding source collection follows active Attention correlations, read-only citations, and accepted prerequisite owners. Its retrieval query uses active frame behavior and evidence rather than deferred-plan instructions. Final context path binding is checked before inference, while work-package ownership and the existing frame path/action guard continue to bound mutations.
 

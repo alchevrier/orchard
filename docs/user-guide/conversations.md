@@ -40,14 +40,35 @@ Read-only status and repository inspection commands do not require admission. Ev
 The repository baseline may infer current intent from revision-pinned evidence, but it cannot invent the future outcome a person wants. Inbox therefore offers the smallest action supported by current Genesis authority:
 
 - Before `ADMISSION`, confirm the current product intent and record the first desired outcome directly. Orchard creates one epic and one revision-checked `ADMISSION` state; it does not require architecture fields to be invented first.
+- The complete confirmed product intent is preserved. The short outcome-title limit does not apply to product intent.
 - At `ADMISSION`, explicitly admit that confirmed intent and first outcome. The project then becomes `READY` while architecture, blueprint, implementation, and verification remain governed work.
 - During later incompatible phases, use the baseline's canonical thread to inspect the exact authority and propose the applicable transition.
 
 Architecture, repository shape, sizing, and verification remain governed design and delivery decisions. The Inbox does not fabricate those authorities to accelerate onboarding.
 
+## Greenfield Projects
+
+For a product starting from nothing, describe the desired behavior and verification instead of supplying a repository. The Conductor proposes an unbound objective, then project creation after objective admission. Invalid typed creation payloads are rejected before admission. Orchard links the existing objective to the new project only from a successfully correlated creation command with a matching workspace command reference, preserving the admitted outcome, constraints, and original request identity. Phase-checked `GREENFIELD_LOCAL` Genesis follows. The existing company circuit materializes the repository only from an admitted blueprint. These are governed proposals, not evidence that an application or its tests have already been delivered.
+
+The bounded conversation context includes correlated downstream hashes separately from command hashes. Subsequent Genesis proposals must use the recorded Genesis revision hash as `baseHash`, never an invented value or the command's admission hash.
+
+For a selected project objective, each turn also reads the current Genesis authority and up to 32 recent epic identities from that project. This fresh state takes precedence over historical inspection results. Malformed, stale, and phase-invalid Genesis submissions are rejected before a command can be admitted, using the same domain validation as execution. An Architecture phase without a first outcome must create an epic before proposing architecture.
+
+The operator setup API now follows a deterministic FSM once an admitted objective is bound to the new project. Software selects each legal transition; the Architect supplies only Experience, Architecture, and Blueprint content from the original requirement. The pilot advertises the continuation or exact admission action and its request body. Each command still needs explicit admission, and repeating continuation while a proposal awaits admission reuses that proposal, including after restart. Paused or dependent objectives and current-basis command failures stop progression rather than triggering model retries.
+
+This coordinator is available through the setup API and pilot, not a new conversation button. Its final state means setup handed off to an actual delivery workflow. A scaffold, admitted blueprint, or started workflow is not evidence that the requested application and tests have been delivered.
+
+For visibly corrupted Architect output, Orchard rejects the candidate and permits one recovery using an alternate decoder with the same original requirement. If recovery fails, the setup block survives restart and repeated continuation does not invoke another model on the unchanged basis. Correcting the model binding or changing admitted objective/Genesis authority permits reconsideration. These checks catch known generation artifacts, not every possible semantic error.
+
+## Archive a Project
+
+Ask Orchard to archive an exact project ID and review its `ARCHIVE_PROJECT` command before admission. First cancel or finish every unfinished workflow; archiving does not interrupt work already in progress. Archived projects disappear from the active workspace and cannot start delivery or bind repositories. Their nonterminal conversational objectives close, while source checkouts, accepted records, and historical evidence remain intact. Historical workspace inspection is available with `GET /api/workspace?includeArchived=true`. Restoring an archived project is not yet supported.
+
 ## Repository Onboarding
 
 Ask the Conductor to onboard either an absolute local folder or an HTTP(S) Git URL. Orchard materializes one exact `ONBOARD_REPOSITORY` proposal showing the source, project title, and whether it will create a project or bind an existing project. Review and admit that exact command before filesystem or workspace authority changes.
+
+The source must appear exactly in a user message in the same conversation before the proposal. Assistant-generated examples and invented locations cannot authorize an import. Orchard checks this before proposal preflight, admission, and dispatch, including pending commands restored after restart. Quote local paths containing spaces.
 
 After the admitted command correlates successfully, Orchard opens that project's Inbox immediately. The multi-step setup card is not an onboarding gate. Orchard content-addresses every Git-tracked artifact and imports repository structure plus current Orchard authority into one revision-pinned intelligence graph. A pending repository baseline appears while Orchard interprets that graph asynchronously. Orchard publishes progressive immutable revisions for repository structure and architecture, recorded decisions and ADRs, tests and verification, and delivery and runtime evidence. Each revision is cumulative, so useful findings appear before the full baseline completes.
 

@@ -1,6 +1,7 @@
 package com.orchard.backend.workspace
 
 import com.orchard.backend.api.DocumentIntent
+import java.io.IOException
 import java.nio.file.FileSystems
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.EncodeDefault
@@ -57,9 +58,10 @@ data class WorkspaceSnapshot(
     val designRevisions: List<DesignRevisionView> = emptyList(),
     val projectGovernance: List<ProjectGovernanceView> = emptyList(),
     val projectGenesis: List<ProjectGenesisView> = emptyList(),
+    val archivedProjects: List<ProjectArchive> = emptyList(),
 )
 
-enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
+enum class RepositoryBindStatus { BOUND, PROJECT_NOT_FOUND, PROJECT_ARCHIVED, INVALID_REPOSITORY, STORAGE_UNAVAILABLE }
 
 data class RepositoryBindResult(val status: RepositoryBindStatus, val snapshot: WorkspaceSnapshot)
 
@@ -93,6 +95,7 @@ enum class WorkflowStartStatus {
     STAGED_PLAN_BLOCKED,
     DESIGN_NOT_ADMITTED,
     PROJECT_GENESIS_NOT_ADMITTED,
+    PROJECT_ARCHIVED,
     STORAGE_UNAVAILABLE,
 }
 
@@ -146,6 +149,7 @@ class WorkspaceStore(
     private val projectGenesisStore: ProjectGenesisStore = TransientProjectGenesisStore(),
     private val enforceProjectGenesis: Boolean = false,
     private var repositoryCoordinateAdmission: RepositoryCoordinateAdmission? = null,
+    private val projectArchiveStore: ProjectArchiveStore = TransientProjectArchiveStore(),
 ) {
     private val entities = mutableListOf<WorkspaceEntity>()
     private var nextEntityId = 1
@@ -187,6 +191,7 @@ class WorkspaceStore(
     private val circuitDispatches = mutableListOf<CircuitDispatch>()
     private val designGovernanceEvents = mutableListOf<DesignGovernanceEvent>()
     private val projectGenesisEvents = mutableListOf<ProjectGenesisEvent>()
+    private val projectArchives = linkedMapOf<Int, ProjectArchive>()
     private var nextRunId = 1L
     private var nextEventId = 1L
     private var nextDefinitionId = 1L
@@ -213,6 +218,14 @@ class WorkspaceStore(
         restoreProjectGenesis(projectGenesisStore.loadEvents())
         restoreRuns(workflowMemory.loadRuns())
         restoreEvents(workflowMemory.loadEvents())
+        projectArchiveStore.load().forEachIndexed { index, archive ->
+            require(archive.archiveId == index + 1L && committedEntity(archive.projectId, ENTITY_PROJECT) != null &&
+                archive.actor.isNotBlank() && archive.projectId !in projectArchives) { "Invalid persisted project archive" }
+            require(workflowRuns.none { it.context.projectId == archive.projectId && runState(it.runId) !in TERMINAL_RUN_STATES }) {
+                "Archived project ${archive.projectId} has unfinished workflow runs"
+            }
+            projectArchives[archive.projectId] = archive
+        }
         validateRunReplacements()
         restoreStagedPlans(stagedPlanStore.load())
         restoreCircuitProposals(circuitProposalStore.load())
@@ -274,12 +287,42 @@ class WorkspaceStore(
             lastWorkflowResult = WORKFLOW_PARENT_REQUIRED
             return false
         }
-        if (entity(projectId, ENTITY_PROJECT) == null) {
+        if (entity(projectId, ENTITY_PROJECT) == null || isProjectArchived(projectId)) {
             lastWorkflowResult = WORKFLOW_PARENT_NOT_FOUND
             return false
         }
         lastWorkflowResult = WORKFLOW_ACCEPTED
         return appendEntity(ENTITY_EPIC, projectId, "General", "", DEFAULT_DELIVERY_WORKFLOW_ID)
+    }
+
+    @Synchronized
+    fun isProjectArchived(projectId: Int): Boolean = projectId in projectArchives
+
+    @Synchronized
+    fun archiveProject(
+        projectId: Int,
+        actor: String = "HUMAN",
+        conversationCommand: ConversationCommandReference? = null,
+    ): ProjectArchiveResult {
+        if (actor.isBlank()) return ProjectArchiveResult(ProjectArchiveStatus.INVALID_ACTOR, diagnostic = "Archive actor is required.")
+        if (committedEntity(projectId, ENTITY_PROJECT) == null) {
+            return ProjectArchiveResult(ProjectArchiveStatus.PROJECT_NOT_FOUND, diagnostic = "The project does not exist.")
+        }
+        projectArchives[projectId]?.let { return ProjectArchiveResult(ProjectArchiveStatus.ALREADY_ARCHIVED, it) }
+        if (workflowRuns.any { it.context.projectId == projectId && runState(it.runId) !in TERMINAL_RUN_STATES }) {
+            return ProjectArchiveResult(
+                ProjectArchiveStatus.ACTIVE_WORK,
+                diagnostic = "Cancel or complete every unfinished project workflow before archiving.",
+            )
+        }
+        val archive = ProjectArchive(projectArchives.size + 1L, projectId, actor.trim(), conversationCommand = conversationCommand)
+        try {
+            projectArchiveStore.append(archive)
+        } catch (error: IOException) {
+            return ProjectArchiveResult(ProjectArchiveStatus.STORAGE_UNAVAILABLE, diagnostic = error.message.orEmpty())
+        }
+        projectArchives[projectId] = archive
+        return ProjectArchiveResult(ProjectArchiveStatus.ARCHIVED, archive)
     }
 
     @Synchronized
@@ -367,7 +410,7 @@ class WorkspaceStore(
         if (normalizedTitle.isEmpty() || normalizedTitle.length > MAX_PLAN_TEXT) {
             return result(ProjectGenesisFirstOutcomeStatus.INVALID_TITLE)
         }
-        if (entity(projectId, ENTITY_PROJECT) == null) {
+        if (isProjectArchived(projectId) || entity(projectId, ENTITY_PROJECT) == null) {
             return result(ProjectGenesisFirstOutcomeStatus.PROJECT_NOT_FOUND)
         }
         val genesis = currentProjectGenesis(projectId)
@@ -378,7 +421,7 @@ class WorkspaceStore(
             return result(ProjectGenesisFirstOutcomeStatus.STALE_REVISION)
         }
         val productIntent = confirmedProductIntent?.trim()?.takeIf(String::isNotEmpty) ?: genesis?.productIntent.orEmpty()
-        if (productIntent.isEmpty() || productIntent.length > MAX_PLAN_TEXT) {
+        if (productIntent.isEmpty()) {
             return result(ProjectGenesisFirstOutcomeStatus.INVALID_INTENT)
         }
         val classification = genesis?.classification ?: if (repositoryBindings.views(setOf(projectId))[projectId] != null) {
@@ -450,6 +493,10 @@ class WorkspaceStore(
 
     @Synchronized
     fun bindRepository(projectId: Int, path: String): RepositoryBindResult {
+        if (isProjectArchived(projectId)) {
+            repositoryMessage = "Archived projects cannot bind repositories."
+            return RepositoryBindResult(RepositoryBindStatus.PROJECT_ARCHIVED, snapshot(MESSAGE_REPOSITORY_BINDING))
+        }
         if (entity(projectId, ENTITY_PROJECT) == null) {
             repositoryMessage = "The selected project does not exist."
             return RepositoryBindResult(RepositoryBindStatus.PROJECT_NOT_FOUND, snapshot(MESSAGE_REPOSITORY_BINDING))
@@ -470,16 +517,18 @@ class WorkspaceStore(
     }
 
     @Synchronized
-    fun advanceProjectGenesis(
+    fun validateProjectGenesisSubmission(projectId: Int, submission: ProjectGenesisSubmission): ProjectGenesisStatus? =
+        projectGenesisCandidate(projectId, submission).first.takeUnless { it == ProjectGenesisStatus.RECORDED }
+
+    private fun projectGenesisCandidate(
         projectId: Int,
         submission: ProjectGenesisSubmission,
-        conversationCommand: ConversationCommandReference? = null,
-    ): ProjectGenesisResult {
-        val project = committedEntity(projectId, ENTITY_PROJECT)
-            ?: return projectGenesisFailure(ProjectGenesisStatus.PROJECT_NOT_FOUND)
+    ): Pair<ProjectGenesisStatus, ProjectGenesisRevision?> {
+        val project = committedEntity(projectId, ENTITY_PROJECT)?.takeUnless { isProjectArchived(projectId) }
+            ?: return ProjectGenesisStatus.PROJECT_NOT_FOUND to null
         val current = currentProjectGenesis(project.id)
         if (submission.baseRevision != (current?.revision ?: 0) || submission.baseHash != current?.hash) {
-            return projectGenesisFailure(ProjectGenesisStatus.STALE_REVISION)
+            return ProjectGenesisStatus.STALE_REVISION to null
         }
         val candidate = when (current?.phase ?: GENESIS_CLASSIFICATION) {
             GENESIS_CLASSIFICATION -> classifyProjectGenesis(project.id, submission)
@@ -487,7 +536,18 @@ class WorkspaceStore(
             GENESIS_ARCHITECTURE -> defineProjectArchitecture(project.id, requireNotNull(current), submission)
             GENESIS_BLUEPRINT -> defineRepositoryBlueprint(project.id, requireNotNull(current), submission)
             else -> null
-        } ?: return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        } ?: return ProjectGenesisStatus.INVALID_TRANSITION to null
+        return ProjectGenesisStatus.RECORDED to candidate
+    }
+
+    @Synchronized
+    fun advanceProjectGenesis(
+        projectId: Int,
+        submission: ProjectGenesisSubmission,
+        conversationCommand: ConversationCommandReference? = null,
+    ): ProjectGenesisResult {
+        val (status, candidate) = projectGenesisCandidate(projectId, submission)
+        if (candidate == null) return projectGenesisFailure(status)
         val next = candidate.copy(conversationCommand = conversationCommand, hash = "").let { unsigned ->
             unsigned.copy(hash = projectGenesisHash(unsigned))
         }
@@ -501,11 +561,15 @@ class WorkspaceStore(
     fun admitProjectGenesis(
         projectId: Int,
         conversationCommand: ConversationCommandReference? = null,
+        expectedHash: String? = null,
     ): ProjectGenesisResult {
-        val project = committedEntity(projectId, ENTITY_PROJECT)
+        val project = committedEntity(projectId, ENTITY_PROJECT)?.takeUnless { isProjectArchived(projectId) }
             ?: return projectGenesisFailure(ProjectGenesisStatus.PROJECT_NOT_FOUND)
         val current = currentProjectGenesis(project.id)
             ?: return projectGenesisFailure(ProjectGenesisStatus.INVALID_TRANSITION)
+        if (expectedHash != null && current.hash != expectedHash) {
+            return projectGenesisFailure(ProjectGenesisStatus.STALE_REVISION)
+        }
         if (current.classification == PROJECT_ORGANIZATION_GOVERNED) {
             return projectGenesisFailure(ProjectGenesisStatus.ORGANIZATION_POLICY_REQUIRED)
         }
@@ -1245,6 +1309,9 @@ class WorkspaceStore(
         workItemId: Int,
         conversationCommand: ConversationCommandReference? = null,
     ): WorkflowStartResult {
+        if (committedEntity(workItemId)?.let(::projectFor)?.id in projectArchives) {
+            return workflowFailure(WorkflowStartStatus.PROJECT_ARCHIVED, "Archived projects cannot start delivery.")
+        }
         reconcileCircuitDispatches()
         val latest = circuitDispatches.lastOrNull { dispatch ->
             dispatch.workItemId == workItemId &&
@@ -1309,6 +1376,9 @@ class WorkspaceStore(
             WorkflowStartStatus.WORK_ITEM_NOT_FOUND,
             "The selected work item does not exist.",
         )
+        if (workItem.let(::projectFor)?.id in projectArchives) {
+            return workflowFailure(WorkflowStartStatus.PROJECT_ARCHIVED, "Archived projects cannot start delivery.")
+        }
         if (workItem.type != ENTITY_TASK && workItem.type != ENTITY_BUG) return workflowFailure(
             WorkflowStartStatus.UNSUPPORTED_ENTITY,
             "Only tasks and bugs can start an execution workflow.",
@@ -1786,10 +1856,10 @@ class WorkspaceStore(
         return WorkflowMutationResult(WorkflowMutationStatus.RECORDED, snapshot(MESSAGE_WORKFLOW_EVENT))
     }
 
-    fun snapshot(messageCode: Int): WorkspaceSnapshot {
+    fun snapshot(messageCode: Int, includeArchived: Boolean = false): WorkspaceSnapshot {
         val projectIds = synchronized(this) {
             entities.take(committedEntityCount)
-                .filter { it.type == ENTITY_PROJECT }
+                .filter { it.type == ENTITY_PROJECT && (includeArchived || it.id !in projectArchives) }
                 .mapTo(linkedSetOf()) { it.id }
         }
         val repositoryViews = repositoryBindings.views(projectIds)
@@ -1797,14 +1867,17 @@ class WorkspaceStore(
             projectGenesisViews(projectIds, repositoryViews)
         }
         return synchronized(this) {
+        val activeProjectIds = if (includeArchived) projectIds else projectIds - projectArchives.keys
+        val visibleEntities = entities.take(committedEntityCount).filter { includeArchived || projectFor(it)?.id !in projectArchives }
+        val focus = visibleEntities.lastOrNull { it.id == committedLastCreatedId } ?: visibleEntities.lastOrNull()
         val resources = linkedMapOf<String, WorkspaceResource>()
         resources["focus"] = WorkspaceResource(
             "FOCUS",
-            committedLastCreatedId.toString(),
-            committedLastCreatedType.toString(),
+            (focus?.id ?: 0).toString(),
+            (focus?.type ?: 0).toString(),
         )
         resources["message"] = WorkspaceResource("MESSAGE", message(messageCode), "none")
-        entities.take(committedEntityCount).forEach { entity ->
+        visibleEntities.forEach { entity ->
             val run = workflowRuns.lastOrNull { it.context.workItemId == entity.id }
             val projectedStatus = when (run?.let { runState(it.runId) }) {
                 RUN_STATE_DONE -> 3
@@ -1823,8 +1896,8 @@ class WorkspaceStore(
             .sortedBy { it.workItemId }
         return WorkspaceSnapshot(
             resources,
-            repositoryViews,
-            workflowRuns.map(::runView),
+            repositoryViews.filterKeys { it in activeProjectIds },
+            workflowRuns.filter { includeArchived || it.context.projectId !in projectArchives }.map(::runView),
             latestDefinitions,
             definitionProposalViews(),
             modelProfiles(),
@@ -1834,7 +1907,8 @@ class WorkspaceStore(
             circuitDispatchViews(),
             designRevisionViews(),
             projectGovernanceViews(),
-            genesisViews,
+            genesisViews.filter { it.projectId in activeProjectIds },
+            projectArchives.values.toList(),
         )
         }
     }
@@ -2549,7 +2623,8 @@ class WorkspaceStore(
         val blueprint = submission.blueprint?.normalized() ?: return null
         if (
             blueprint.rootName.isEmpty() || blueprint.toolchain.isEmpty() || blueprint.modules.isEmpty() ||
-            blueprint.verificationCommands.isEmpty()
+            blueprint.verificationCommands.isEmpty() ||
+            current.classification == PROJECT_GREENFIELD_LOCAL && GreenfieldToolchain.from(blueprint.toolchain) == null
         ) return null
         return newProjectGenesisRevision(
             projectId = projectId,
@@ -3700,6 +3775,7 @@ class WorkspaceStore(
     private fun advanceCircuitDispatches() {
         circuitDispatches.filter { dispatch ->
             dispatch.state == CIRCUIT_DISPATCH_PENDING && dispatchRun(dispatch) == null &&
+                committedEntity(dispatch.workItemId)?.let(::projectFor)?.id !in projectArchives &&
                 activeStagedPlan(dispatch.scopeId)?.let { it.planId == dispatch.planId && it.hash == dispatch.planHash } == true
         }.sortedWith(compareBy<CircuitDispatch> { it.priority }.thenBy { it.dispatchId }).forEach { dispatch ->
             startWorkflow(dispatch.workItemId, dispatch.dispatchId)
@@ -3788,7 +3864,7 @@ class WorkspaceStore(
             return 0
         }
         val parent = entity(requestedParentId, requiredParentType)
-        if (parent == null) {
+        if (parent == null || projectFor(parent)?.id in projectArchives) {
             lastWorkflowResult = WORKFLOW_PARENT_NOT_FOUND
             return 0
         }
